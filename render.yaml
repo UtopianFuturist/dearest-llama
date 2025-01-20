@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bluesky-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: BLUESKY_IDENTIFIER
+        sync: false
+      - key: BLUESKY_APP_PASSWORD
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FAL_API_KEY
+        sync: false

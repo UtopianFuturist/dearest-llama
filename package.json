@@ -1,0 +1,27 @@
+{
+  "name": "bluesky",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@atproto/api": "latest",
+    "@fal-ai/client": "^1.2.2",
+    "@fontsource/roboto": "^5.1.1",
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.19.2",
+    "sharp": "^0.33.5"
+  }
+}
