@@ -2,7 +2,7 @@ import { AtpAgent, RichText } from '@atproto/api';
 import { Anthropic } from '@anthropic-ai/sdk';
 import config from './config.js';
 import fetch from 'node-fetch';
-import { fal } from "@fal-ai/client";
+import * as fal from '@fal-ai/client';
 import sharp from 'sharp';
 import path from 'path';
 import express from 'express';
@@ -34,6 +34,14 @@ const agent = new AtpAgent({
 const anthropic = new Anthropic({
   apiKey: config.ANTHROPIC_API_KEY,
 });
+
+fal.config({
+  credentials: config.FAL_API_KEY,
+  requestTimeout: 20000  // 20 seconds
+});
+
+// Add this debug log
+console.log('FAL client initialized with credentials configured');
 
 // Initialize Replied Posts List
 const repliedPosts = new Set();

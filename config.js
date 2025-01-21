@@ -37,6 +37,11 @@ export const config = {
   MAX_REPLIED_POSTS: parseInt(process.env.MAX_REPLIED_POSTS || '1000'),
 };
 
+// Add this before validateConfig(config)
+console.log('FAL API Key length:', config.FAL_API_KEY?.length);
+console.log('FAL API Key first 10 chars:', config.FAL_API_KEY?.substring(0, 10));
+console.log('FAL API Key contains spaces:', config.FAL_API_KEY?.includes(' '));
+
 // Validate configuration
 validateConfig(config);
 
