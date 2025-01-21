@@ -35,14 +35,6 @@ const anthropic = new Anthropic({
   apiKey: config.ANTHROPIC_API_KEY,
 });
 
-fal.config({
-  credentials: config.FAL_API_KEY,
-  requestTimeout: 20000  // 20 seconds
-});
-
-// Add this debug log
-console.log('FAL client initialized with credentials configured');
-
 // Initialize Replied Posts List
 const repliedPosts = new Set();
 
