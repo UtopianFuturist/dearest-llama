@@ -2,7 +2,7 @@ import { AtpAgent, RichText } from '@atproto/api';
 import { Anthropic } from '@anthropic-ai/sdk';
 import config from './config.js';
 import fetch from 'node-fetch';
-import * as fal from '@fal-ai/client';
+import { fal } from "@fal-ai/client";
 import sharp from 'sharp';
 import path from 'path';
 import express from 'express';
@@ -393,20 +393,14 @@ async function postReply(post, response) {
           height: 512
         }
       },
-      logs: true,
-      onQueueUpdate: (update) => {
-        if (update.status === "IN_PROGRESS") {
-          update.logs.map((log) => log.message).forEach(console.log);
-        }
-      }
+      logs: true
     });
-
-    if (!falResult.data?.images?.[0]?.url) {
-      throw new Error('No image URL received from Fal');
-    }
+    
+    console.log('FAL.ai response:', falResult);
+    const imageUrl = falResult.data.images[0].url;
 
     // Fetch the image directly
-    const imageResponse = await fetch(falResult.data.images[0].url);
+    const imageResponse = await fetch(imageUrl);
     const imageBuffer = await imageResponse.buffer();
 
     // Process image just to ensure correct format and size
