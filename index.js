@@ -35,6 +35,13 @@ const anthropic = new Anthropic({
   apiKey: config.ANTHROPIC_API_KEY,
 });
 
+// Initialize fal client explicitly
+fal.config({
+  credentials: process.env.FAL_API_KEY,
+});
+
+console.log('FAL client configured with credentials');
+
 // Initialize Replied Posts List
 const repliedPosts = new Set();
 
