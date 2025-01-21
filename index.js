@@ -416,7 +416,7 @@ async function postReply(post, response) {
     
     // Generate image prompt using Claude Haiku
     const promptMessage = await anthropic.messages.create({
-      model: 'claude-3-haiku-latest',
+      model: 'claude-3-5-haiku-20241022',
       max_tokens: 150,
       messages: [{
         role: 'user',
