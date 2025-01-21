@@ -51,8 +51,8 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 // Add this after the imports
 const fontPath = path.join(process.cwd(), 'node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff');
 
-// Add to config list of allowed users
-const ALLOWED_USERS = ['timtest.bsky.social', 'timfduffy.com', '@norvid-studies.bsky.social', 'vgel.me'];
+// Replace static ALLOWED_USERS with a Set for better performance
+let ALLOWED_USERS = new Set();
 
 // Add rate limiting counters at the top level
 const rateLimits = {
@@ -102,6 +102,42 @@ async function authenticate() {
   }
 }
 
+// Add function to get followers
+async function updateAllowedUsers() {
+  try {
+    const BOT_HANDLE = 'dearestclaude.bsky.social';
+    let cursor;
+    const followers = new Set();
+
+    do {
+      const response = await agent.getFollowers({
+        actor: BOT_HANDLE,
+        limit: 100,
+        cursor: cursor
+      });
+
+      response.data.followers.forEach(follower => {
+        followers.add(follower.handle);
+      });
+
+      cursor = response.data.cursor;
+    } while (cursor); // Continue until we've fetched all followers
+
+    ALLOWED_USERS = followers;
+    console.log(`Updated allowed users list. Now following ${followers.size} accounts`);
+  } catch (error) {
+    console.error('Error updating allowed users:', error);
+  }
+}
+
+// Add function to periodically update followers
+async function startFollowerUpdates() {
+  while (true) {
+    await updateAllowedUsers();
+    await sleep(3600000); // Wait 1 hour
+  }
+}
+
 // Function to get recent posts from the monitored handle
 async function getRecentPosts() {
   try {
@@ -119,10 +155,8 @@ async function getRecentPosts() {
         // Check if it's a mention
         if (notif.reason !== 'mention') return false;
         
-        // Check if it's from an allowed user
-        const isFromAllowedUser = ALLOWED_USERS.includes(notif.author.handle);
-        
-        return isFromAllowedUser;
+        // Check if it's from an allowed user using Set.has()
+        return ALLOWED_USERS.has(notif.author.handle);
       })
       .map(notif => ({
         post: {
@@ -256,7 +290,10 @@ async function getReplyContext(post) {
           text: thread.thread.post.record.text,
           images: images.map(img => ({
             alt: img.alt,
-            url: img.fullsize || img.thumb
+            url: thread.thread.post.embed?.images?.[0]?.fullsize || 
+                 thread.thread.post.embed?.images?.[0]?.thumb ||
+                 img.image?.fullsize || 
+                 img.image?.thumb
           }))
         });
 
@@ -355,26 +392,6 @@ async function generateClaudeResponse(post, context) {
     console.error('Error generating Claude response:', error);
     return null;
   }
-}
-
-// Add new helper function to generate SVG
-async function createResponseSVG(imageBase64, text) {
-  // Calculate text size and positioning
-  const imageSize = 512; // Assuming standard size from Fal
-  const padding = 20;
-  const fontSize = Math.min(24, 1000 / text.length); // Adjust text size based on length
-  
-  return `
-    <svg width="${imageSize}" height="${imageSize * 2}" xmlns="http://www.w3.org/2000/svg">
-      <image x="0" y="0" width="${imageSize}" height="${imageSize}" 
-        href="data:image/png;base64,${imageBase64}"/>
-      <foreignObject x="${padding}" y="${imageSize}" width="${imageSize - 2*padding}" height="${imageSize}">
-        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: Arial; font-size: ${fontSize}px; text-align: center;">
-          ${text}
-        </div>
-      </foreignObject>
-    </svg>
-  `;
 }
 
 // Add this helper function
@@ -554,70 +571,71 @@ async function monitor() {
   const MAX_RETRIES = 5;
   const BACKOFF_DELAY = 60000; // 1 minute
 
-  while (true) {
-    try {
-      await authenticate();
-      console.log('Starting monitoring...');
+  try {
+    await authenticate();
+    await updateAllowedUsers(); // Initial follower fetch
+    startFollowerUpdates(); // Start periodic updates
+    
+    console.log('Starting monitoring...');
 
-      let lastCheckedPost = null;
+    let lastCheckedPost = null;
 
-      while (true) {
-        try {
-          const posts = await getRecentPosts();
+    while (true) {
+      try {
+        const posts = await getRecentPosts();
+        
+        if (!posts.length) {
+          console.log('No posts found');
+          await sleep(config.CHECK_INTERVAL);
+          continue;
+        }
+
+        const latestPost = posts[0];
+        
+        if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
+          console.log('Already processed this post, skipping...');
+          await sleep(config.CHECK_INTERVAL);
+          continue;
+        }
+        
+        lastCheckedPost = latestPost.uri;
+
+        if (latestPost.post?.record?.text?.includes(config.BLUESKY_IDENTIFIER)) {
+          const alreadyReplied = await hasAlreadyReplied(latestPost.post);
           
-          if (!posts.length) {
-            console.log('No posts found');
-            await sleep(config.CHECK_INTERVAL);
-            continue;
-          }
-
-          const latestPost = posts[0];
-          
-          if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
-            console.log('Already processed this post, skipping...');
-            await sleep(config.CHECK_INTERVAL);
-            continue;
-          }
-          
-          lastCheckedPost = latestPost.uri;
-
-          if (latestPost.post?.record?.text?.includes(config.BLUESKY_IDENTIFIER)) {
-            const alreadyReplied = await hasAlreadyReplied(latestPost.post);
+          if (!alreadyReplied) {
+            console.log('Generating and posting response...');
+            const context = await getReplyContext(latestPost.post);
+            const response = await generateClaudeResponse(latestPost.post, context);
             
-            if (!alreadyReplied) {
-              console.log('Generating and posting response...');
-              const context = await getReplyContext(latestPost.post);
-              const response = await generateClaudeResponse(latestPost.post, context);
-              
-              if (response) {
-                await postReply(latestPost.post, response);
-                // Add rate limiting delay after posting
-                await sleep(2000);
-              }
+            if (response) {
+              await postReply(latestPost.post, response);
+              // Add rate limiting delay after posting
+              await sleep(2000);
             }
           }
-
-          consecutiveErrors = 0; // Reset error counter on success
-          await sleep(config.CHECK_INTERVAL);
-
-        } catch (error) {
-          console.error('Error in monitoring loop:', error);
-          consecutiveErrors++;
-          
-          if (consecutiveErrors >= MAX_RETRIES) {
-            console.error(`Maximum retries (${MAX_RETRIES}) reached, restarting monitor...`);
-            break;
-          }
-          
-          const delay = BACKOFF_DELAY * Math.pow(2, consecutiveErrors - 1);
-          console.log(`Retrying in ${delay/1000} seconds...`);
-          await sleep(delay);
         }
+
+        consecutiveErrors = 0; // Reset error counter on success
+        await sleep(config.CHECK_INTERVAL);
+
+      } catch (error) {
+        console.error('Error in monitoring loop:', error);
+        consecutiveErrors++;
+        
+        if (consecutiveErrors >= MAX_RETRIES) {
+          console.error(`Maximum retries (${MAX_RETRIES}) reached, restarting monitor...`);
+          break;
+        }
+        
+        const delay = BACKOFF_DELAY * Math.pow(2, consecutiveErrors - 1);
+        console.log(`Retrying in ${delay/1000} seconds...`);
+        await sleep(delay);
       }
-    } catch (error) {
-      console.error('Fatal error in monitor:', error);
-      await sleep(BACKOFF_DELAY);
     }
+  } catch (error) {
+    console.error('Fatal error in monitor:', error);
+    await sleep(BACKOFF_DELAY);
   }
 }
 
