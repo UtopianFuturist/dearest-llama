@@ -52,7 +52,41 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const fontPath = path.join(process.cwd(), 'node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff');
 
 // Add to config list of allowed users
-const ALLOWED_USERS = ['timtest.bsky.social', 'timfduffy.com'];
+const ALLOWED_USERS = ['timtest.bsky.social', 'timfduffy.com', '@norvid-studies.bsky.social', 'vgel.me'];
+
+// Add rate limiting counters at the top level
+const rateLimits = {
+  hourlyRequests: 0,
+  dailyRequests: 0,
+  lastHourReset: Date.now(),
+  lastDayReset: Date.now()
+};
+
+// Add rate limiting check function
+function checkRateLimits() {
+  const now = Date.now();
+  
+  // Reset hourly counter if an hour has passed
+  if (now - rateLimits.lastHourReset > 3600000) {
+    rateLimits.hourlyRequests = 0;
+    rateLimits.lastHourReset = now;
+  }
+  
+  // Reset daily counter if a day has passed
+  if (now - rateLimits.lastDayReset > 86400000) {
+    rateLimits.dailyRequests = 0;
+    rateLimits.lastDayReset = now;
+  }
+  
+  rateLimits.hourlyRequests++;
+  rateLimits.dailyRequests++;
+  
+  // Check if limits exceeded
+  if (rateLimits.hourlyRequests > 100 || rateLimits.dailyRequests > 1000) {
+    console.error('Rate limit exceeded. Shutting down bot.');
+    process.exit(1);
+  }
+}
 
 // Function to authenticate with Bluesky
 async function authenticate() {
@@ -378,9 +412,11 @@ function truncateResponse(text, maxLength = 300) {
 // Modify the postReply function
 async function postReply(post, response) {
   try {
+    checkRateLimits(); // Add rate limit check
+    
     // Generate image prompt using Claude Haiku
     const promptMessage = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
+      model: 'claude-3-haiku-latest',
       max_tokens: 150,
       messages: [{
         role: 'user',
@@ -470,6 +506,8 @@ async function postReply(post, response) {
     if (error.body) {
       console.error('Error details:', JSON.stringify(error.body, null, 2));
     }
+    // Add post to replied list even on failure to prevent retries
+    repliedPosts.add(post.uri);
   }
 }
 
