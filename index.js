@@ -134,7 +134,7 @@ async function updateAllowedUsers() {
 async function startFollowerUpdates() {
   while (true) {
     await updateAllowedUsers();
-    await sleep(3600000); // Wait 1 hour
+    await sleep(300000); // Wait 5 min
   }
 }
 
@@ -437,7 +437,7 @@ async function postReply(post, response) {
       max_tokens: 150,
       messages: [{
         role: 'user',
-        content: `Create a prompt for an image model based on the following question and answer. The prompt should be related to the text, but should also find a way to incorporate cats or some other cute anmials.\n\nQ: ${post.record.text}\nA: ${response}`
+        content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.\n\nQ: ${post.record.text}\nA: ${response}`
       }]
     });
 
