@@ -1,10 +1,9 @@
-import { AtpAgent, RichText } from '@atproto/api';
+import { AtpAgent } from '@atproto/api';
 import { Anthropic } from '@anthropic-ai/sdk';
 import config from './config.js';
 import fetch from 'node-fetch';
 import { fal } from "@fal-ai/client";
 import sharp from 'sharp';
-import path from 'path';
 import express from 'express';
 
 // Add express to your package.json dependencies
@@ -45,48 +44,77 @@ console.log('FAL client configured with credentials');
 // Initialize Replied Posts List
 const repliedPosts = new Set();
 
-// Add rate limiting helper
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+// ===== Utility Functions =====
+const utils = {
+  sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+  
+  async imageUrlToBase64(imageUrl) {
+    try {
+      const response = await fetch(imageUrl);
+      return (await response.buffer()).toString('base64');
+    } catch (error) {
+      console.error('Error converting image to base64:', error);
+      return null;
+    }
+  },
 
-// Add this after the imports
-const fontPath = path.join(process.cwd(), 'node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff');
+  truncateResponse(text, maxLength = 300) {
+    if (text.length <= maxLength) return text;
+    
+    const searchEnd = Math.min(maxLength, text.length);
+    const searchStart = Math.max(0, searchEnd - 50);
+    const segment = text.substring(searchStart, searchEnd);
+    
+    const lastSentenceEnd = Math.max(
+      segment.lastIndexOf('.'),
+      segment.lastIndexOf('?'),
+      segment.lastIndexOf('!')
+    );
+    
+    if (lastSentenceEnd !== -1) {
+      return text.substring(0, searchStart + lastSentenceEnd + 1).trim();
+    }
+    
+    const lastSpace = text.lastIndexOf(' ', maxLength - 3);
+    return lastSpace !== -1 
+      ? text.substring(0, lastSpace) + '...'
+      : text.substring(0, maxLength - 3) + '...';
+  }
+};
+
+// ===== Rate Limiting =====
+const RateLimit = {
+  limits: {
+    hourlyRequests: 0,
+    dailyRequests: 0,
+    lastHourReset: Date.now(),
+    lastDayReset: Date.now()
+  },
+
+  check() {
+    const now = Date.now();
+    
+    if (now - this.limits.lastHourReset > 3600000) {
+      this.limits.hourlyRequests = 0;
+      this.limits.lastHourReset = now;
+    }
+    
+    if (now - this.limits.lastDayReset > 86400000) {
+      this.limits.dailyRequests = 0;
+      this.limits.lastDayReset = now;
+    }
+    
+    this.limits.hourlyRequests++;
+    this.limits.dailyRequests++;
+    
+    if (this.limits.hourlyRequests > 100 || this.limits.dailyRequests > 1000) {
+      throw new Error('Rate limit exceeded');
+    }
+  }
+};
 
 // Replace static ALLOWED_USERS with a Set for better performance
 let ALLOWED_USERS = new Set();
-
-// Add rate limiting counters at the top level
-const rateLimits = {
-  hourlyRequests: 0,
-  dailyRequests: 0,
-  lastHourReset: Date.now(),
-  lastDayReset: Date.now()
-};
-
-// Add rate limiting check function
-function checkRateLimits() {
-  const now = Date.now();
-  
-  // Reset hourly counter if an hour has passed
-  if (now - rateLimits.lastHourReset > 3600000) {
-    rateLimits.hourlyRequests = 0;
-    rateLimits.lastHourReset = now;
-  }
-  
-  // Reset daily counter if a day has passed
-  if (now - rateLimits.lastDayReset > 86400000) {
-    rateLimits.dailyRequests = 0;
-    rateLimits.lastDayReset = now;
-  }
-  
-  rateLimits.hourlyRequests++;
-  rateLimits.dailyRequests++;
-  
-  // Check if limits exceeded
-  if (rateLimits.hourlyRequests > 100 || rateLimits.dailyRequests > 1000) {
-    console.error('Rate limit exceeded. Shutting down bot.');
-    process.exit(1);
-  }
-}
 
 // Function to authenticate with Bluesky
 async function authenticate() {
@@ -102,42 +130,6 @@ async function authenticate() {
   }
 }
 
-// Add function to get followers
-async function updateAllowedUsers() {
-  try {
-    const BOT_HANDLE = 'dearestclaude.bsky.social';
-    let cursor;
-    const followers = new Set();
-
-    do {
-      const response = await agent.getFollowers({
-        actor: BOT_HANDLE,
-        limit: 100,
-        cursor: cursor
-      });
-
-      response.data.followers.forEach(follower => {
-        followers.add(follower.handle);
-      });
-
-      cursor = response.data.cursor;
-    } while (cursor); // Continue until we've fetched all followers
-
-    ALLOWED_USERS = followers;
-    console.log(`Updated allowed users list. Now following ${followers.size} accounts`);
-  } catch (error) {
-    console.error('Error updating allowed users:', error);
-  }
-}
-
-// Add function to periodically update followers
-async function startFollowerUpdates() {
-  while (true) {
-    await updateAllowedUsers();
-    await sleep(300000); // Wait 5 min
-  }
-}
-
 // Function to get recent posts from the monitored handle
 async function getRecentPosts() {
   try {
@@ -149,14 +141,14 @@ async function getRecentPosts() {
       throw new Error('No notifications returned');
     }
     
-    // Filter for mention notifications from allowed users
+    // Filter for mention notifications, excluding self-mentions
     const relevantPosts = notifications.notifications
       .filter(notif => {
         // Check if it's a mention
         if (notif.reason !== 'mention') return false;
         
-        // Check if it's from an allowed user using Set.has()
-        return ALLOWED_USERS.has(notif.author.handle);
+        // Prevent self-replies
+        return notif.author.handle !== config.BLUESKY_IDENTIFIER;
       })
       .map(notif => ({
         post: {
@@ -178,48 +170,24 @@ async function getRecentPosts() {
 // Function to get the context of a reply
 async function getReplyContext(post) {
   try {
-    // Debug post structure
-    console.log('\n=== POST STRUCTURE DEBUG ===');
+    const conversation = [];
     
-    function debugObject(obj, prefix = '') {
-      if (!obj || typeof obj !== 'object') return;
-      
-      console.log(`${prefix}Keys at ${prefix || 'root'}: ${Object.keys(obj)}`);
-      console.log(`${prefix}Types at ${prefix || 'root'}:`, Object.entries(obj).reduce((acc, [key, value]) => {
-        acc[key] = typeof value;
-        if (value && typeof value === 'object') acc[key] += ` (${Array.isArray(value) ? 'array' : 'object'})`;
-        return acc;
-      }, {}));
-      
-      // Recursively debug nested objects
-      Object.entries(obj).forEach(([key, value]) => {
-        if (value && typeof value === 'object') {
-          console.log(`\n${prefix}Diving into ${key}:`);
-          debugObject(value, `${prefix}  `);
-        }
-      });
-    }
-    
-    debugObject(post);
-    
-    console.log('\nFull post object:', JSON.stringify(post, null, 2));
-    console.log('=== END DEBUG ===\n');
+    // Helper function to extract images
+    const extractImages = (record) => {
+      const images = record?.embed?.images || 
+                    record?.embed?.media?.images || 
+                    [];
+      return images.map(img => ({
+        alt: img.alt,
+        url: img.fullsize || img.thumb
+      }));
+    };
 
-    let conversation = [];
-    
-    // First, handle the initial post's images
-    const initialImages = post.record?.embed?.images || 
-                         post.record?.embed?.media?.images || 
-                         [];
-    
     // Add the main post
     conversation.push({
       author: post.author.handle,
       text: post.record.text,
-      images: initialImages.map(img => ({
-        alt: img.alt,
-        url: img.fullsize || img.thumb
-      }))
+      images: extractImages(post.record)
     });
 
     if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed) {
@@ -309,18 +277,7 @@ async function getReplyContext(post) {
     return conversation;
   } catch (error) {
     console.error('Error fetching reply context:', error);
-    return null;
-  }
-}
-
-async function imageUrlToBase64(imageUrl) {
-  try {
-    const response = await fetch(imageUrl);
-    const arrayBuffer = await response.buffer();
-    return arrayBuffer.toString('base64');
-  } catch (error) {
-    console.error('Error converting image to base64:', error);
-    return null;
+    return [];
   }
 }
 
@@ -349,7 +306,7 @@ async function generateClaudeResponse(post, context) {
           console.log(`Processing ${msg.images.length} images for message`);
           for (const image of msg.images) {
             console.log(`Converting image to base64: ${image.url}`);
-            const base64Image = await imageUrlToBase64(image.url);
+            const base64Image = await utils.imageUrlToBase64(image.url);
             if (base64Image) {
               content.push({
                 type: 'image',
@@ -394,42 +351,10 @@ async function generateClaudeResponse(post, context) {
   }
 }
 
-// Add this helper function
-function truncateResponse(text, maxLength = 300) {
-  if (text.length <= maxLength) return text;
-  
-  // Try to find a sentence end within the last 50 characters of the limit
-  const searchEnd = Math.min(maxLength, text.length);
-  const searchStart = Math.max(0, searchEnd - 50);
-  const segment = text.substring(searchStart, searchEnd);
-  
-  // Look for sentence endings
-  const lastPeriod = segment.lastIndexOf('.');
-  const lastQuestion = segment.lastIndexOf('?');
-  const lastExclamation = segment.lastIndexOf('!');
-  
-  // Find the last sentence ending
-  const lastBreak = Math.max(lastPeriod, lastQuestion, lastExclamation);
-  
-  if (lastBreak !== -1) {
-    // Found a sentence ending, truncate there
-    return text.substring(0, searchStart + lastBreak + 1).trim();
-  }
-  
-  // No good break point found, just truncate at last space before limit
-  const lastSpace = text.lastIndexOf(' ', maxLength - 3);
-  if (lastSpace !== -1) {
-    return text.substring(0, lastSpace) + '...';
-  }
-  
-  // No space found, hard truncate
-  return text.substring(0, maxLength - 3) + '...';
-}
-
 // Modify the postReply function
 async function postReply(post, response) {
   try {
-    checkRateLimits(); // Add rate limit check
+    RateLimit.check();
     
     // Generate image prompt using Claude Haiku
     const promptMessage = await anthropic.messages.create({
@@ -486,8 +411,8 @@ async function postReply(post, response) {
       'Image Generation Model: Fal AI Flux/Schnell'
     ].join('\n');
 
-    let replyObject = {
-      text: truncateResponse(response),
+    const replyObject = {
+      text: utils.truncateResponse(response),
       embed: {
         $type: 'app.bsky.embed.images',
         images: [{
@@ -496,35 +421,17 @@ async function postReply(post, response) {
         }]
       },
       reply: {
-        root: {
-          uri: post.uri,
-          cid: post.cid,
-        },
-        parent: {
-          uri: post.uri,
-          cid: post.cid,
-        }
+        root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
+        parent: { uri: post.uri, cid: post.cid }
       }
     };
 
-    if (post.record && post.record.reply) {
-      replyObject.reply.root = {
-        uri: post.record.reply.root.uri,
-        cid: post.record.reply.root.cid,
-      };
-    }
-
     const result = await agent.post(replyObject);
-    console.log('Successfully posted reply:', JSON.stringify(result, null, 2));
-    
+    console.log('Successfully posted reply:', result.uri);
     repliedPosts.add(post.uri);
   } catch (error) {
     console.error('Error posting reply:', error);
-    if (error.body) {
-      console.error('Error details:', JSON.stringify(error.body, null, 2));
-    }
-    // Add post to replied list even on failure to prevent retries
-    repliedPosts.add(post.uri);
+    repliedPosts.add(post.uri); // Prevent retries
   }
 }
 
@@ -573,8 +480,6 @@ async function monitor() {
 
   try {
     await authenticate();
-    await updateAllowedUsers(); // Initial follower fetch
-    startFollowerUpdates(); // Start periodic updates
     
     console.log('Starting monitoring...');
 
@@ -586,7 +491,7 @@ async function monitor() {
         
         if (!posts.length) {
           console.log('No posts found');
-          await sleep(config.CHECK_INTERVAL);
+          await utils.sleep(config.CHECK_INTERVAL);
           continue;
         }
 
@@ -594,7 +499,7 @@ async function monitor() {
         
         if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
           console.log('Already processed this post, skipping...');
-          await sleep(config.CHECK_INTERVAL);
+          await utils.sleep(config.CHECK_INTERVAL);
           continue;
         }
         
@@ -611,13 +516,13 @@ async function monitor() {
             if (response) {
               await postReply(latestPost.post, response);
               // Add rate limiting delay after posting
-              await sleep(2000);
+              await utils.sleep(2000);
             }
           }
         }
 
         consecutiveErrors = 0; // Reset error counter on success
-        await sleep(config.CHECK_INTERVAL);
+        await utils.sleep(config.CHECK_INTERVAL);
 
       } catch (error) {
         console.error('Error in monitoring loop:', error);
@@ -630,12 +535,12 @@ async function monitor() {
         
         const delay = BACKOFF_DELAY * Math.pow(2, consecutiveErrors - 1);
         console.log(`Retrying in ${delay/1000} seconds...`);
-        await sleep(delay);
+        await utils.sleep(delay);
       }
     }
   } catch (error) {
     console.error('Fatal error in monitor:', error);
-    await sleep(BACKOFF_DELAY);
+    await utils.sleep(BACKOFF_DELAY);
   }
 }
 
