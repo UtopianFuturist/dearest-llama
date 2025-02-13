@@ -288,7 +288,7 @@ async function generateClaudeResponse(post, context) {
       content: [
         {
           type: 'text',
-          text: `You are responding to a conversation on Bluesky. Here's the context, with the oldest message first:\n\n`
+          text: `You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part fo the bot will post it. Here's the context, with the oldest message first:\n\n`
         }
       ]
     }];
@@ -335,7 +335,7 @@ async function generateClaudeResponse(post, context) {
     // Add the final message
     messages[0].content.push({
       type: 'text',
-      text: `\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted as a reply to the most recent message mentioning you.`
+      text: `\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. `
     });
 
     const message = await anthropic.messages.create({
