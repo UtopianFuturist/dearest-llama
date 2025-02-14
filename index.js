@@ -671,7 +671,7 @@ class DeepSeekBot extends BaseBot {
       max_tokens: 150,
       messages: [{
         role: 'user',
-        content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.\n\nQ: ${post.record.text}\nA: ${response}`
+        content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add either whales or cats, it's your choice!.\n\nQ: ${post.record.text}\nA: ${response}`
       }]
     });
     return promptMessage.content[0].text;
