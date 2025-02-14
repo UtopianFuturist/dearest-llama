@@ -586,6 +586,9 @@ class DeepSeekBot extends BaseBot {
 
   async generateResponse(post, context) {
     try {
+      // Add debug logging
+      console.log('Initializing DeepSeek API call...');
+      
       // Format context into a conversation history
       let conversationHistory = '';
       if (context && context.length > 0) {
@@ -601,6 +604,13 @@ class DeepSeekBot extends BaseBot {
         }
       }
 
+      // Log the request we're about to make
+      console.log('Making DeepSeek API request with config:', {
+        model: "deepseek-reasoner",
+        baseURL: this.deepseek.baseURL,
+        hasApiKey: !!this.config.DEEPSEEK_API_KEY
+      });
+
       const response = await this.deepseek.chat.completions.create({
         model: "deepseek-reasoner",
         messages: [
@@ -612,13 +622,36 @@ class DeepSeekBot extends BaseBot {
             role: "user",
             content: `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message.`
           }
-        ]
+        ],
+        temperature: 0.7,
+        max_tokens: 150
       });
 
+      // Log successful response
+      console.log('DeepSeek API response received successfully');
+      
       return response.choices[0].message.content;
     } catch (error) {
-      console.error('Error generating DeepSeek response:', error);
-      return null;
+      // Enhanced error logging
+      console.error('Detailed DeepSeek API error:', {
+        message: error.message,
+        status: error.status,
+        response: error.response,
+        stack: error.stack
+      });
+
+      // If it's an API error with a response
+      if (error.response) {
+        try {
+          const errorBody = await error.response.text();
+          console.error('API Error Response:', errorBody);
+        } catch (e) {
+          console.error('Could not parse error response');
+        }
+      }
+
+      // Fallback response for production
+      return "I apologize, but I'm having trouble connecting to my reasoning service right now. Please try again later.";
     }
   }
 
