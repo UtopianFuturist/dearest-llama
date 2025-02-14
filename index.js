@@ -5,6 +5,7 @@ import fetch from 'node-fetch';
 import { fal } from "@fal-ai/client";
 import sharp from 'sharp';
 import express from 'express';
+import { OpenAI } from 'openai';
 
 // Add express to your package.json dependencies
 const app = express();
@@ -40,9 +41,6 @@ fal.config({
 });
 
 console.log('FAL client configured with credentials');
-
-// Initialize Replied Posts List
-const repliedPosts = new Set();
 
 // ===== Utility Functions =====
 const utils = {
@@ -116,248 +114,452 @@ const RateLimit = {
 // Replace static ALLOWED_USERS with a Set for better performance
 let ALLOWED_USERS = new Set();
 
-// Function to authenticate with Bluesky
-async function authenticate() {
-  try {
-    await agent.login({
-      identifier: config.BLUESKY_IDENTIFIER,
-      password: config.BLUESKY_APP_PASSWORD,
-    });
-    console.log('Successfully authenticated with Bluesky');
-  } catch (error) {
-    console.error('Authentication failed:', error);
-    throw error;
+// Create a base Bot class
+class BaseBot {
+  constructor(config, agent) {
+    this.config = config;
+    this.agent = agent;
+    this.repliedPosts = new Set();
   }
-}
 
-// Function to get recent posts from the monitored handle
-async function getRecentPosts() {
-  try {
-    const { data: notifications } = await agent.listNotifications({
-      limit: 20
-    });
-    
-    if (!notifications || !notifications.notifications) {
-      throw new Error('No notifications returned');
-    }
-    
-    // Filter for mention notifications, excluding self-mentions
-    const relevantPosts = notifications.notifications
-      .filter(notif => {
-        // Check if it's a mention
-        if (notif.reason !== 'mention') return false;
-        
-        // Prevent self-replies
-        return notif.author.handle !== config.BLUESKY_IDENTIFIER;
-      })
-      .map(notif => ({
-        post: {
-          uri: notif.uri,
-          cid: notif.cid,
-          author: notif.author,
-          record: notif.record
+  async generateResponse(post, context) {
+    throw new Error('generateResponse must be implemented by child class');
+  }
+
+  async generateImagePrompt(post, response) {
+    throw new Error('generateImagePrompt must be implemented by child class');
+  }
+
+  // Shared methods can go here
+  async hasAlreadyReplied(post) {
+    try {
+      // First check our local Set
+      if (this.repliedPosts.has(post.uri)) {
+        console.log('Found post in local reply history');
+        return true;
+      }
+
+      console.log(`Checking for existing replies to post: ${post.uri}`);
+      const { data: thread } = await this.agent.getPostThread({
+        uri: post.uri,
+        depth: 1,
+        parentHeight: 1
+      });
+
+      console.log(`Thread data:`, JSON.stringify(thread, null, 2));
+
+      if (thread.thread.replies && thread.thread.replies.length > 0) {
+        const hasReply = thread.thread.replies.some(reply => 
+          reply.post.author.handle === this.config.BLUESKY_IDENTIFIER
+        );
+        if (hasReply) {
+          // Add to our Set if we find an existing reply
+          this.repliedPosts.add(post.uri);
         }
-      }));
-    
-    console.log(`Found ${relevantPosts.length} relevant mentions`);
-    return relevantPosts;
-  } catch (error) {
-    console.error('Error in getRecentPosts:', error);
-    return [];
+        console.log(`Has existing reply: ${hasReply}`);
+        return hasReply;
+      }
+      console.log(`No replies found`);
+      return false;
+    } catch (error) {
+      console.error('Error checking for existing replies:', error);
+      return false;
+    }
   }
-}
 
-// Function to get the context of a reply
-async function getReplyContext(post) {
-  try {
-    const conversation = [];
-    
-    // Helper function to extract images
-    const extractImages = (record) => {
-      const images = record?.embed?.images || 
-                    record?.embed?.media?.images || 
-                    [];
-      return images.map(img => ({
-        alt: img.alt,
-        url: img.fullsize || img.thumb
-      }));
-    };
+  async monitor() {
+    let consecutiveErrors = 0;
+    const MAX_RETRIES = 5;
+    const BACKOFF_DELAY = 60000; // 1 minute
 
-    // Add the main post
-    conversation.push({
-      author: post.author.handle,
-      text: post.record.text,
-      images: extractImages(post.record)
-    });
+    try {
+      await this.authenticate();
+      
+      console.log('Starting monitoring...');
 
-    if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed) {
-      try {
-        console.log('Processing embed record');
-        const uri = post.record.embed.record.uri;
-        const matches = uri.match(/at:\/\/([^/]+)\/[^/]+\/([^/]+)/);
-        
-        if (matches) {
-          const [_, repo, rkey] = matches;
+      let lastCheckedPost = null;
+
+      while (true) {
+        try {
+          const posts = await this.getRecentPosts();
           
-          // Fetch the full quoted post data
-          const quotedPostResponse = await agent.getPost({
-            repo,
-            rkey
-          });
+          if (!posts.length) {
+            console.log('No posts found');
+            await utils.sleep(this.config.CHECK_INTERVAL);
+            continue;
+          }
 
-          if (quotedPostResponse?.value) {
-            // Extract author from the repo DID
-            const authorDid = matches[1];
-            const postValue = quotedPostResponse.value;
+          const latestPost = posts[0];
+          
+          if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
+            console.log('Already processed this post, skipping...');
+            await utils.sleep(this.config.CHECK_INTERVAL);
+            continue;
+          }
+          
+          lastCheckedPost = latestPost.uri;
+
+          if (latestPost.post?.record?.text?.includes(this.config.BLUESKY_IDENTIFIER)) {
+            const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
             
-            // Only add to conversation if we have the text
-            if (postValue.text) {
-              console.log('Found a quote post with text:', postValue.text);
+            if (!alreadyReplied) {
+              console.log('Generating and posting response...');
+              const context = await this.getReplyContext(latestPost.post);
+              const response = await this.generateResponse(latestPost.post, context);
               
-              // Extract images if present
-              const quotedImages = postValue.embed?.images || 
-                                 postValue.embed?.media?.images || 
-                                 [];
-              
-              conversation.unshift({
-                author: authorDid, // We might want to convert this DID to a handle
-                text: postValue.text,
-                images: quotedImages.map(img => ({
-                  alt: img.alt,
-                  url: img.fullsize || img.thumb
-                }))
-              });
+              if (response) {
+                await this.postReply(latestPost.post, response);
+                // Add rate limiting delay after posting
+                await utils.sleep(2000);
+              }
             }
           }
-        }
-      } catch (error) {
-        console.error('Error fetching quoted post:', error);
-      }
-    }
 
-    // Then get the thread history if it's a reply
-    if (post.record?.reply) {
-      let currentUri = post.uri;
+          consecutiveErrors = 0; // Reset error counter on success
+          await utils.sleep(this.config.CHECK_INTERVAL);
 
-      while (currentUri) {
-        const { data: thread } = await agent.getPostThread({
-          uri: currentUri,
-          depth: 0,
-          parentHeight: 1
-        });
-
-        if (!thread.thread.post) break;
-
-        // Extract image information if present
-        const images = thread.thread.post.record.embed?.images || 
-                      thread.thread.post.record.embed?.media?.images || 
-                      [];
-        
-        conversation.unshift({
-          author: thread.thread.post.author.handle,
-          text: thread.thread.post.record.text,
-          images: images.map(img => ({
-            alt: img.alt,
-            url: thread.thread.post.embed?.images?.[0]?.fullsize || 
-                 thread.thread.post.embed?.images?.[0]?.thumb ||
-                 img.image?.fullsize || 
-                 img.image?.thumb
-          }))
-        });
-
-        if (thread.thread.parent && thread.thread.parent.post) {
-          currentUri = thread.thread.parent.post.uri;
-        } else {
-          break;
+        } catch (error) {
+          console.error('Error in monitoring loop:', error);
+          consecutiveErrors++;
+          
+          if (consecutiveErrors >= MAX_RETRIES) {
+            console.error(`Maximum retries (${MAX_RETRIES}) reached, restarting monitor...`);
+            break;
+          }
+          
+          const delay = BACKOFF_DELAY * Math.pow(2, consecutiveErrors - 1);
+          console.log(`Retrying in ${delay/1000} seconds...`);
+          await utils.sleep(delay);
         }
       }
+    } catch (error) {
+      console.error('Fatal error in monitor:', error);
+      await utils.sleep(BACKOFF_DELAY);
     }
-
-    console.log('Conversation context with images:', JSON.stringify(conversation, null, 2));
-    return conversation;
-  } catch (error) {
-    console.error('Error fetching reply context:', error);
-    return [];
   }
-}
 
-async function generateClaudeResponse(post, context) {
-  try {
-    let messages = [{ 
-      role: 'user', 
-      content: [
-        {
-          type: 'text',
-          text: `You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part fo the bot will post it. Here's the context, with the oldest message first:\n\n`
-        }
-      ]
-    }];
+  // Function to authenticate with Bluesky
+  async authenticate() {
+    try {
+      await this.agent.login({
+        identifier: this.config.BLUESKY_IDENTIFIER,
+        password: this.config.BLUESKY_APP_PASSWORD,
+      });
+      console.log('Successfully authenticated with Bluesky');
+    } catch (error) {
+      console.error('Authentication failed:', error);
+      throw error;
+    }
+  }
 
-    // Add context messages with images
-    if (context && context.length > 0) {
-      for (const msg of context) {
-        let content = [{
-          type: 'text',
-          text: `${msg.author}: ${msg.text}`
-        }];
-        
-        // Add images if present
-        if (msg.images && msg.images.length > 0) {
-          console.log(`Processing ${msg.images.length} images for message`);
-          for (const image of msg.images) {
-            console.log(`Converting image to base64: ${image.url}`);
-            const base64Image = await utils.imageUrlToBase64(image.url);
-            if (base64Image) {
-              content.push({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/jpeg', // Adjust based on actual image type if needed
-                  data: base64Image
-                }
-              });
-              if (image.alt) {
-                content.push({
-                  type: 'text',
-                  text: `[Image description: ${image.alt}]`
+  // Function to get recent posts from the monitored handle
+  async getRecentPosts() {
+    try {
+      const { data: notifications } = await this.agent.listNotifications({
+        limit: 20
+      });
+      
+      if (!notifications || !notifications.notifications) {
+        throw new Error('No notifications returned');
+      }
+      
+      // Filter for mention notifications, excluding self-mentions
+      const relevantPosts = notifications.notifications
+        .filter(notif => {
+          // Check if it's a mention
+          if (notif.reason !== 'mention') return false;
+          
+          // Prevent self-replies
+          return notif.author.handle !== this.config.BLUESKY_IDENTIFIER;
+        })
+        .map(notif => ({
+          post: {
+            uri: notif.uri,
+            cid: notif.cid,
+            author: notif.author,
+            record: notif.record
+          }
+        }));
+      
+      console.log(`Found ${relevantPosts.length} relevant mentions`);
+      return relevantPosts;
+    } catch (error) {
+      console.error('Error in getRecentPosts:', error);
+      return [];
+    }
+  }
+
+  // Function to get the context of a reply
+  async getReplyContext(post) {
+    try {
+      const conversation = [];
+      
+      // Helper function to extract images
+      const extractImages = (record) => {
+        const images = record?.embed?.images || 
+                      record?.embed?.media?.images || 
+                      [];
+        return images.map(img => ({
+          alt: img.alt,
+          url: img.fullsize || img.thumb
+        }));
+      };
+
+      // Add the main post
+      conversation.push({
+        author: post.author.handle,
+        text: post.record.text,
+        images: extractImages(post.record)
+      });
+
+      if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed) {
+        try {
+          console.log('Processing embed record');
+          const uri = post.record.embed.record.uri;
+          const matches = uri.match(/at:\/\/([^/]+)\/[^/]+\/([^/]+)/);
+          
+          if (matches) {
+            const [_, repo, rkey] = matches;
+            
+            // Fetch the full quoted post data
+            const quotedPostResponse = await this.agent.getPost({
+              repo,
+              rkey
+            });
+
+            if (quotedPostResponse?.value) {
+              // Extract author from the repo DID
+              const authorDid = matches[1];
+              const postValue = quotedPostResponse.value;
+              
+              // Only add to conversation if we have the text
+              if (postValue.text) {
+                console.log('Found a quote post with text:', postValue.text);
+                
+                // Extract images if present
+                const quotedImages = postValue.embed?.images || 
+                                   postValue.embed?.media?.images || 
+                                   [];
+                
+                conversation.unshift({
+                  author: authorDid, // We might want to convert this DID to a handle
+                  text: postValue.text,
+                  images: quotedImages.map(img => ({
+                    alt: img.alt,
+                    url: img.fullsize || img.thumb
+                  }))
                 });
               }
             }
           }
+        } catch (error) {
+          console.error('Error fetching quoted post:', error);
         }
-        
-        messages[0].content.push(...content);
       }
+
+      // Then get the thread history if it's a reply
+      if (post.record?.reply) {
+        let currentUri = post.uri;
+
+        while (currentUri) {
+          const { data: thread } = await this.agent.getPostThread({
+            uri: currentUri,
+            depth: 0,
+            parentHeight: 1
+          });
+
+          if (!thread.thread.post) break;
+
+          // Extract image information if present
+          const images = thread.thread.post.record.embed?.images || 
+                        thread.thread.post.record.embed?.media?.images || 
+                        [];
+          
+          conversation.unshift({
+            author: thread.thread.post.author.handle,
+            text: thread.thread.post.record.text,
+            images: images.map(img => ({
+              alt: img.alt,
+              url: thread.thread.post.embed?.images?.[0]?.fullsize || 
+                   thread.thread.post.embed?.images?.[0]?.thumb ||
+                   img.image?.fullsize || 
+                   img.image?.thumb
+            }))
+          });
+
+          if (thread.thread.parent && thread.thread.parent.post) {
+            currentUri = thread.thread.parent.post.uri;
+          } else {
+            break;
+          }
+        }
+      }
+
+      console.log('Conversation context with images:', JSON.stringify(conversation, null, 2));
+      return conversation;
+    } catch (error) {
+      console.error('Error fetching reply context:', error);
+      return [];
     }
-    
-    console.log('Final messages object:', JSON.stringify(messages, null, 2));
-    
-    // Add the final message
-    messages[0].content.push({
-      type: 'text',
-      text: `\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. `
-    });
+  }
 
-    const message = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-latest',
-      max_tokens: 150,
-      messages: messages
-    });
+  // Modify the postReply function
+  async postReply(post, response) {
+    try {
+      RateLimit.check();
+      
+      // Generate image prompt using Claude Haiku
+      const imagePrompt = await this.generateImagePrompt(post, response);
+      console.log('Generated image prompt:', imagePrompt);
 
-    return message.content[0].text;
-  } catch (error) {
-    console.error('Error generating Claude response:', error);
-    return null;
+      // Generate image using Fal
+      const falResult = await fal.subscribe("fal-ai/flux/schnell", {
+        input: {
+          prompt: imagePrompt,
+          image_size: {
+            width: 512,
+            height: 512
+          }
+        },
+        logs: true
+      });
+      
+      console.log('FAL.ai response:', falResult);
+      const imageUrl = falResult.data.images[0].url;
+
+      // Fetch the image directly
+      const imageResponse = await fetch(imageUrl);
+      const imageBuffer = await imageResponse.buffer();
+
+      // Process image just to ensure correct format and size
+      const processedImageBuffer = await sharp(imageBuffer)
+        .resize(512, 512, {
+          fit: 'contain',
+          background: { r: 255, g: 255, b: 255, alpha: 1 }
+        })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+
+      // Upload directly to Bluesky
+      const uploadResult = await this.agent.uploadBlob(processedImageBuffer, {
+        encoding: 'image/jpeg'
+      });
+
+      // Create detailed alt text
+      const altText = [
+        'Response Model: Claude 3.5 Sonnet',
+        'Response Prompt: Text and images upthread of this comment',
+        'Image Prompt Model: Claude 3.5 Haiku',
+        `Image Prompt: ${imagePrompt}`,
+        'Image Generation Model: Fal AI Flux/Schnell'
+      ].join('\n');
+
+      const replyObject = {
+        text: utils.truncateResponse(response),
+        embed: {
+          $type: 'app.bsky.embed.images',
+          images: [{
+            alt: altText,
+            image: uploadResult.data.blob
+          }]
+        },
+        reply: {
+          root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
+          parent: { uri: post.uri, cid: post.cid }
+        }
+      };
+
+      const result = await this.agent.post(replyObject);
+      console.log('Successfully posted reply:', result.uri);
+      this.repliedPosts.add(post.uri);
+    } catch (error) {
+      console.error('Error posting reply:', error);
+      this.repliedPosts.add(post.uri); // Prevent retries
+    }
   }
 }
 
-// Modify the postReply function
-async function postReply(post, response) {
-  try {
-    RateLimit.check();
-    
-    // Generate image prompt using Claude Haiku
-    const promptMessage = await anthropic.messages.create({
+// Claude-specific implementation
+class ClaudeBot extends BaseBot {
+  constructor(config, agent) {
+    super(config, agent);
+    this.anthropic = new Anthropic({
+      apiKey: config.CLAUDE_API_KEY,
+    });
+  }
+
+  async generateResponse(post, context) {
+    try {
+      let messages = [{ 
+        role: 'user', 
+        content: [
+          {
+            type: 'text',
+            text: `You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Here's the context, with the oldest message first:\n\n`
+          }
+        ]
+      }];
+
+      // Add context messages with images
+      if (context && context.length > 0) {
+        for (const msg of context) {
+          let content = [{
+            type: 'text',
+            text: `${msg.author}: ${msg.text}`
+          }];
+          
+          // Add images if present
+          if (msg.images && msg.images.length > 0) {
+            console.log(`Processing ${msg.images.length} images for message`);
+            for (const image of msg.images) {
+              console.log(`Converting image to base64: ${image.url}`);
+              const base64Image = await utils.imageUrlToBase64(image.url);
+              if (base64Image) {
+                content.push({
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/jpeg', // Adjust based on actual image type if needed
+                    data: base64Image
+                  }
+                });
+                if (image.alt) {
+                  content.push({
+                    type: 'text',
+                    text: `[Image description: ${image.alt}]`
+                  });
+                }
+              }
+            }
+          }
+          
+          messages[0].content.push(...content);
+        }
+      }
+      
+      console.log('Final messages object:', JSON.stringify(messages, null, 2));
+      
+      // Add the final message
+      messages[0].content.push({
+        type: 'text',
+        text: `\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. `
+      });
+
+      const message = await this.anthropic.messages.create({
+        model: 'claude-3-5-sonnet-latest',
+        max_tokens: 150,
+        messages: messages
+      });
+
+      return message.content[0].text;
+    } catch (error) {
+      console.error('Error generating Claude response:', error);
+      return null;
+    }
+  }
+
+  async generateImagePrompt(post, response) {
+    const promptMessage = await this.anthropic.messages.create({
       model: 'claude-3-5-haiku-20241022',
       max_tokens: 150,
       messages: [{
@@ -365,184 +567,98 @@ async function postReply(post, response) {
         content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.\n\nQ: ${post.record.text}\nA: ${response}`
       }]
     });
-
-    const imagePrompt = promptMessage.content[0].text;
-    console.log('Generated image prompt:', imagePrompt);
-
-    // Generate image using Fal
-    const falResult = await fal.subscribe("fal-ai/flux/schnell", {
-      input: {
-        prompt: imagePrompt,
-        image_size: {
-          width: 512,
-          height: 512
-        }
-      },
-      logs: true
-    });
-    
-    console.log('FAL.ai response:', falResult);
-    const imageUrl = falResult.data.images[0].url;
-
-    // Fetch the image directly
-    const imageResponse = await fetch(imageUrl);
-    const imageBuffer = await imageResponse.buffer();
-
-    // Process image just to ensure correct format and size
-    const processedImageBuffer = await sharp(imageBuffer)
-      .resize(512, 512, {
-        fit: 'contain',
-        background: { r: 255, g: 255, b: 255, alpha: 1 }
-      })
-      .jpeg({ quality: 80 })
-      .toBuffer();
-
-    // Upload directly to Bluesky
-    const uploadResult = await agent.uploadBlob(processedImageBuffer, {
-      encoding: 'image/jpeg'
-    });
-
-    // Create detailed alt text
-    const altText = [
-      'Response Model: Claude 3.5 Sonnet',
-      'Response Prompt: Text and images upthread of this comment',
-      'Image Prompt Model: Claude 3.5 Haiku',
-      `Image Prompt: ${imagePrompt}`,
-      'Image Generation Model: Fal AI Flux/Schnell'
-    ].join('\n');
-
-    const replyObject = {
-      text: utils.truncateResponse(response),
-      embed: {
-        $type: 'app.bsky.embed.images',
-        images: [{
-          alt: altText,
-          image: uploadResult.data.blob
-        }]
-      },
-      reply: {
-        root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
-        parent: { uri: post.uri, cid: post.cid }
-      }
-    };
-
-    const result = await agent.post(replyObject);
-    console.log('Successfully posted reply:', result.uri);
-    repliedPosts.add(post.uri);
-  } catch (error) {
-    console.error('Error posting reply:', error);
-    repliedPosts.add(post.uri); // Prevent retries
+    return promptMessage.content[0].text;
   }
 }
 
-// Function to check if we've already replied to a post
-async function hasAlreadyReplied(post) {
-  try {
-    // First check our local Set
-    if (repliedPosts.has(post.uri)) {
-      console.log('Found post in local reply history');
-      return true;
-    }
-
-    console.log(`Checking for existing replies to post: ${post.uri}`);
-    const { data: thread } = await agent.getPostThread({
-      uri: post.uri,
-      depth: 1,
-      parentHeight: 1
+// DeepSeek implementation
+class DeepSeekBot extends BaseBot {
+  constructor(config, agent) {
+    super(config, agent);
+    this.deepseek = new OpenAI({
+      apiKey: config.DEEPSEEK_API_KEY,
+      baseURL: "https://api.deepseek.com"
     });
-
-    console.log(`Thread data:`, JSON.stringify(thread, null, 2));
-
-    if (thread.thread.replies && thread.thread.replies.length > 0) {
-      const hasReply = thread.thread.replies.some(reply => 
-        reply.post.author.handle === config.BLUESKY_IDENTIFIER
-      );
-      if (hasReply) {
-        // Add to our Set if we find an existing reply
-        repliedPosts.add(post.uri);
-      }
-      console.log(`Has existing reply: ${hasReply}`);
-      return hasReply;
-    }
-    console.log(`No replies found`);
-    return false;
-  } catch (error) {
-    console.error('Error checking for existing replies:', error);
-    return false;
+    this.anthropic = new Anthropic({
+      apiKey: config.CLAUDE_API_KEY,
+    });
   }
-}
 
-// Main monitoring loop
-async function monitor() {
-  let consecutiveErrors = 0;
-  const MAX_RETRIES = 5;
-  const BACKOFF_DELAY = 60000; // 1 minute
-
-  try {
-    await authenticate();
-    
-    console.log('Starting monitoring...');
-
-    let lastCheckedPost = null;
-
-    while (true) {
-      try {
-        const posts = await getRecentPosts();
-        
-        if (!posts.length) {
-          console.log('No posts found');
-          await utils.sleep(config.CHECK_INTERVAL);
-          continue;
-        }
-
-        const latestPost = posts[0];
-        
-        if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
-          console.log('Already processed this post, skipping...');
-          await utils.sleep(config.CHECK_INTERVAL);
-          continue;
-        }
-        
-        lastCheckedPost = latestPost.uri;
-
-        if (latestPost.post?.record?.text?.includes(config.BLUESKY_IDENTIFIER)) {
-          const alreadyReplied = await hasAlreadyReplied(latestPost.post);
-          
-          if (!alreadyReplied) {
-            console.log('Generating and posting response...');
-            const context = await getReplyContext(latestPost.post);
-            const response = await generateClaudeResponse(latestPost.post, context);
-            
-            if (response) {
-              await postReply(latestPost.post, response);
-              // Add rate limiting delay after posting
-              await utils.sleep(2000);
-            }
+  async generateResponse(post, context) {
+    try {
+      // Format context into a conversation history
+      let conversationHistory = '';
+      if (context && context.length > 0) {
+        for (const msg of context) {
+          conversationHistory += `${msg.author}: ${msg.text}\n`;
+          if (msg.images && msg.images.length > 0) {
+            msg.images.forEach(image => {
+              if (image.alt) {
+                conversationHistory += `[Image description: ${image.alt}]\n`;
+              }
+            });
           }
         }
-
-        consecutiveErrors = 0; // Reset error counter on success
-        await utils.sleep(config.CHECK_INTERVAL);
-
-      } catch (error) {
-        console.error('Error in monitoring loop:', error);
-        consecutiveErrors++;
-        
-        if (consecutiveErrors >= MAX_RETRIES) {
-          console.error(`Maximum retries (${MAX_RETRIES}) reached, restarting monitor...`);
-          break;
-        }
-        
-        const delay = BACKOFF_DELAY * Math.pow(2, consecutiveErrors - 1);
-        console.log(`Retrying in ${delay/1000} seconds...`);
-        await utils.sleep(delay);
       }
+
+      const response = await this.deepseek.chat.completions.create({
+        model: "deepseek-reasoner",
+        messages: [
+          {
+            role: "system",
+            content: "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters."
+          },
+          {
+            role: "user",
+            content: `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message.`
+          }
+        ]
+      });
+
+      return response.choices[0].message.content;
+    } catch (error) {
+      console.error('Error generating DeepSeek response:', error);
+      return null;
     }
-  } catch (error) {
-    console.error('Fatal error in monitor:', error);
-    await utils.sleep(BACKOFF_DELAY);
+  }
+
+  // Use Claude Haiku for image prompts, same as ClaudeBot
+  async generateImagePrompt(post, response) {
+    const promptMessage = await this.anthropic.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 150,
+      messages: [{
+        role: 'user',
+        content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.\n\nQ: ${post.record.text}\nA: ${response}`
+      }]
+    });
+    return promptMessage.content[0].text;
   }
 }
 
-// Start the bot
-monitor().catch(console.error);
+// Initialize and run multiple bots
+async function startBots() {
+  const agent1 = new AtpAgent({ service: 'https://bsky.social' });
+  const agent2 = new AtpAgent({ service: 'https://bsky.social' });
+
+  const claudeBot = new ClaudeBot({
+    ...config,
+    BLUESKY_IDENTIFIER: config.CLAUDE_IDENTIFIER,
+    BLUESKY_APP_PASSWORD: config.CLAUDE_APP_PASSWORD,
+  }, agent1);
+
+  const deepseekBot = new DeepSeekBot({
+    ...config,
+    BLUESKY_IDENTIFIER: config.DEEPSEEK_IDENTIFIER,
+    BLUESKY_APP_PASSWORD: config.DEEPSEEK_APP_PASSWORD,
+  }, agent2);
+
+  // Run bots in parallel
+  await Promise.all([
+    claudeBot.monitor().catch(console.error),
+    deepseekBot.monitor().catch(console.error)
+  ]);
+}
+
+// Start the bots
+startBots().catch(console.error);

@@ -5,13 +5,19 @@ services:
     buildCommand: npm install
     startCommand: node index.js
     envVars:
-      - key: BLUESKY_IDENTIFIER
-        sync: false
-      - key: BLUESKY_APP_PASSWORD
-        sync: false
       - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
         sync: false
       - key: FAL_API_KEY
         sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: CLAUDE_IDENTIFIER
+        sync: false
+      - key: CLAUDE_APP_PASSWORD
+        sync: false
+      - key: DEEPSEEK_IDENTIFIER
+        sync: false
+      - key: DEEPSEEK_APP_PASSWORD
+        sync: false
+
+

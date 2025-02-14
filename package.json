@@ -22,6 +22,7 @@
     "@google/generative-ai": "^0.21.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "openai": "^4.85.0",
     "sharp": "^0.33.5"
   }
 }
