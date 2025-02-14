@@ -606,13 +606,13 @@ class DeepSeekBot extends BaseBot {
 
       // Log the request we're about to make
       console.log('Making DeepSeek API request with config:', {
-        model: "deepseek-reasoner",
+        model: "deepseek-chat",
         baseURL: this.deepseek.baseURL,
         hasApiKey: !!this.config.DEEPSEEK_API_KEY
       });
 
       const response = await this.deepseek.chat.completions.create({
-        model: "deepseek-reasoner",
+        model: "deepseek-chat",
         messages: [
           {
             role: "system",
