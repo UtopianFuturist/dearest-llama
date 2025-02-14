@@ -447,7 +447,7 @@ class BaseBot {
 
       // Create detailed alt text
       const altText = [
-        'Response Model: Claude 3.5 Sonnet',
+        `Response Model: ${this.getModelName()}`,
         'Response Prompt: Text and images upthread of this comment',
         'Image Prompt Model: Claude 3.5 Haiku',
         `Image Prompt: ${imagePrompt}`,
@@ -476,6 +476,11 @@ class BaseBot {
       console.error('Error posting reply:', error);
       this.repliedPosts.add(post.uri); // Prevent retries
     }
+  }
+
+  // Add a method to get model name
+  getModelName() {
+    return 'Unknown Model';
   }
 }
 
@@ -568,6 +573,10 @@ class ClaudeBot extends BaseBot {
       }]
     });
     return promptMessage.content[0].text;
+  }
+
+  getModelName() {
+    return 'Claude 3.5 Sonnet';
   }
 }
 
@@ -666,6 +675,10 @@ class DeepSeekBot extends BaseBot {
       }]
     });
     return promptMessage.content[0].text;
+  }
+
+  getModelName() {
+    return 'DeepSeek v3';
   }
 }
 
