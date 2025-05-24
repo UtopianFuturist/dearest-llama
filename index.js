@@ -551,7 +551,7 @@ class ClaudeBot extends BaseBot {
       });
 
       const message = await this.anthropic.messages.create({
-        model: 'claude-3-5-sonnet-latest',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: 150,
         messages: messages
       });
@@ -576,7 +576,7 @@ class ClaudeBot extends BaseBot {
   }
 
   getModelName() {
-    return 'Claude 3.5 Sonnet';
+    return 'Claude Sonnet 4';
   }
 }
 
