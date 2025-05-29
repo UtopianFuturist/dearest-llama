@@ -1,24 +1,45 @@
 {
-  "name": "bluesky",
+  "name": "dearest-llama",
   "version": "1.0.0",
-  "type": "module",
+  "description": "A Bluesky bot that responds to mentions with Llama 4 Maverick and generates images with Nvidia NIM Flux Dev",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "jest"
+  },
+  "keywords": [
+    "bluesky",
+    "bot",
+    "llama",
+    "nvidia",
+    "nim",
+    "flux",
+    "ai",
+    "chatbot"
+  ],
+  "author": "UtopianFuturist",
+  "license": "ISC",
+  "dependencies": {
+    "@atproto/api": "^0.12.29",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "form-data": "^4.0.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7",
+    "jest": "^29.7.0"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
-  "scripts": {
-    "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UtopianFuturist/dearest-llama.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "@atproto/api": "latest",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "node-fetch": "^3.3.2",
-    "sharp": "^0.33.5"
-  }
+  "bugs": {
+    "url": "https://github.com/UtopianFuturist/dearest-llama/issues"
+  },
+  "homepage": "https://github.com/UtopianFuturist/dearest-llama#readme"
 }
