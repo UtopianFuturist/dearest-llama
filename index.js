@@ -1,11 +1,8 @@
 import { AtpAgent } from '@atproto/api';
-import { Anthropic } from '@anthropic-ai/sdk';
 import config from './config.js';
 import fetch from 'node-fetch';
-import { fal } from "@fal-ai/client";
 import sharp from 'sharp';
 import express from 'express';
-import { OpenAI } from 'openai';
 
 // Add express to your package.json dependencies
 const app = express();
@@ -29,18 +26,6 @@ app.listen(PORT, () => {
 const agent = new AtpAgent({
   service: 'https://bsky.social',
 });
-
-// Initialize Anthropic client
-const anthropic = new Anthropic({
-  apiKey: config.ANTHROPIC_API_KEY,
-});
-
-// Initialize fal client explicitly
-fal.config({
-  credentials: process.env.FAL_API_KEY,
-});
-
-console.log('FAL client configured with credentials');
 
 // ===== Utility Functions =====
 const utils = {
@@ -408,24 +393,13 @@ class BaseBot {
     try {
       RateLimit.check();
       
-      // Generate image prompt using Claude Haiku
+      // Generate image prompt using Llama 4 Scout
       const imagePrompt = await this.generateImagePrompt(post, response);
       console.log('Generated image prompt:', imagePrompt);
 
-      // Generate image using Fal
-      const falResult = await fal.subscribe("fal-ai/flux/schnell", {
-        input: {
-          prompt: imagePrompt,
-          image_size: {
-            width: 512,
-            height: 512
-          }
-        },
-        logs: true
-      });
-      
-      console.log('FAL.ai response:', falResult);
-      const imageUrl = falResult.data.images[0].url;
+      // Generate image using Nvidia NIM Flux Dev
+      const imageUrl = await this.generateImage(imagePrompt);
+      console.log('Generated image URL:', imageUrl);
 
       // Fetch the image directly
       const imageResponse = await fetch(imageUrl);
@@ -449,9 +423,9 @@ class BaseBot {
       const altText = [
         `Response Model: ${this.getModelName()}`,
         'Response Prompt: Text and images upthread of this comment',
-        'Image Prompt Model: Claude 3.5 Haiku',
+        `Image Prompt Model: ${this.config.IMAGE_PROMPT_MODEL.split('/').pop()}`,
         `Image Prompt: ${imagePrompt}`,
-        'Image Generation Model: Fal AI Flux/Schnell'
+        `Image Generation Model: ${this.config.IMAGE_GENERATION_MODEL.split('/').pop()}`
       ].join('\n');
 
       const replyObject = {
@@ -482,122 +456,44 @@ class BaseBot {
   getModelName() {
     return 'Unknown Model';
   }
-}
-
-// Claude-specific implementation
-class ClaudeBot extends BaseBot {
-  constructor(config, agent) {
-    super(config, agent);
-    this.anthropic = new Anthropic({
-      apiKey: config.CLAUDE_API_KEY,
-    });
-  }
-
-  async generateResponse(post, context) {
+  
+  // Add a method to generate image using Nvidia NIM
+  async generateImage(prompt) {
     try {
-      let messages = [{ 
-        role: 'user', 
-        content: [
-          {
-            type: 'text',
-            text: `You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Here's the context, with the oldest message first:\n\n`
-          }
-        ]
-      }];
-
-      // Add context messages with images
-      if (context && context.length > 0) {
-        for (const msg of context) {
-          let content = [{
-            type: 'text',
-            text: `${msg.author}: ${msg.text}`
-          }];
-          
-          // Add images if present
-          if (msg.images && msg.images.length > 0) {
-            console.log(`Processing ${msg.images.length} images for message`);
-            for (const image of msg.images) {
-              console.log(`Converting image to base64: ${image.url}`);
-              const base64Image = await utils.imageUrlToBase64(image.url);
-              if (base64Image) {
-                content.push({
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: 'image/jpeg', // Adjust based on actual image type if needed
-                    data: base64Image
-                  }
-                });
-                if (image.alt) {
-                  content.push({
-                    type: 'text',
-                    text: `[Image description: ${image.alt}]`
-                  });
-                }
-              }
-            }
-          }
-          
-          messages[0].content.push(...content);
-        }
+      const response = await fetch('https://api.nvidia.com/v1/nim/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: this.config.IMAGE_GENERATION_MODEL,
+          prompt: prompt,
+          size: '512x512'
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
       }
       
-      console.log('Final messages object:', JSON.stringify(messages, null, 2));
-      
-      // Add the final message
-      messages[0].content.push({
-        type: 'text',
-        text: `\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. `
-      });
-
-      const message = await this.anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 150,
-        messages: messages
-      });
-
-      return message.content[0].text;
+      const data = await response.json();
+      return data.images[0].url;
     } catch (error) {
-      console.error('Error generating Claude response:', error);
-      return null;
+      console.error('Error generating image with Nvidia NIM:', error);
+      throw error;
     }
-  }
-
-  async generateImagePrompt(post, response) {
-    const promptMessage = await this.anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: 150,
-      messages: [{
-        role: 'user',
-        content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.\n\nQ: ${post.record.text}\nA: ${response}`
-      }]
-    });
-    return promptMessage.content[0].text;
-  }
-
-  getModelName() {
-    return 'Claude Sonnet 4';
   }
 }
 
-// DeepSeek implementation
-class DeepSeekBot extends BaseBot {
+// Llama-specific implementation
+class LlamaBot extends BaseBot {
   constructor(config, agent) {
     super(config, agent);
-    this.deepseek = new OpenAI({
-      apiKey: config.DEEPSEEK_API_KEY,
-      baseURL: "https://api.deepseek.com"
-    });
-    this.anthropic = new Anthropic({
-      apiKey: config.CLAUDE_API_KEY,
-    });
   }
 
   async generateResponse(post, context) {
     try {
-      // Add debug logging
-      console.log('Initializing DeepSeek API call...');
-      
       // Format context into a conversation history
       let conversationHistory = '';
       if (context && context.length > 0) {
@@ -613,98 +509,91 @@ class DeepSeekBot extends BaseBot {
         }
       }
 
-      // Log the request we're about to make
-      console.log('Making DeepSeek API request with config:', {
-        model: "deepseek-chat",
-        baseURL: this.deepseek.baseURL,
-        hasApiKey: !!this.config.DEEPSEEK_API_KEY
+      // Make request to Nvidia NIM API for Llama 4 Maverick
+      const response = await fetch('https://api.nvidia.com/v1/nim/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: this.config.TEXT_MODEL,
+          messages: [
+            {
+              role: "system",
+              content: this.config.TEXT_SYSTEM_PROMPT
+            },
+            {
+              role: "user",
+              content: `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 150
+        })
       });
 
-      const response = await this.deepseek.chat.completions.create({
-        model: "deepseek-chat",
-        messages: [
-          {
-            role: "system",
-            content: "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters."
-          },
-          {
-            role: "user",
-            content: `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message.`
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 150
-      });
-
-      // Log successful response
-      console.log('DeepSeek API response received successfully');
-      
-      return response.choices[0].message.content;
-    } catch (error) {
-      // Enhanced error logging
-      console.error('Detailed DeepSeek API error:', {
-        message: error.message,
-        status: error.status,
-        response: error.response,
-        stack: error.stack
-      });
-
-      // If it's an API error with a response
-      if (error.response) {
-        try {
-          const errorBody = await error.response.text();
-          console.error('API Error Response:', errorBody);
-        } catch (e) {
-          console.error('Could not parse error response');
-        }
+      if (!response.ok) {
+        throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
       }
 
-      // Fallback response for production
-      return "I apologize, but I'm having trouble connecting to my reasoning service right now. Please try again later.";
+      const data = await response.json();
+      return data.choices[0].message.content;
+    } catch (error) {
+      console.error('Error generating Llama response:', error);
+      return null;
     }
   }
 
-  // Use Claude Haiku for image prompts, same as ClaudeBot
   async generateImagePrompt(post, response) {
-    const promptMessage = await this.anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: 150,
-      messages: [{
-        role: 'user',
-        content: `Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add either whales or cats, it's your choice!.\n\nQ: ${post.record.text}\nA: ${response}`
-      }]
-    });
-    return promptMessage.content[0].text;
+    try {
+      const promptResponse = await fetch('https://api.nvidia.com/v1/nim/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: this.config.IMAGE_PROMPT_MODEL,
+          messages: [{
+            role: 'user',
+            content: `${this.config.IMAGE_PROMPT_SYSTEM_PROMPT}\n\nQ: ${post.record.text}\nA: ${response}`
+          }],
+          temperature: 0.7,
+          max_tokens: 150
+        })
+      });
+
+      if (!promptResponse.ok) {
+        throw new Error(`Nvidia NIM API error: ${promptResponse.status} ${promptResponse.statusText}`);
+      }
+
+      const data = await promptResponse.json();
+      return data.choices[0].message.content;
+    } catch (error) {
+      console.error('Error generating image prompt:', error);
+      return "A cute cat sitting on a windowsill looking at the sky";
+    }
   }
 
   getModelName() {
-    return 'DeepSeek v3';
+    return this.config.TEXT_MODEL.split('/').pop();
   }
 }
 
-// Initialize and run multiple bots
+// Initialize and run the bot
 async function startBots() {
-  const agent1 = new AtpAgent({ service: 'https://bsky.social' });
-  const agent2 = new AtpAgent({ service: 'https://bsky.social' });
+  const agent = new AtpAgent({ service: 'https://bsky.social' });
 
-  const claudeBot = new ClaudeBot({
+  const llamaBot = new LlamaBot({
     ...config,
     BLUESKY_IDENTIFIER: config.CLAUDE_IDENTIFIER,
     BLUESKY_APP_PASSWORD: config.CLAUDE_APP_PASSWORD,
-  }, agent1);
+  }, agent);
 
-  const deepseekBot = new DeepSeekBot({
-    ...config,
-    BLUESKY_IDENTIFIER: config.DEEPSEEK_IDENTIFIER,
-    BLUESKY_APP_PASSWORD: config.DEEPSEEK_APP_PASSWORD,
-  }, agent2);
-
-  // Run bots in parallel
-  await Promise.all([
-    claudeBot.monitor().catch(console.error),
-    deepseekBot.monitor().catch(console.error)
-  ]);
+  // Run bot
+  await llamaBot.monitor().catch(console.error);
 }
 
-// Start the bots
+// Start the bot
 startBots().catch(console.error);

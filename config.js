@@ -8,13 +8,9 @@ if (process.env.NODE_ENV !== 'production') {
 // Helper function to validate required env vars
 const validateConfig = (config) => {
   const required = [
-    'ANTHROPIC_API_KEY',
-    'FAL_API_KEY',
-    'DEEPSEEK_API_KEY',
-    'CLAUDE_IDENTIFIER',
-    'CLAUDE_APP_PASSWORD',
-    'DEEPSEEK_IDENTIFIER',
-    'DEEPSEEK_APP_PASSWORD',
+    'NVIDIA_NIM_API_KEY',
+    'BLUESKY_IDENTIFIER',
+    'BLUESKY_APP_PASSWORD',
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -25,13 +21,21 @@ const validateConfig = (config) => {
 
 // Configuration object
 const config = {
-  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-  FAL_API_KEY: process.env.FAL_API_KEY,
-  DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
-  CLAUDE_IDENTIFIER: process.env.CLAUDE_IDENTIFIER,
-  CLAUDE_APP_PASSWORD: process.env.CLAUDE_APP_PASSWORD,
-  DEEPSEEK_IDENTIFIER: process.env.DEEPSEEK_IDENTIFIER,
-  DEEPSEEK_APP_PASSWORD: process.env.DEEPSEEK_APP_PASSWORD,
+  NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY,
+  BLUESKY_IDENTIFIER: process.env.BLUESKY_IDENTIFIER,
+  BLUESKY_APP_PASSWORD: process.env.BLUESKY_APP_PASSWORD,
+  
+  // Model names
+  TEXT_MODEL: process.env.TEXT_MODEL || 'meta/llama-4-maverick-17b-128e-instruct',
+  IMAGE_PROMPT_MODEL: process.env.IMAGE_PROMPT_MODEL || 'meta/llama-4-scout-17b-16e-instruct',
+  IMAGE_GENERATION_MODEL: process.env.IMAGE_GENERATION_MODEL || 'black-forest-labs/flux_1-dev',
+  
+  // System prompts
+  TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
+    "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters.",
+  
+  IMAGE_PROMPT_SYSTEM_PROMPT: process.env.IMAGE_PROMPT_SYSTEM_PROMPT || 
+    "Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.",
   
   // Optional configs with defaults
   CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '60000'),
