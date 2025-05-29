@@ -510,7 +510,7 @@ class LlamaBot extends BaseBot {
       }
 
       // Make request to Nvidia NIM API for Llama 4 Maverick
-      const response = await fetch('https://api.nvcf.nvidia.com/v1/nim/completions', {
+      const response = await fetch('https://api.nvcf.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -547,7 +547,7 @@ class LlamaBot extends BaseBot {
 
   async generateImagePrompt(post, response) {
     try {
-      const promptResponse = await fetch('https://api.nvcf.nvidia.com/v1/nim/completions', {
+      const promptResponse = await fetch('https://api.nvcf.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
