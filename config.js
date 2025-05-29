@@ -28,7 +28,7 @@ const config = {
   // Model names
   TEXT_MODEL: process.env.TEXT_MODEL || 'meta/llama-4-maverick-17b-128e-instruct',
   IMAGE_PROMPT_MODEL: process.env.IMAGE_PROMPT_MODEL || 'meta/llama-4-scout-17b-16e-instruct',
-  IMAGE_GENERATION_MODEL: process.env.IMAGE_GENERATION_MODEL || 'black-forest-labs/flux_1-dev',
+  IMAGE_GENERATION_MODEL: process.env.IMAGE_GENERATION_MODEL || 'black-forest-labs/flux.1-dev',
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
