@@ -460,7 +460,8 @@ class BaseBot {
   // Add a method to generate image using Nvidia NIM
   async generateImage(prompt) {
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      // Fixed endpoint for image generation
+      const response = await fetch('https://integrate.api.nvidia.com/v1/images/generations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -469,18 +470,30 @@ class BaseBot {
         body: JSON.stringify({
           model: this.config.IMAGE_GENERATION_MODEL,
           prompt: prompt,
-          size: '512x512'
+          n: 1,
+          size: '512x512',
+          response_format: 'url'
         })
       });
       
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}): ${errorText}`);
         throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
       }
       
       const data = await response.json();
-      return data.images[0].url;
+      
+      // Check if the response has the expected structure
+      if (!data.data || !Array.isArray(data.data) || data.data.length === 0 || !data.data[0].url) {
+        console.error('Unexpected response format from Nvidia NIM:', JSON.stringify(data));
+        throw new Error('Invalid response format from Nvidia NIM image generation API');
+      }
+      
+      return data.data[0].url;
     } catch (error) {
       console.error('Error generating image with Nvidia NIM:', error);
+      // Return a fallback image URL or rethrow based on your error handling strategy
       throw error;
     }
   }
@@ -529,18 +542,38 @@ class LlamaBot extends BaseBot {
             }
           ],
           temperature: 0.7,
-          max_tokens: 150
+          max_tokens: 150,
+          stream: false
         })
       });
 
+      // Enhanced error handling
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}): ${errorText}`);
+        
+        // Implement retry logic for specific error codes
+        if (response.status === 429 || response.status === 503 || response.status === 504) {
+          console.log('Rate limit or server error, retrying after delay...');
+          await utils.sleep(2000);
+          return this.generateResponse(post, context); // Recursive retry
+        }
+        
         throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
       }
 
       const data = await response.json();
+      
+      // Validate response structure
+      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message) {
+        console.error('Unexpected response format from Nvidia NIM:', JSON.stringify(data));
+        throw new Error('Invalid response format from Nvidia NIM chat completions API');
+      }
+      
       return data.choices[0].message.content;
     } catch (error) {
       console.error('Error generating Llama response:', error);
+      // Return a fallback message or null based on your error handling strategy
       return null;
     }
   }
@@ -556,22 +589,45 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: this.config.IMAGE_PROMPT_MODEL,
           messages: [{
+            role: 'system',
+            content: this.config.IMAGE_PROMPT_SYSTEM_PROMPT
+          }, {
             role: 'user',
-            content: `${this.config.IMAGE_PROMPT_SYSTEM_PROMPT}\n\nQ: ${post.record.text}\nA: ${response}`
+            content: `Q: ${post.record.text}\nA: ${response}`
           }],
           temperature: 0.7,
-          max_tokens: 150
+          max_tokens: 150,
+          stream: false
         })
       });
 
+      // Enhanced error handling
       if (!promptResponse.ok) {
+        const errorText = await promptResponse.text();
+        console.error(`Nvidia NIM API error (${promptResponse.status}): ${errorText}`);
+        
+        // Implement retry logic for specific error codes
+        if (promptResponse.status === 429 || promptResponse.status === 503 || promptResponse.status === 504) {
+          console.log('Rate limit or server error, retrying after delay...');
+          await utils.sleep(2000);
+          return this.generateImagePrompt(post, response); // Recursive retry
+        }
+        
         throw new Error(`Nvidia NIM API error: ${promptResponse.status} ${promptResponse.statusText}`);
       }
 
       const data = await promptResponse.json();
+      
+      // Validate response structure
+      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message) {
+        console.error('Unexpected response format from Nvidia NIM:', JSON.stringify(data));
+        throw new Error('Invalid response format from Nvidia NIM chat completions API');
+      }
+      
       return data.choices[0].message.content;
     } catch (error) {
       console.error('Error generating image prompt:', error);
+      // Return a fallback prompt
       return "A cute cat sitting on a windowsill looking at the sky";
     }
   }
