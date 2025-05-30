@@ -510,7 +510,7 @@ class LlamaBot extends BaseBot {
       }
 
       // Make request to Nvidia NIM API for Llama 4 Maverick
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/meta/llama-4-maverick-17b-128e-instruct', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
