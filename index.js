@@ -460,7 +460,7 @@ class BaseBot {
   // Add a method to generate image using Nvidia NIM
   async generateImage(prompt) {
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/generations', {
+      const response = await fetch('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
