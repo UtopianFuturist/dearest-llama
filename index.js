@@ -461,6 +461,7 @@ class BaseBot {
   async generateImage(prompt) {
     try {
       // Fixed endpoint for image generation
+      console.log(`NIM CALL START: generateImage for model ${this.config.IMAGE_GENERATION_MODEL}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/images/generations', {
         method: 'POST',
         headers: {
@@ -475,6 +476,7 @@ class BaseBot {
           response_format: 'url'
         })
       });
+      console.log(`NIM CALL END: generateImage for model ${this.config.IMAGE_GENERATION_MODEL} - Status: ${response.status}`);
       
       if (!response.ok) {
         const errorText = await response.text();
@@ -537,6 +539,7 @@ class LlamaBot extends BaseBot {
       }
 
       // Make request to Nvidia NIM API for Llama 4 Maverick
+      console.log(`NIM CALL START: generateResponse for model ${this.config.TEXT_MODEL}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -560,6 +563,7 @@ class LlamaBot extends BaseBot {
           stream: false
         })
       });
+      console.log(`NIM CALL END: generateResponse for model ${this.config.TEXT_MODEL} - Status: ${response.status}`);
 
       // Enhanced error handling
       if (!response.ok) {
@@ -600,6 +604,7 @@ class LlamaBot extends BaseBot {
 
   async generateImagePrompt(post, response) {
     try {
+      console.log(`NIM CALL START: generateImagePrompt for model ${this.config.IMAGE_PROMPT_MODEL}`);
       const promptResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -620,6 +625,7 @@ class LlamaBot extends BaseBot {
           stream: false
         })
       });
+      console.log(`NIM CALL END: generateImagePrompt for model ${this.config.IMAGE_PROMPT_MODEL} - Status: ${promptResponse.status}`);
 
       // Enhanced error handling
       if (!promptResponse.ok) {
