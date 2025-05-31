@@ -32,6 +32,21 @@ This bot is designed to be deployed on Render.com's free tier. You can use the i
 You will need a Render account to deploy this bot.
 When deploying on Render, ensure you set it up as a 'Web Service'.
 
+**Important Note for Render's Free Tier:**
+
+Render's free tier web services will automatically spin down after 15 minutes of inactivity. This means your bot will stop checking for new mentions if it doesn't receive any web traffic.
+
+To keep your bot alive and continuously checking for mentions, you can use Render's free Cron Jobs:
+
+1.  In your Render dashboard, navigate to your service.
+2.  Go to the "Cron" tab.
+3.  Click "New Cron Job".
+4.  Set the "Command" to `curl YOUR_SERVICE_URL/health` (replace `YOUR_SERVICE_URL` with your bot's actual URL on Render). This command sends a request to the `/health` endpoint (which you'll need to ensure exists in your bot's code – it can be a simple endpoint that returns a 200 OK response).
+5.  Set the "Schedule" to `*/10 * * * *` (this will run the command every 10 minutes).
+6.  Save the Cron Job.
+
+This will ensure your bot receives a request every 10 minutes, preventing it from spinning down due to inactivity.
+
 ## Local Development
 
 1. Clone this repository
