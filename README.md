@@ -20,7 +20,7 @@ Note: These require an active BlueSky account.
 #### System Prompts (Customizable)
 - `TEXT_SYSTEM_PROMPT`: System prompt for text generation (default: "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters.")
 
-#### Other Settings
+#### Additional Render Variables
 - `CHECK_INTERVAL`: Milliseconds between checks for new mentions (default: `60000`)
 - `MAX_RETRIES`: Maximum number of retries for failed operations (default: `5`)
 - `BACKOFF_DELAY`: Base delay in milliseconds for exponential backoff (default: `60000`)
@@ -30,7 +30,7 @@ Note: These require an active BlueSky account.
 
 This bot is designed to be deployed on Render.com's free tier. You can use the included `render.yaml` file for easy deployment.
 You will need a Render account to deploy this bot.
-When deploying on Render, ensure you set it up as a 'Web Service'.
+When deploying on Render, ensure you set it up as a 'Web Service'. You must add all the environment variables mentioned here with their values except for TEXT_MODEL (which is now hardcoded)
 
 **Important Note for Render's Free Tier:**
 
