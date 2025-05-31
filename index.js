@@ -478,7 +478,21 @@ class BaseBot {
       
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`Nvidia NIM API error (${response.status}): ${errorText}`);
+        console.error(`Nvidia NIM API error (${response.status}) - Text: ${errorText}`);
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.error(`Nvidia NIM API error (${response.status}) - JSON:`, errorJson);
+        } catch (e) {
+          // Not a JSON response, or JSON parsing failed. errorText is already logged.
+        }
+
+        // Add retry logic here
+        if (response.status === 429 || response.status === 503 || response.status === 504) {
+          console.log(`Rate limit or server error in generateImage (${response.status}), retrying after delay...`);
+          await utils.sleep(2000); // Using a fixed 2-second delay like in other functions
+          return this.generateImage(prompt); // Recursive retry
+        }
+
         throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
       }
       
@@ -550,7 +564,13 @@ class LlamaBot extends BaseBot {
       // Enhanced error handling
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`Nvidia NIM API error (${response.status}): ${errorText}`);
+        console.error(`Nvidia NIM API error (${response.status}) - Text: ${errorText}`);
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.error(`Nvidia NIM API error (${response.status}) - JSON:`, errorJson);
+        } catch (e) {
+          // Not a JSON response, or JSON parsing failed. errorText is already logged.
+        }
         
         // Implement retry logic for specific error codes
         if (response.status === 429 || response.status === 503 || response.status === 504) {
@@ -604,7 +624,13 @@ class LlamaBot extends BaseBot {
       // Enhanced error handling
       if (!promptResponse.ok) {
         const errorText = await promptResponse.text();
-        console.error(`Nvidia NIM API error (${promptResponse.status}): ${errorText}`);
+        console.error(`Nvidia NIM API error (${promptResponse.status}) - Text: ${errorText}`);
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.error(`Nvidia NIM API error (${promptResponse.status}) - JSON:`, errorJson);
+        } catch (e) {
+          // Not a JSON response, or JSON parsing failed. errorText is already logged.
+        }
         
         // Implement retry logic for specific error codes
         if (promptResponse.status === 429 || promptResponse.status === 503 || promptResponse.status === 504) {
