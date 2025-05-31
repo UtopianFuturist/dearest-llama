@@ -39,10 +39,6 @@ When deploying on Render, ensure you set it up as a 'Web Service'.
 3. Run `npm install`
 4. Run `npm start`
 
-## Changes from Original Repository
-
-See [CHANGES.md](./CHANGES.md) for a detailed list of modifications from the original Dearest Claude repository.
-
 ## License
 
 ISC
