@@ -1,6 +1,6 @@
 # Dearest Llama (Modified for Nvidia NIM)
 
-A Bluesky bot that responds to mentions with Llama 4 Scout or the model specified in the `TEXT_MODEL` environment variable.
+A Bluesky bot that responds to mentions with Llama 4 Scout in the `TEXT_MODEL` environment variable.
 
 ## Environment Variables
 
