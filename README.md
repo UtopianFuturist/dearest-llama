@@ -28,7 +28,7 @@ Note: These require an active BlueSky account.
 
 ## Deployment
 
-This bot is designed to be deployed on Render.com. You can use the included `render.yaml` file for easy deployment.
+This bot is designed to be deployed on Render.com's free tier. You can use the included `render.yaml` file for easy deployment.
 You will need a Render account to deploy this bot.
 When deploying on Render, ensure you set it up as a 'Web Service'.
 
