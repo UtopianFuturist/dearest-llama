@@ -25,11 +25,6 @@ const config = {
   BLUESKY_IDENTIFIER: process.env.BLUESKY_IDENTIFIER,
   BLUESKY_APP_PASSWORD: process.env.BLUESKY_APP_PASSWORD,
   
-  // Model names
-  TEXT_MODEL: process.env.TEXT_MODEL || 'meta/llama-4-maverick-17b-128e-instruct',
-  IMAGE_PROMPT_MODEL: process.env.IMAGE_PROMPT_MODEL || 'meta/llama-4-scout-17b-16e-instruct',
-  IMAGE_GENERATION_MODEL: process.env.IMAGE_GENERATION_MODEL || 'black-forest-labs/flux_1-dev',
-  
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
     "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters.",

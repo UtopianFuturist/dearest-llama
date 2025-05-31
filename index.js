@@ -1,7 +1,6 @@
 import { AtpAgent } from '@atproto/api';
 import config from './config.js';
 import fetch from 'node-fetch';
-import sharp from 'sharp';
 import express from 'express';
 
 // Add express to your package.json dependencies
@@ -393,50 +392,8 @@ class BaseBot {
     try {
       RateLimit.check();
       
-      // Generate image prompt using Llama 4 Scout
-      const imagePrompt = await this.generateImagePrompt(post, response);
-      console.log('Generated image prompt:', imagePrompt);
-
-      // Generate image using Nvidia NIM Flux Dev
-      const imageUrl = await this.generateImage(imagePrompt);
-      console.log('Generated image URL:', imageUrl);
-
-      // Fetch the image directly
-      const imageResponse = await fetch(imageUrl);
-      const imageBuffer = await imageResponse.buffer();
-
-      // Process image just to ensure correct format and size
-      const processedImageBuffer = await sharp(imageBuffer)
-        .resize(512, 512, {
-          fit: 'contain',
-          background: { r: 255, g: 255, b: 255, alpha: 1 }
-        })
-        .jpeg({ quality: 80 })
-        .toBuffer();
-
-      // Upload directly to Bluesky
-      const uploadResult = await this.agent.uploadBlob(processedImageBuffer, {
-        encoding: 'image/jpeg'
-      });
-
-      // Create detailed alt text
-      const altText = [
-        `Response Model: ${this.getModelName()}`,
-        'Response Prompt: Text and images upthread of this comment',
-        `Image Prompt Model: ${this.config.IMAGE_PROMPT_MODEL.split('/').pop()}`,
-        `Image Prompt: ${imagePrompt}`,
-        `Image Generation Model: ${this.config.IMAGE_GENERATION_MODEL.split('/').pop()}`
-      ].join('\n');
-
       const replyObject = {
         text: utils.truncateResponse(response),
-        embed: {
-          $type: 'app.bsky.embed.images',
-          images: [{
-            alt: altText,
-            image: uploadResult.data.blob
-          }]
-        },
         reply: {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
           parent: { uri: post.uri, cid: post.cid }
@@ -455,63 +412,6 @@ class BaseBot {
   // Add a method to get model name
   getModelName() {
     return 'Unknown Model';
-  }
-  
-  // Add a method to generate image using Nvidia NIM
-  async generateImage(prompt) {
-    try {
-      // Fixed endpoint for image generation
-      console.log(`NIM CALL START: generateImage for model ${this.config.IMAGE_GENERATION_MODEL}`);
-      const response = await fetch('https://integrate.api.nvidia.com/v1/images/generations', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: this.config.IMAGE_GENERATION_MODEL,
-          prompt: prompt,
-          n: 1,
-          size: '512x512',
-          response_format: 'url'
-        })
-      });
-      console.log(`NIM CALL END: generateImage for model ${this.config.IMAGE_GENERATION_MODEL} - Status: ${response.status}`);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Nvidia NIM API error (${response.status}) - Text: ${errorText}`);
-        try {
-          const errorJson = JSON.parse(errorText);
-          console.error(`Nvidia NIM API error (${response.status}) - JSON:`, errorJson);
-        } catch (e) {
-          // Not a JSON response, or JSON parsing failed. errorText is already logged.
-        }
-
-        // Add retry logic here
-        if (response.status === 429 || response.status === 503 || response.status === 504) {
-          console.log(`Rate limit or server error in generateImage (${response.status}), retrying after delay...`);
-          await utils.sleep(2000); // Using a fixed 2-second delay like in other functions
-          return this.generateImage(prompt); // Recursive retry
-        }
-
-        throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
-      }
-      
-      const data = await response.json();
-      
-      // Check if the response has the expected structure
-      if (!data.data || !Array.isArray(data.data) || data.data.length === 0 || !data.data[0].url) {
-        console.error('Unexpected response format from Nvidia NIM:', JSON.stringify(data));
-        throw new Error('Invalid response format from Nvidia NIM image generation API');
-      }
-      
-      return data.data[0].url;
-    } catch (error) {
-      console.error('Error generating image with Nvidia NIM:', error);
-      // Return a fallback image URL or rethrow based on your error handling strategy
-      throw error;
-    }
   }
 }
 
@@ -539,7 +439,7 @@ class LlamaBot extends BaseBot {
       }
 
       // Make request to Nvidia NIM API for Llama 4 Maverick
-      console.log(`NIM CALL START: generateResponse for model ${this.config.TEXT_MODEL}`);
+      console.log(`NIM CALL START: generateResponse for model meta/llama-4-scout-17b-16e-instruct`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -547,7 +447,7 @@ class LlamaBot extends BaseBot {
           'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
         },
         body: JSON.stringify({
-          model: this.config.TEXT_MODEL,
+          model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
             {
               role: "system",
@@ -563,7 +463,7 @@ class LlamaBot extends BaseBot {
           stream: false
         })
       });
-      console.log(`NIM CALL END: generateResponse for model ${this.config.TEXT_MODEL} - Status: ${response.status}`);
+      console.log(`NIM CALL END: generateResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${response.status}`);
 
       // Enhanced error handling
       if (!response.ok) {
@@ -602,70 +502,8 @@ class LlamaBot extends BaseBot {
     }
   }
 
-  async generateImagePrompt(post, response) {
-    try {
-      console.log(`NIM CALL START: generateImagePrompt for model ${this.config.IMAGE_PROMPT_MODEL}`);
-      const promptResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: this.config.IMAGE_PROMPT_MODEL,
-          messages: [{
-            role: 'system',
-            content: this.config.IMAGE_PROMPT_SYSTEM_PROMPT
-          }, {
-            role: 'user',
-            content: `Q: ${post.record.text}\nA: ${response}`
-          }],
-          temperature: 0.7,
-          max_tokens: 150,
-          stream: false
-        })
-      });
-      console.log(`NIM CALL END: generateImagePrompt for model ${this.config.IMAGE_PROMPT_MODEL} - Status: ${promptResponse.status}`);
-
-      // Enhanced error handling
-      if (!promptResponse.ok) {
-        const errorText = await promptResponse.text();
-        console.error(`Nvidia NIM API error (${promptResponse.status}) - Text: ${errorText}`);
-        try {
-          const errorJson = JSON.parse(errorText);
-          console.error(`Nvidia NIM API error (${promptResponse.status}) - JSON:`, errorJson);
-        } catch (e) {
-          // Not a JSON response, or JSON parsing failed. errorText is already logged.
-        }
-        
-        // Implement retry logic for specific error codes
-        if (promptResponse.status === 429 || promptResponse.status === 503 || promptResponse.status === 504) {
-          console.log('Rate limit or server error, retrying after delay...');
-          await utils.sleep(2000);
-          return this.generateImagePrompt(post, response); // Recursive retry
-        }
-        
-        throw new Error(`Nvidia NIM API error: ${promptResponse.status} ${promptResponse.statusText}`);
-      }
-
-      const data = await promptResponse.json();
-      
-      // Validate response structure
-      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message) {
-        console.error('Unexpected response format from Nvidia NIM:', JSON.stringify(data));
-        throw new Error('Invalid response format from Nvidia NIM chat completions API');
-      }
-      
-      return data.choices[0].message.content;
-    } catch (error) {
-      console.error('Error generating image prompt:', error);
-      // Return a fallback prompt
-      return "A cute cat sitting on a windowsill looking at the sky";
-    }
-  }
-
   getModelName() {
-    return this.config.TEXT_MODEL.split('/').pop();
+    return 'meta/llama-4-scout-17b-16e-instruct'.split('/').pop();
   }
 }
 
