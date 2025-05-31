@@ -34,18 +34,19 @@ When deploying on Render, ensure you set it up as a 'Web Service'.
 
 **Important Note for Render's Free Tier:**
 
-Render's free tier web services will automatically spin down after 15 minutes of inactivity. This means your bot will stop checking for new mentions if it doesn't receive any web traffic.
+Render's free tier web services will automatically spin down after 15 minutes of inactivity (see https://render.com/docs/free for more details). This means your bot will stop checking for new mentions if it doesn't receive any web traffic.
 
-To keep your bot alive and continuously checking for mentions, you can use Render's free Cron Jobs:
+To keep your bot alive and continuously checking for mentions, it's recommended to use an external cron job service to periodically send a request to your bot's health check endpoint. A popular free option is [cron-job.org](https://cron-job.org/en/).
 
-1.  In your Render dashboard, navigate to your service.
-2.  Go to the "Cron" tab.
-3.  Click "New Cron Job".
-4.  Set the "Command" to `curl YOUR_SERVICE_URL/health` (replace `YOUR_SERVICE_URL` with your bot's actual URL on Render). This command sends a request to the `/health` endpoint (which you'll need to ensure exists in your bot's code – it can be a simple endpoint that returns a 200 OK response).
-5.  Set the "Schedule" to `*/10 * * * *` (this will run the command every 10 minutes).
-6.  Save the Cron Job.
+Here's how you can set it up using an external service like cron-job.org:
 
-This will ensure your bot receives a request every 10 minutes, preventing it from spinning down due to inactivity.
+1.  **Sign up or log in** to the external cron job service (e.g., [cron-job.org](https://cron-job.org/en/)).
+2.  **Create a new cron job.**
+3.  **Set the URL to call:** This will be your Render service's public URL, pointing to the `/health` endpoint. It will look something like `https://your-bot-name.onrender.com/health`. Make sure your bot's code has a `/health` endpoint that returns a 200 OK response (this project already includes one in `index.js`).
+4.  **Set the schedule (Execution time):** A common schedule is every 10 to 14 minutes to ensure the service doesn't spin down. For example, on cron-job.org, you can select "Every 10 minutes".
+5.  **Save the cron job.**
+
+This setup will send a request to your bot at regular intervals, preventing it from spinning down due to inactivity.
 
 ## Local Development
 
