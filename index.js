@@ -152,6 +152,12 @@ class BaseBot {
   }
 
   async handleAdminPostCommand(post, adminInstructions) {
+    // Explicit check at the beginning of command handling
+    if (await this.hasAlreadyReplied(post)) {
+      console.log(`[ADMIN_CMD_SKIP_REPLIED] Post URI ${post.uri} already replied or processed, skipping in handleAdminPostCommand.`);
+      return; // Exit if already handled
+    }
+
     console.log(`[HANDLE_ADMIN_POST_COMMAND_ENTER] Timestamp: ${new Date().toISOString()}, Post URI: ${post.uri}, Admin Instructions: "${adminInstructions}"`);
     if (adminInstructions) { // This log is somewhat redundant with the one above but can be kept for clarity during debugging specific instruction flows.
       console.log(`Admin instructions received: "${adminInstructions}"`);
@@ -253,6 +259,14 @@ class BaseBot {
           
           lastCheckedPost = latestPost.uri;
 
+          // NEW CHECK: If already replied to this post (either as normal reply or handled by admin command previously), skip.
+          // This relies on hasAlreadyReplied or handleAdminPostCommand (via its confirmation reply) adding the URI to repliedPosts.
+          if (latestPost.post && await this.hasAlreadyReplied(latestPost.post)) {
+            console.log(`[MONITOR_SKIP_REPLIED] Post URI ${latestPost.post.uri} already replied or processed by admin, skipping in monitor.`);
+            await utils.sleep(this.config.CHECK_INTERVAL); // Standard wait before next cycle
+            continue;
+          }
+
           // Check for Admin Command
           if (latestPost.post &&
               latestPost.post.author &&
@@ -262,7 +276,8 @@ class BaseBot {
               latestPost.post.record.text.includes('!post')) {
 
             const commandText = latestPost.post.record.text;
-            const instructionMatch = commandText.match(/^!post\s+(.+)/s);
+            // Removed ^ from regex to allow !post anywhere in the text
+            const instructionMatch = commandText.match(/!post\s+(.+)/s);
             const adminInstructions = instructionMatch ? instructionMatch[1].trim() : '';
             
             await this.handleAdminPostCommand(latestPost.post, adminInstructions);
