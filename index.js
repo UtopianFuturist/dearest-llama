@@ -259,14 +259,6 @@ class BaseBot {
           
           lastCheckedPost = latestPost.uri;
 
-          // NEW CHECK: If already replied to this post (either as normal reply or handled by admin command previously), skip.
-          // This relies on hasAlreadyReplied or handleAdminPostCommand (via its confirmation reply) adding the URI to repliedPosts.
-          if (latestPost.post && await this.hasAlreadyReplied(latestPost.post)) {
-            console.log(`[MONITOR_SKIP_REPLIED] Post URI ${latestPost.post.uri} already replied or processed by admin, skipping in monitor.`);
-            await utils.sleep(this.config.CHECK_INTERVAL); // Standard wait before next cycle
-            continue;
-          }
-
           // Check for Admin Command
           if (latestPost.post &&
               latestPost.post.author &&
