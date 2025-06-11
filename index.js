@@ -151,9 +151,14 @@ class BaseBot {
     }
   }
 
-  async handleAdminPostCommand(post) {
-    console.log(`Processing admin command for post URI: ${post.uri}`);
+  async handleAdminPostCommand(post, adminInstructions) {
+    console.log(`Processing admin command !post from ${post.author.handle} for post URI: ${post.uri}`);
+    if (adminInstructions) {
+      console.log(`Admin instructions received: "${adminInstructions}"`);
+    }
     try {
+      this.repliedPosts.add(post.uri); // Moved here for idempotency
+
       const context = await this.getReplyContext(post);
       if (!context || context.length === 0) {
         console.warn(`Admin command: Context for post ${post.uri} is empty or could not be fetched.`);
@@ -161,13 +166,12 @@ class BaseBot {
         return;
       }
 
-      const newPostText = await this.generateStandalonePostFromContext(context);
+      const newPostText = await this.generateStandalonePostFromContext(context, adminInstructions);
 
       if (newPostText) {
         console.log(`Admin command: Generated new post text: "${newPostText}"`);
         await this.postToOwnFeed(newPostText);
-        // Add to repliedPosts to prevent any further standard processing of the admin command post itself
-        this.repliedPosts.add(post.uri);
+        // this.repliedPosts.add(post.uri); // Removed from here
       } else {
         console.warn(`Admin command: generateStandalonePostFromContext returned no text for post ${post.uri}.`);
         // Optionally, reply to the admin post with an error or status
@@ -178,9 +182,9 @@ class BaseBot {
     }
   }
 
-  async generateStandalonePostFromContext(context) {
+  async generateStandalonePostFromContext(context, adminInstructions) { // Signature updated in BaseBot as well for consistency
     // Placeholder implementation - to be properly implemented in LlamaBot
-    console.log('BaseBot.generateStandalonePostFromContext called, not fully implemented. Context:', JSON.stringify(context, null, 2));
+    console.log('BaseBot.generateStandalonePostFromContext called. Context:', JSON.stringify(context, null, 2), 'Instructions:', adminInstructions);
     return 'Placeholder post text generated from context by BaseBot.';
   }
 
@@ -242,8 +246,12 @@ class BaseBot {
               latestPost.post.record &&
               latestPost.post.record.text &&
               latestPost.post.record.text.includes('!post')) {
+
+            const commandText = latestPost.post.record.text;
+            const instructionMatch = commandText.match(/^!post\s+(.+)/s);
+            const adminInstructions = instructionMatch ? instructionMatch[1].trim() : '';
             
-            await this.handleAdminPostCommand(latestPost.post);
+            await this.handleAdminPostCommand(latestPost.post, adminInstructions);
 
           } else {
             // Existing logic for handling regular replies
@@ -486,8 +494,8 @@ class LlamaBot extends BaseBot {
     super(config, agent);
   }
 
-  async generateStandalonePostFromContext(context) {
-    console.log('LlamaBot.generateStandalonePostFromContext called with context:', JSON.stringify(context, null, 2));
+  async generateStandalonePostFromContext(context, adminInstructions) {
+    console.log('LlamaBot.generateStandalonePostFromContext called. Context:', JSON.stringify(context, null, 2), 'Instructions:', adminInstructions);
     try {
       let conversationHistory = '';
       if (context && context.length > 0) {
@@ -506,7 +514,11 @@ class LlamaBot extends BaseBot {
         return null;
       }
 
-      const userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
+      let userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
+
+      if (adminInstructions && adminInstructions.trim() !== '') {
+        userPrompt += `\n\nImportant specific instructions from the admin for this post: "${adminInstructions}". Please ensure the generated post carefully follows these instructions.`;
+      }
 
       console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-4-scout-17b-16e-instruct`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
