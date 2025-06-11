@@ -10,6 +10,7 @@ A Bluesky bot that responds to mentions with Llama 4 Scout in the `TEXT_MODEL` e
 You'll need a free Nvidia NIM account. You can obtain your API key from [https://build.nvidia.com/meta/llama-4-scout-17b-16e-instruct](https://build.nvidia.com/meta/llama-4-scout-17b-16e-instruct) by clicking 'Get API Key'.
 - `BLUESKY_IDENTIFIER`: Your Bluesky handle (e.g., `username.bsky.social`)
 - `BLUESKY_APP_PASSWORD`: Your Bluesky app password
+- `ADMIN_BLUESKY_HANDLE`: (Required for admin features) The Bluesky handle of the bot's administrator (e.g., `adminuser.bsky.social`). Only this user can issue admin commands.
 Note: These require an active BlueSky account.
 
 ### Optional Environment Variables
@@ -25,6 +26,34 @@ Note: These require an active BlueSky account.
 - `MAX_RETRIES`: Maximum number of retries for failed operations (default: `5`)
 - `BACKOFF_DELAY`: Base delay in milliseconds for exponential backoff (default: `60000`)
 - `MAX_REPLIED_POSTS`: Maximum number of posts to track as replied (default: `1000`)
+
+## Admin Features
+
+These features are intended for use by the bot administrator, whose Bluesky handle is set via the `ADMIN_BLUESKY_HANDLE` environment variable.
+
+### Configuration
+
+-   `ADMIN_BLUESKY_HANDLE`: (Already listed under Required Environment Variables, but reiterated here for clarity in the context of admin features) The Bluesky handle of the bot's administrator (e.g., `adminuser.bsky.social`). Only this user can issue admin commands. This variable is required if you intend to use any admin commands.
+
+### Commands
+
+#### `!post` Command
+
+The `!post` command allows the administrator to instruct the bot to create a new, standalone post on its own profile. This post is generated based on the context of the thread where the `!post` command is issued, combined with any specific instructions provided by the admin.
+
+-   **Admin-only**: This command can only be triggered by the user specified in `ADMIN_BLUESKY_HANDLE`.
+-   **Function**:
+    1.  The bot fetches the conversation context from the thread where the `!post` command was made.
+    2.  It then uses its underlying language model (Llama 4 Scout) to understand this context.
+    3.  Based on this understanding and any additional instructions, it generates a new standalone post, adopting the bot's configured persona.
+    4.  This new post is then published directly to the bot's own feed.
+-   **Syntax & Instructions**:
+    To provide specific guidance to the LLM for generating the post, append your instructions after the `!post` command, like so:
+    `!post <your specific instructions for the post>`
+-   **Example**:
+    If the admin replies in a thread with:
+    `!post Please summarize the key points of this discussion and ask an open-ended question related to future developments.`
+    The bot will analyze the discussion in that thread, and then, guided by the admin's instruction, generate a new post for its own feed that summarizes the key points and includes a relevant open-ended question. The LLM will attempt to adhere to the bot's persona and Bluesky's character limits.
 
 ## Deployment
 
