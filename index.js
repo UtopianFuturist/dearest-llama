@@ -572,7 +572,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
         console.log('LlamaBot.generateStandalonePostFromContext: Using context-focused prompt.');
       }
 
-      console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-4-scout-17b-16e-instruct with prompt: ${userPrompt}`);
+      console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-3.3-70b-instruct with prompt: ${userPrompt}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -596,7 +596,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           stream: false
         })
       });
-      console.log(`NIM CALL END: generateStandalonePostFromContext - Status: ${response.status}`);
+      console.log(`NIM CALL END: generateStandalonePostFromContext for model meta/llama-3.3-70b-instruct - Status: ${response.status}`);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -644,7 +644,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
       }
 
       // Make request to Nvidia NIM API for Llama 4 Maverick
-      console.log(`NIM CALL START: generateResponse for model meta/llama-4-scout-17b-16e-instruct`);
+      console.log(`NIM CALL START: generateResponse for model meta/llama-3.3-70b-instruct`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -668,7 +668,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           stream: false
         })
       });
-      console.log(`NIM CALL END: generateResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${response.status}`);
+      console.log(`NIM CALL END: generateResponse for model meta/llama-3.3-70b-instruct - Status: ${response.status}`);
 
       // Enhanced error handling
       if (!response.ok) {
