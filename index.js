@@ -583,7 +583,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
               content: userPrompt
             }
           ],
-          temperature: 0.75, // May want to adjust temperature for more creative standalone posts
+          temperature: 0.90, // May want to adjust temperature for more creative standalone posts
           max_tokens: 100,  // Max 300 chars ~ 75-100 tokens
           stream: false
         })
