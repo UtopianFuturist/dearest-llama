@@ -183,19 +183,19 @@ class BaseBot {
           
           lastCheckedPost = latestPost.uri;
 
-          if (latestPost.post?.record?.text?.includes(this.config.BLUESKY_IDENTIFIER)) {
-            const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
+          // The condition to check for BLUESKY_IDENTIFIER in post text has been removed.
+          // The bot will now attempt to reply to any post that passes the getRecentPosts filter.
+          const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
             
-            if (!alreadyReplied) {
-              console.log('Generating and posting response...');
-              const context = await this.getReplyContext(latestPost.post);
-              const response = await this.generateResponse(latestPost.post, context);
-              
-              if (response) {
-                await this.postReply(latestPost.post, response);
-                // Add rate limiting delay after posting
-                await utils.sleep(2000);
-              }
+          if (!alreadyReplied) {
+            console.log('Generating and posting response...');
+            const context = await this.getReplyContext(latestPost.post);
+            const response = await this.generateResponse(latestPost.post, context);
+
+            if (response) {
+              await this.postReply(latestPost.post, response);
+              // Add rate limiting delay after posting
+              await utils.sleep(2000);
             }
           }
 
