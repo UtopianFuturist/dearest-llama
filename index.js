@@ -250,8 +250,8 @@ class BaseBot {
       // Filter for mention notifications, excluding self-mentions
       const relevantPosts = notifications.notifications
         .filter(notif => {
-          // Check if it's a mention
-          if (notif.reason !== 'mention') return false;
+          // Exclude 'like' notifications
+          if (notif.reason === 'like') return false;
           
           // Prevent self-replies
           return notif.author.handle !== this.config.BLUESKY_IDENTIFIER;
