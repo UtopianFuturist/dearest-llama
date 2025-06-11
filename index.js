@@ -564,7 +564,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
         console.log('LlamaBot.generateStandalonePostFromContext: Using context-focused prompt.');
       }
 
-      console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-3.3-70b-instruct with prompt: ${userPrompt}`);
+      console.log(`NIM CALL START: generateStandalonePostFromContext for model nvidia/llama-3.3-nemotron-super-49b-v1 with prompt: ${userPrompt}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -572,7 +572,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
         },
         body: JSON.stringify({
-          model: 'meta/llama-3.3-70b-instruct', // Or any other suitable model
+          model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or any other suitable model
           messages: [
             {
               role: "system",
@@ -588,7 +588,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           stream: false
         })
       });
-      console.log(`NIM CALL END: generateStandalonePostFromContext for model meta/llama-3.3-70b-instruct - Status: ${response.status}`);
+      console.log(`NIM CALL END: generateStandalonePostFromContext for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -636,7 +636,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
       }
 
       // Make request to Nvidia NIM API for Llama 4 Maverick
-      console.log(`NIM CALL START: generateResponse for model meta/llama-3.3-70b-instruct`);
+      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -644,7 +644,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
         },
         body: JSON.stringify({
-          model: 'meta/llama-3.3-70b-instruct',
+          model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
           messages: [
             {
               role: "system",
@@ -660,7 +660,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           stream: false
         })
       });
-      console.log(`NIM CALL END: generateResponse for model meta/llama-3.3-70b-instruct - Status: ${response.status}`);
+      console.log(`NIM CALL END: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
 
       // Enhanced error handling
       if (!response.ok) {
@@ -700,7 +700,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
   }
 
   getModelName() {
-    return 'meta/llama-3.3-70b-instruct'.split('/').pop();
+    return 'nvidia/llama-3.3-nemotron-super-49b-v1'.split('/').pop();
   }
 }
 

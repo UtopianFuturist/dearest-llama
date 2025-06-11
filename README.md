@@ -1,13 +1,13 @@
 # Dearest Llama (Modified for Nvidia NIM)
 
-A Bluesky bot that responds to mentions using Nvidia NIM, specifically with the Llama 3.3 70B Instruct model.
+A Bluesky bot that responds to mentions using Nvidia NIM, specifically with the Nemotron-4 9B Instruct model.
 
 ## Environment Variables
 
 ### Required Environment Variables
 
-- `NVIDIA_NIM_API_KEY`: Your Nvidia NIM API key (used for Llama 3.3 70B Instruct text generation).
-You'll need a free Nvidia NIM account. You can obtain your API key from the Nvidia build website (e.g., by searching for the Llama 3.3 70B Instruct model).
+- `NVIDIA_NIM_API_KEY`: Your Nvidia NIM API key (used for Nemotron-4 9B Instruct text generation).
+You'll need a free Nvidia NIM account. You can obtain your API key from the Nvidia build website (e.g., by searching for the Nemotron-4 9B Instruct model).
 - `BLUESKY_IDENTIFIER`: Your Bluesky handle (e.g., `username.bsky.social`)
 - `BLUESKY_APP_PASSWORD`: Your Bluesky app password
 - `ADMIN_BLUESKY_HANDLE`: (Required for admin features) The Bluesky handle of the bot's administrator (e.g., `adminuser.bsky.social`). Only this user can issue admin commands.
@@ -41,7 +41,7 @@ The `!post` command allows the administrator to instruct the bot to create a new
 -   **Admin-only**: This command can only be triggered by the user specified in `ADMIN_BLUESKY_HANDLE`.
 -   **Function**:
     1.  The bot fetches the conversation context from the thread where the `!post` command was made.
-    2.  It then uses its underlying language model (Llama 3.3 70B Instruct) to understand this context.
+    2.  It then uses its underlying language model (Nemotron-4 9B Instruct) to understand this context.
     3.  Based on this understanding and any additional instructions, it generates a new standalone post, adopting the bot's configured persona.
     4.  This new post is then published directly to the bot's own feed.
 -   **Syntax & Instructions**:
