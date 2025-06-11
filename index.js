@@ -152,12 +152,13 @@ class BaseBot {
   }
 
   async handleAdminPostCommand(post, adminInstructions) {
-    console.log(`Processing admin command !post from ${post.author.handle} for post URI: ${post.uri}`);
-    if (adminInstructions) {
+    console.log(`[HANDLE_ADMIN_POST_COMMAND_ENTER] Timestamp: ${new Date().toISOString()}, Post URI: ${post.uri}, Admin Instructions: "${adminInstructions}"`);
+    if (adminInstructions) { // This log is somewhat redundant with the one above but can be kept for clarity during debugging specific instruction flows.
       console.log(`Admin instructions received: "${adminInstructions}"`);
     }
     try {
       this.repliedPosts.add(post.uri); // Moved here for idempotency
+      console.log(`[HANDLE_ADMIN_POST_COMMAND_PROCESSED_URI] Timestamp: ${new Date().toISOString()}, Added to repliedPosts: ${post.uri}`);
 
       const context = await this.getReplyContext(post);
       if (!context || context.length === 0) {
@@ -170,7 +171,16 @@ class BaseBot {
 
       if (newPostText) {
         console.log(`Admin command: Generated new post text: "${newPostText}"`);
-        await this.postToOwnFeed(newPostText);
+        const postSuccess = await this.postToOwnFeed(newPostText);
+
+        if (postSuccess) {
+          const confirmationMessage = `Admin command executed. I've posted the following to my feed: "${utils.truncateResponse(newPostText, 100)}"`;
+          await this.postReply(post, confirmationMessage);
+          console.log(`Sent confirmation reply to admin for post URI: ${post.uri}`);
+        } else {
+          console.warn(`Admin command: postToOwnFeed failed for post URI: ${post.uri}. No confirmation reply sent.`);
+          // Optionally, send a different reply indicating failure to post to own feed
+        }
         // this.repliedPosts.add(post.uri); // Removed from here
       } else {
         console.warn(`Admin command: generateStandalonePostFromContext returned no text for post ${post.uri}.`);
@@ -189,7 +199,7 @@ class BaseBot {
   }
 
   async postToOwnFeed(text) {
-    console.log(`Attempting to post to own feed: "${text}"`);
+    console.log(`Attempting to post to own feed: "${text}"`); // This existing log is good.
     try {
       RateLimit.check();
 
@@ -199,11 +209,15 @@ class BaseBot {
         // createdAt: new Date().toISOString() // Usually handled by the server
       };
 
+      console.log(`[POST_TO_OWN_FEED_INVOKED] Timestamp: ${new Date().toISOString()}, Text: "${text}", Truncated Text: "${postObject.text}", PostObject: ${JSON.stringify(postObject)}`);
       const result = await this.agent.post(postObject);
-      console.log(`Successfully posted to own feed. New post URI: ${result.uri}`);
+      console.log(`Successfully posted to own feed. New post URI: ${result.uri}`); // This existing log is good.
+      console.log(`[POST_TO_OWN_FEED_SUCCESS] Timestamp: ${new Date().toISOString()}, URI: ${result.uri}, Text: "${text}"`);
+      return true;
     } catch (error) {
       console.error('Error posting to own feed:', error);
       // Do not add to repliedPosts here, as it's not a reply context
+      return false;
     }
   }
 
@@ -497,30 +511,53 @@ class LlamaBot extends BaseBot {
   async generateStandalonePostFromContext(context, adminInstructions) {
     console.log('LlamaBot.generateStandalonePostFromContext called. Context:', JSON.stringify(context, null, 2), 'Instructions:', adminInstructions);
     try {
-      let conversationHistory = '';
-      if (context && context.length > 0) {
-        for (const msg of context) {
-          conversationHistory += `${msg.author}: ${msg.text}\n`;
-          if (msg.images && msg.images.length > 0) {
-            msg.images.forEach(image => {
-              if (image.alt) {
-                conversationHistory += `[Image description: ${image.alt}]\n`;
-              }
-            });
-          }
-        }
+      const trimmedAdminInstructions = adminInstructions ? adminInstructions.trim() : '';
+
+      // Determine if context is minimal: null, empty, or only contains the admin's own "!post" command.
+      // This check assumes context[0] is the admin's command if context.length === 1.
+      const isContextMinimal = !context || context.length === 0 ||
+                               (context.length === 1 && context[0] && typeof context[0].text === 'string' && context[0].text.startsWith('!post'));
+
+      let userPrompt;
+
+      if (isContextMinimal && trimmedAdminInstructions) {
+        // Context is minimal, and we have admin instructions: prioritize instructions.
+        userPrompt = `The administrator has provided specific instructions to generate a new Bluesky post. Please create a post based directly on the following instructions. Ensure the post adheres to the bot's persona (as defined in the system prompt: "${this.config.TEXT_SYSTEM_PROMPT}") and is under 300 characters.
+
+Admin Instructions: "${trimmedAdminInstructions}"
+
+(Do not attempt to summarize a prior conversation; generate directly from the instructions.)`;
+        console.log('LlamaBot.generateStandalonePostFromContext: Using admin instructions-focused prompt due to minimal context.');
+
       } else {
-        console.warn('LlamaBot.generateStandalonePostFromContext: Context is empty.');
-        return null;
+        // Context is not minimal, or there are no admin instructions; proceed with context-based generation.
+        let conversationHistory = '';
+        if (context && context.length > 0) {
+          for (const msg of context) {
+            conversationHistory += `${msg.author}: ${msg.text}\n`;
+            if (msg.images && msg.images.length > 0) {
+              msg.images.forEach(image => {
+                if (image.alt) {
+                  conversationHistory += `[Image description: ${image.alt}]\n`;
+                }
+              });
+            }
+          }
+        } else {
+          // This case should ideally be caught by isContextMinimal if adminInstructions are also missing,
+          // but as a fallback if somehow reached:
+          console.warn('LlamaBot.generateStandalonePostFromContext: Context is empty and no admin instructions to act on.');
+          return null;
+        }
+
+        userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
+        if (trimmedAdminInstructions) {
+          userPrompt += `\n\nImportant specific instructions from the admin for this post: "${trimmedAdminInstructions}". Please ensure the generated post carefully follows these instructions while also drawing from the conversation themes where appropriate.`;
+        }
+        console.log('LlamaBot.generateStandalonePostFromContext: Using context-focused prompt.');
       }
 
-      let userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
-
-      if (adminInstructions && adminInstructions.trim() !== '') {
-        userPrompt += `\n\nImportant specific instructions from the admin for this post: "${adminInstructions}". Please ensure the generated post carefully follows these instructions.`;
-      }
-
-      console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-4-scout-17b-16e-instruct`);
+      console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-4-scout-17b-16e-instruct with prompt: ${userPrompt}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: {
