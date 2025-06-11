@@ -11,6 +11,7 @@ const validateConfig = (config) => {
     'NVIDIA_NIM_API_KEY',
     'BLUESKY_IDENTIFIER',
     'BLUESKY_APP_PASSWORD',
+    'ADMIN_BLUESKY_HANDLE',
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -24,6 +25,7 @@ const config = {
   NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY,
   BLUESKY_IDENTIFIER: process.env.BLUESKY_IDENTIFIER,
   BLUESKY_APP_PASSWORD: process.env.BLUESKY_APP_PASSWORD,
+  ADMIN_BLUESKY_HANDLE: process.env.ADMIN_BLUESKY_HANDLE,
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 

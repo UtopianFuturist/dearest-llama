@@ -151,6 +151,58 @@ class BaseBot {
     }
   }
 
+  async handleAdminPostCommand(post) {
+    console.log(`Processing admin command for post URI: ${post.uri}`);
+    try {
+      const context = await this.getReplyContext(post);
+      if (!context || context.length === 0) {
+        console.warn(`Admin command: Context for post ${post.uri} is empty or could not be fetched.`);
+        // Optionally, reply to the admin post with an error or status
+        return;
+      }
+
+      const newPostText = await this.generateStandalonePostFromContext(context);
+
+      if (newPostText) {
+        console.log(`Admin command: Generated new post text: "${newPostText}"`);
+        await this.postToOwnFeed(newPostText);
+        // Add to repliedPosts to prevent any further standard processing of the admin command post itself
+        this.repliedPosts.add(post.uri);
+      } else {
+        console.warn(`Admin command: generateStandalonePostFromContext returned no text for post ${post.uri}.`);
+        // Optionally, reply to the admin post with an error or status
+      }
+    } catch (error) {
+      console.error(`Error handling admin command for post ${post.uri}:`, error);
+      // Optionally, try to reply to the admin post with an error message
+    }
+  }
+
+  async generateStandalonePostFromContext(context) {
+    // Placeholder implementation - to be properly implemented in LlamaBot
+    console.log('BaseBot.generateStandalonePostFromContext called, not fully implemented. Context:', JSON.stringify(context, null, 2));
+    return 'Placeholder post text generated from context by BaseBot.';
+  }
+
+  async postToOwnFeed(text) {
+    console.log(`Attempting to post to own feed: "${text}"`);
+    try {
+      RateLimit.check();
+
+      const postObject = {
+        text: utils.truncateResponse(text),
+        // Optionally, specify language e.g., langs: ['en']
+        // createdAt: new Date().toISOString() // Usually handled by the server
+      };
+
+      const result = await this.agent.post(postObject);
+      console.log(`Successfully posted to own feed. New post URI: ${result.uri}`);
+    } catch (error) {
+      console.error('Error posting to own feed:', error);
+      // Do not add to repliedPosts here, as it's not a reply context
+    }
+  }
+
   async monitor() {
     let consecutiveErrors = 0;
     const MAX_RETRIES = 5;
@@ -183,9 +235,22 @@ class BaseBot {
           
           lastCheckedPost = latestPost.uri;
 
-          if (latestPost.post?.record?.text?.includes(this.config.BLUESKY_IDENTIFIER)) {
-            const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
+          // Check for Admin Command
+          if (latestPost.post &&
+              latestPost.post.author &&
+              latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
+              latestPost.post.record &&
+              latestPost.post.record.text &&
+              latestPost.post.record.text.includes('!post')) {
             
+            await this.handleAdminPostCommand(latestPost.post);
+
+          } else {
+            // Existing logic for handling regular replies
+            // The condition to check for BLUESKY_IDENTIFIER in post text has been removed.
+            // The bot will now attempt to reply to any post that passes the getRecentPosts filter.
+            const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
+
             if (!alreadyReplied) {
               console.log('Generating and posting response...');
               const context = await this.getReplyContext(latestPost.post);
@@ -250,8 +315,8 @@ class BaseBot {
       // Filter for mention notifications, excluding self-mentions
       const relevantPosts = notifications.notifications
         .filter(notif => {
-          // Check if it's a mention
-          if (notif.reason !== 'mention') return false;
+          // Exclude 'like' notifications
+          if (notif.reason === 'like') return false;
           
           // Prevent self-replies
           return notif.author.handle !== this.config.BLUESKY_IDENTIFIER;
@@ -419,6 +484,82 @@ class BaseBot {
 class LlamaBot extends BaseBot {
   constructor(config, agent) {
     super(config, agent);
+  }
+
+  async generateStandalonePostFromContext(context) {
+    console.log('LlamaBot.generateStandalonePostFromContext called with context:', JSON.stringify(context, null, 2));
+    try {
+      let conversationHistory = '';
+      if (context && context.length > 0) {
+        for (const msg of context) {
+          conversationHistory += `${msg.author}: ${msg.text}\n`;
+          if (msg.images && msg.images.length > 0) {
+            msg.images.forEach(image => {
+              if (image.alt) {
+                conversationHistory += `[Image description: ${image.alt}]\n`;
+              }
+            });
+          }
+        }
+      } else {
+        console.warn('LlamaBot.generateStandalonePostFromContext: Context is empty.');
+        return null;
+      }
+
+      const userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
+
+      console.log(`NIM CALL START: generateStandalonePostFromContext for model meta/llama-4-scout-17b-16e-instruct`);
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct', // Or any other suitable model
+          messages: [
+            {
+              role: "system",
+              content: this.config.TEXT_SYSTEM_PROMPT
+            },
+            {
+              role: "user",
+              content: userPrompt
+            }
+          ],
+          temperature: 0.75, // May want to adjust temperature for more creative standalone posts
+          max_tokens: 100,  // Max 300 chars ~ 75-100 tokens
+          stream: false
+        })
+      });
+      console.log(`NIM CALL END: generateStandalonePostFromContext - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for generateStandalonePostFromContext - Text: ${errorText}`);
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.error(`Nvidia NIM API error (${response.status}) for generateStandalonePostFromContext - JSON:`, errorJson);
+        } catch (e) {
+          // Not a JSON response
+        }
+        // Simple error handling for now, could add retries like in generateResponse
+        return null;
+      }
+
+      const data = await response.json();
+
+      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) {
+        console.error('Unexpected response format from Nvidia NIM for generateStandalonePostFromContext:', JSON.stringify(data));
+        return null;
+      }
+
+      return data.choices[0].message.content.trim();
+
+    } catch (error) {
+      console.error('Error in LlamaBot.generateStandalonePostFromContext:', error);
+      return null;
+    }
   }
 
   async generateResponse(post, context) {
