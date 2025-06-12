@@ -1,6 +1,6 @@
 # Dearest Llama (Modified for Nvidia NIM)
 
-A Bluesky bot that responds to mentions using Nvidia NIM, specifically with the Nemotron-4 9B Instruct model.
+A Bluesky bot that responds to mentions using Nvidia NIM, specifically with the Llama 3.3 Nemotron Super 49B Instruct model.
 
 ## Environment Variables
 
