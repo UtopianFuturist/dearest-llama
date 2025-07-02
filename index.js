@@ -625,7 +625,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: "Re-write this output so that it doesn't include quotation marks like it's a quote, ensure the character doesn't label their message with sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the generated response content"
+              content: "Re-write this output so that it doesn't include quotation marks like it's a quote, ensure the character doesn't label their message with sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the exact generated response content input"
             },
             {
               role: "user",
