@@ -272,81 +272,88 @@ class BaseBot {
               latestPost.post.author &&
               latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
               latestPost.post.record &&
-              latestPost.post.record.text &&
+              latestPost.post.record.text && // Ensure text exists for admin command parsing
               latestPost.post.record.text.includes('!post')) {
 
             const commandText = latestPost.post.record.text;
-            // Removed ^ from regex to allow !post anywhere in the text
             const instructionMatch = commandText.match(/!post\s+(.+)/s);
             const adminInstructions = instructionMatch ? instructionMatch[1].trim() : '';
             
             await this.handleAdminPostCommand(latestPost.post, adminInstructions);
 
-          } else {
-            // Existing logic for handling regular replies
-            // The condition to check for BLUESKY_IDENTIFIER in post text has been removed.
-            // The bot will now attempt to reply to any post that passes the getRecentPosts filter.
+          } else { // Regular reply logic (image or text)
             const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
 
             if (!alreadyReplied) {
-              const postText = latestPost.post.record.text.toLowerCase();
               const imageRequestKeywords = ["generate image", "create a picture of", "draw a picture of"];
               let isImageRequest = false;
               let imagePrompt = "";
 
-              for (const keyword of imageRequestKeywords) {
-                if (postText.includes(keyword)) {
-                  isImageRequest = true;
-                  // Extract prompt after the keyword
-                  imagePrompt = latestPost.post.record.text.substring(postText.indexOf(keyword) + keyword.length).trim();
-                  // If the prompt starts with "of ", remove it for better quality
-                  if (imagePrompt.toLowerCase().startsWith("of ")) {
-                    imagePrompt = imagePrompt.substring(3).trim();
-                  }
-                  // A very basic safety check for the prompt itself, can be expanded
-                  if (imagePrompt.length < 5 || imagePrompt.length > 300) { // Arbitrary length check
-                      console.warn(`Image prompt "${imagePrompt}" seems too short or too long. Skipping image generation.`);
-                      isImageRequest = false; // Fallback to text response
+              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text && typeof latestPost.post.record.text === 'string') {
+                const originalText = latestPost.post.record.text;
+                const lowercasedText = originalText.toLowerCase();
+
+                for (const keyword of imageRequestKeywords) {
+                  const keywordIndex = lowercasedText.indexOf(keyword);
+                  if (keywordIndex !== -1) {
+                    let tempPrompt = originalText.substring(keywordIndex + keyword.length).trim();
+                    if (tempPrompt.toLowerCase().startsWith("of ")) {
+                      tempPrompt = tempPrompt.substring(3).trim();
+                    }
+
+                    if (tempPrompt.length >= 5 && tempPrompt.length <= 300) {
+                      imagePrompt = tempPrompt;
+                      isImageRequest = true;
+                      console.log(`Image generation request detected with keyword "${keyword}". Valid prompt: "${imagePrompt}"`);
                       break;
+                    } else {
+                      console.warn(`Keyword "${keyword}" found, but extracted prompt "${tempPrompt}" (length ${tempPrompt.length}) is too short or too long. Continuing to check other keywords.`);
+                    }
                   }
-                  console.log(`Image generation request detected. Prompt: "${imagePrompt}"`);
-                  break;
                 }
+              } else {
+                console.log(`Post URI ${latestPost.post?.uri || 'Unknown URI'} lacks text content or text is not a string. Skipping keyword-based processing for this post.`);
               }
 
-              if (isImageRequest && imagePrompt) {
-                const safePrompt = await this.isPromptSafe(imagePrompt); // Call safety check
-                if (safePrompt) {
-                  console.log('Prompt is safe, generating image...');
-                  const imageBase64 = await this.generateImage(imagePrompt);
+              console.log(`[DEBUG] Before decision logic: isImageRequest = ${isImageRequest}, imagePrompt = "${imagePrompt}" (Prompt length: ${imagePrompt.length})`);
 
+              if (isImageRequest && imagePrompt) {
+                const safePrompt = await this.isPromptSafe(imagePrompt);
+                if (safePrompt) {
+                  console.log('Prompt is safe, proceeding to generate image...');
+                  const imageBase64 = await this.generateImage(imagePrompt);
                   if (imageBase64) {
                     const imageResponseText = `Here's the image you requested:`;
                     await this.postReply(latestPost.post, imageResponseText, imageBase64);
-                    await utils.sleep(2000);
                   } else {
-                    const failureText = "Sorry, I couldn't generate the image at this time (generation failed).";
+                    const failureText = "Sorry, I couldn't generate the image at this time (generation process failed).";
                     await this.postReply(latestPost.post, failureText);
-                    await utils.sleep(2000);
                   }
                 } else {
                   console.warn(`Image prompt "${imagePrompt}" was deemed unsafe. Replying with a refusal.`);
                   const refusalText = "I'm sorry, but I cannot generate an image based on that request due to safety guidelines. Please try a different prompt.";
                   await this.postReply(latestPost.post, refusalText);
-                  await utils.sleep(2000);
                 }
-              } else if (isImageRequest && !imagePrompt) { // Case where keyword was found but prompt was invalid (e.g. too short based on earlier check)
-                const failureText = "It looks like you wanted an image, but I couldn't understand the prompt clearly or it was too short. Please try again, for example: 'generate image of a cat wearing a hat'.";
+                await utils.sleep(2000);
+
+              } else if (isImageRequest && !imagePrompt) {
+                console.warn(`Image request was detected, but no valid prompt could be finalized (e.g., all attempts were too short/long).`);
+                const failureText = "It looks like you wanted an image, but I couldn't quite understand the details, or the description was too short/long. Please try again with a clear prompt between 5 and 300 characters, like: 'generate image of a happy cat'.";
                 await this.postReply(latestPost.post, failureText);
                 await utils.sleep(2000);
-              } else { // Not an image request or fell through
-                console.log('Generating and posting text response...');
-                const context = await this.getReplyContext(latestPost.post);
-                const response = await this.generateResponse(latestPost.post, context);
 
-                if (response) {
-                  await this.postReply(latestPost.post, response);
-                  await utils.sleep(2000);
+              } else {
+                console.log('No valid image request detected, proceeding with standard text response if applicable.');
+                // Only generate text response if it's not an image request that failed due to bad prompt
+                if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
+                    const context = await this.getReplyContext(latestPost.post);
+                    const response = await this.generateResponse(latestPost.post, context);
+                    if (response) {
+                        await this.postReply(latestPost.post, response);
+                        await utils.sleep(2000);
+                    }
+                } else {
+                    console.log("Skipping text response as there's no text in the original post to process.");
                 }
               }
             }
