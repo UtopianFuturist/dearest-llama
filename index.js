@@ -294,8 +294,21 @@ class BaseBot {
                 const lowercasedText = originalText.toLowerCase();
                 console.log(`[KeywordLoop] Processing text: "${originalText}" (Lowercase: "${lowercasedText}")`);
 
+                let textCharCodes = '';
+                for (let i = 0; i < lowercasedText.length; i++) {
+                  textCharCodes += `${lowercasedText.charCodeAt(i)} `;
+                }
+                console.log(`[KeywordLoop] Char codes for lowercasedText: ${textCharCodes.trim()}`);
+
+
                 for (const keyword of imageRequestKeywords) {
                   console.log(`[KeywordLoop] Checking keyword: "${keyword}"`);
+                  let keywordCharCodes = '';
+                  for (let i = 0; i < keyword.length; i++) {
+                    keywordCharCodes += `${keyword.charCodeAt(i)} `;
+                  }
+                  console.log(`[KeywordLoop] Char codes for keyword "${keyword}": ${keywordCharCodes.trim()}`);
+
                   const keywordIndex = lowercasedText.indexOf(keyword);
                   console.log(`[KeywordLoop] Keyword index for "${keyword}": ${keywordIndex}`);
 
@@ -725,6 +738,8 @@ Admin Instructions: "${trimmedAdminInstructions}"
       }
 
       let initialResponse = data.choices[0].message.content.trim();
+      console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
+
 
       // Second API call to the filter model
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext`);
@@ -768,7 +783,9 @@ Admin Instructions: "${trimmedAdminInstructions}"
         return initialResponse;
       }
 
-      return filterData.choices[0].message.content.trim();
+      const finalResponse = filterData.choices[0].message.content.trim();
+      console.log(`[LlamaBot.generateStandalonePostFromContext] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
+      return finalResponse;
 
     } catch (error) {
       console.error('Error in LlamaBot.generateStandalonePostFromContext:', error);
@@ -850,6 +867,8 @@ Admin Instructions: "${trimmedAdminInstructions}"
       }
       
       let initialResponse = data.choices[0].message.content;
+      // ADDED LOGGING HERE
+      console.log(`[LlamaBot.generateResponse] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
 
       // Second API call to the filter model
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct`);
@@ -893,7 +912,10 @@ Admin Instructions: "${trimmedAdminInstructions}"
         return initialResponse;
       }
 
-      return filterData.choices[0].message.content;
+      const finalResponse = filterData.choices[0].message.content;
+      // ADDED LOGGING HERE
+      console.log(`[LlamaBot.generateResponse] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
+      return finalResponse;
 
     } catch (error) {
       console.error('Error generating Llama response:', error);
@@ -1033,3 +1055,5 @@ async function startBots() {
 
 // Start the bot
 startBots().catch(console.error);
+
+[end of index.js]
