@@ -1055,5 +1055,3 @@ async function startBots() {
 
 // Start the bot
 startBots().catch(console.error);
-
-[end of index.js]
