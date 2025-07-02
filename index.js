@@ -292,22 +292,33 @@ class BaseBot {
               if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text && typeof latestPost.post.record.text === 'string') {
                 const originalText = latestPost.post.record.text;
                 const lowercasedText = originalText.toLowerCase();
+                console.log(`[KeywordLoop] Processing text: "${originalText}" (Lowercase: "${lowercasedText}")`);
 
                 for (const keyword of imageRequestKeywords) {
+                  console.log(`[KeywordLoop] Checking keyword: "${keyword}"`);
                   const keywordIndex = lowercasedText.indexOf(keyword);
+                  console.log(`[KeywordLoop] Keyword index for "${keyword}": ${keywordIndex}`);
+
                   if (keywordIndex !== -1) {
                     let tempPrompt = originalText.substring(keywordIndex + keyword.length).trim();
+                    console.log(`[KeywordLoop] Initial tempPrompt for "${keyword}": "${tempPrompt}"`);
+
                     if (tempPrompt.toLowerCase().startsWith("of ")) {
                       tempPrompt = tempPrompt.substring(3).trim();
+                      console.log(`[KeywordLoop] tempPrompt after 'of ' trim: "${tempPrompt}"`);
                     }
 
-                    if (tempPrompt.length >= 5 && tempPrompt.length <= 300) {
+                    console.log(`[KeywordLoop] Validating tempPrompt: "${tempPrompt}", Length: ${tempPrompt.length}`);
+                    const isLengthValid = tempPrompt.length >= 5 && tempPrompt.length <= 300;
+                    console.log(`[KeywordLoop] Is length valid (5-300 chars)? ${isLengthValid}`);
+
+                    if (isLengthValid) {
                       imagePrompt = tempPrompt;
                       isImageRequest = true;
-                      console.log(`Image generation request detected with keyword "${keyword}". Valid prompt: "${imagePrompt}"`);
+                      console.log(`[KeywordLoop] Valid image request. Keyword: "${keyword}". Prompt: "${imagePrompt}"`);
                       break;
                     } else {
-                      console.warn(`Keyword "${keyword}" found, but extracted prompt "${tempPrompt}" (length ${tempPrompt.length}) is too short or too long. Continuing to check other keywords.`);
+                      console.warn(`[KeywordLoop] Keyword "${keyword}" led to invalid prompt (length ${tempPrompt.length}): "${tempPrompt}". Checking next keyword.`);
                     }
                   }
                 }
@@ -344,8 +355,7 @@ class BaseBot {
 
               } else {
                 console.log('No valid image request detected, proceeding with standard text response if applicable.');
-                // Only generate text response if it's not an image request that failed due to bad prompt
-                if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
+                if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) { // Ensure text still exists for text response
                     const context = await this.getReplyContext(latestPost.post);
                     const response = await this.generateResponse(latestPost.post, context);
                     if (response) {
@@ -353,7 +363,7 @@ class BaseBot {
                         await utils.sleep(2000);
                     }
                 } else {
-                    console.log("Skipping text response as there's no text in the original post to process.");
+                    console.log("Skipping text response as there's no text in the original post to process for a text reply.");
                 }
               }
             }
