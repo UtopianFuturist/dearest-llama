@@ -110,6 +110,14 @@ class BaseBot {
     throw new Error('generateResponse must be implemented by child class');
   }
 
+  async generateImage(prompt) { // Added to BaseBot
+    throw new Error('generateImage must be implemented by child class');
+  }
+
+  async isPromptSafe(prompt) { // Added to BaseBot
+    throw new Error('isPromptSafe must be implemented by child class');
+  }
+
   async generateImagePrompt(post, response) {
     throw new Error('generateImagePrompt must be implemented by child class');
   }
@@ -281,14 +289,65 @@ class BaseBot {
             const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
 
             if (!alreadyReplied) {
-              console.log('Generating and posting response...');
-              const context = await this.getReplyContext(latestPost.post);
-              const response = await this.generateResponse(latestPost.post, context);
-              
-              if (response) {
-                await this.postReply(latestPost.post, response);
-                // Add rate limiting delay after posting
+              const postText = latestPost.post.record.text.toLowerCase();
+              const imageRequestKeywords = ["generate image", "create a picture of", "draw a picture of"];
+              let isImageRequest = false;
+              let imagePrompt = "";
+
+              for (const keyword of imageRequestKeywords) {
+                if (postText.includes(keyword)) {
+                  isImageRequest = true;
+                  // Extract prompt after the keyword
+                  imagePrompt = latestPost.post.record.text.substring(postText.indexOf(keyword) + keyword.length).trim();
+                  // If the prompt starts with "of ", remove it for better quality
+                  if (imagePrompt.toLowerCase().startsWith("of ")) {
+                    imagePrompt = imagePrompt.substring(3).trim();
+                  }
+                  // A very basic safety check for the prompt itself, can be expanded
+                  if (imagePrompt.length < 5 || imagePrompt.length > 300) { // Arbitrary length check
+                      console.warn(`Image prompt "${imagePrompt}" seems too short or too long. Skipping image generation.`);
+                      isImageRequest = false; // Fallback to text response
+                      break;
+                  }
+                  console.log(`Image generation request detected. Prompt: "${imagePrompt}"`);
+                  break;
+                }
+              }
+
+              if (isImageRequest && imagePrompt) {
+                const safePrompt = await this.isPromptSafe(imagePrompt); // Call safety check
+                if (safePrompt) {
+                  console.log('Prompt is safe, generating image...');
+                  const imageBase64 = await this.generateImage(imagePrompt);
+
+                  if (imageBase64) {
+                    const imageResponseText = `Here's the image you requested:`;
+                    await this.postReply(latestPost.post, imageResponseText, imageBase64);
+                    await utils.sleep(2000);
+                  } else {
+                    const failureText = "Sorry, I couldn't generate the image at this time (generation failed).";
+                    await this.postReply(latestPost.post, failureText);
+                    await utils.sleep(2000);
+                  }
+                } else {
+                  console.warn(`Image prompt "${imagePrompt}" was deemed unsafe. Replying with a refusal.`);
+                  const refusalText = "I'm sorry, but I cannot generate an image based on that request due to safety guidelines. Please try a different prompt.";
+                  await this.postReply(latestPost.post, refusalText);
+                  await utils.sleep(2000);
+                }
+              } else if (isImageRequest && !imagePrompt) { // Case where keyword was found but prompt was invalid (e.g. too short based on earlier check)
+                const failureText = "It looks like you wanted an image, but I couldn't understand the prompt clearly or it was too short. Please try again, for example: 'generate image of a cat wearing a hat'.";
+                await this.postReply(latestPost.post, failureText);
                 await utils.sleep(2000);
+              } else { // Not an image request or fell through
+                console.log('Generating and posting text response...');
+                const context = await this.getReplyContext(latestPost.post);
+                const response = await this.generateResponse(latestPost.post, context);
+
+                if (response) {
+                  await this.postReply(latestPost.post, response);
+                  await utils.sleep(2000);
+                }
               }
             }
           }
@@ -482,7 +541,7 @@ class BaseBot {
   }
 
   // Modify the postReply function
-  async postReply(post, response) {
+  async postReply(post, response, imageBase64 = null) {
     try {
       RateLimit.check();
       
@@ -493,6 +552,31 @@ class BaseBot {
           parent: { uri: post.uri, cid: post.cid }
         }
       };
+
+      if (imageBase64) {
+        try {
+          // Convert base64 string to Uint8Array
+          const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+          console.log(`Uploading image of size: ${imageBytes.length} bytes`);
+
+          const uploadedImage = await this.agent.uploadBlob(imageBytes, {
+            encoding: 'image/png' // Assuming PNG, adjust if TogetherAI specifies format
+          });
+          console.log('Successfully uploaded image:', uploadedImage);
+
+          replyObject.embed = {
+            $type: 'app.bsky.embed.images',
+            images: [{
+              image: uploadedImage.data.blob, // Use the blob object from the upload response
+              alt: 'Generated image' // You might want a more descriptive alt text
+            }]
+          };
+        } catch (uploadError) {
+          console.error('Error uploading image to Bluesky:', uploadError);
+          // Decide if you want to post the text reply anyway or fail
+          // For now, it will post without the image if upload fails
+        }
+      }
 
       const result = await this.agent.post(replyObject);
       console.log('Successfully posted reply:', result.uri);
@@ -576,7 +660,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: this.config.TEXT_SYSTEM_PROMPT
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}`
             },
             {
               role: "user",
@@ -692,7 +776,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: this.config.TEXT_SYSTEM_PROMPT
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}`
             },
             {
               role: "user",
@@ -790,6 +874,99 @@ Admin Instructions: "${trimmedAdminInstructions}"
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  async generateImage(prompt) {
+    console.log(`TOGETHER AI CALL START: generateImage for model ${this.config.IMAGE_GENERATION_MODEL}`);
+    try {
+      const response = await fetch('https://api.together.xyz/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.TOGETHER_AI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: this.config.IMAGE_GENERATION_MODEL,
+          prompt: prompt,
+          n: 1, // Number of images to generate
+          size: "1024x1024" // Specify image size if available for the model
+        })
+      });
+      console.log(`TOGETHER AI CALL END: generateImage - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Together AI API error (${response.status}) for generateImage - Text: ${errorText}`);
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.error(`Together AI API error (${response.status}) for generateImage - JSON:`, errorJson);
+        } catch (e) {
+          // Not a JSON response
+        }
+        return null;
+      }
+
+      const data = await response.json();
+
+      if (!data.data || !Array.isArray(data.data) || data.data.length === 0 || !data.data[0].b64_json) {
+        console.error('Unexpected response format from Together AI for generateImage:', JSON.stringify(data));
+        return null;
+      }
+      // Assuming the API returns base64 encoded image data
+      return data.data[0].b64_json;
+
+    } catch (error) {
+      console.error('Error in LlamaBot.generateImage:', error);
+      return null;
+    }
+  }
+
+  async isPromptSafe(prompt) {
+    console.log(`NIM CALL START: isPromptSafe for model meta/llama-4-scout-17b-16e-instruct`);
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct', // Using the filter model for this check
+          messages: [
+            {
+              role: "system",
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI safety moderator. Analyze the following user prompt for image generation. If the prompt violates any of the safety guidelines (adult content, NSFW, copyrighted material, illegal content, violence, politics), respond with "unsafe". Otherwise, respond with "safe". Only respond with "safe" or "unsafe".`
+            },
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
+          temperature: 0.1, // Low temperature for deterministic safety check
+          max_tokens: 10,   // "safe" or "unsafe"
+          stream: false
+        })
+      });
+      console.log(`NIM CALL END: isPromptSafe - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for isPromptSafe - Text: ${errorText}`);
+        return false; // Default to unsafe on error
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toLowerCase();
+        console.log(`Safety check for prompt "${prompt}": ${decision}`);
+        return decision === 'safe';
+      }
+      console.error('Unexpected response format from Nvidia NIM for isPromptSafe:', JSON.stringify(data));
+      return false; // Default to unsafe on unexpected format
+    } catch (error) {
+      console.error('Error in LlamaBot.isPromptSafe:', error);
+      return false; // Default to unsafe on error
+    }
   }
 }
 

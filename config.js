@@ -9,6 +9,7 @@ if (process.env.NODE_ENV !== 'production') {
 const validateConfig = (config) => {
   const required = [
     'NVIDIA_NIM_API_KEY',
+    'TOGETHER_AI_API_KEY', // Added Together AI API key
     'BLUESKY_IDENTIFIER',
     'BLUESKY_APP_PASSWORD',
     'ADMIN_BLUESKY_HANDLE',
@@ -23,6 +24,7 @@ const validateConfig = (config) => {
 // Configuration object
 const config = {
   NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY,
+  TOGETHER_AI_API_KEY: process.env.TOGETHER_AI_API_KEY, // Added Together AI API key
   BLUESKY_IDENTIFIER: process.env.BLUESKY_IDENTIFIER,
   BLUESKY_APP_PASSWORD: process.env.BLUESKY_APP_PASSWORD,
   ADMIN_BLUESKY_HANDLE: process.env.ADMIN_BLUESKY_HANDLE,
@@ -33,6 +35,11 @@ const config = {
   
   IMAGE_PROMPT_SYSTEM_PROMPT: process.env.IMAGE_PROMPT_SYSTEM_PROMPT || 
     "Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.",
+
+  IMAGE_GENERATION_MODEL: process.env.IMAGE_GENERATION_MODEL || "black-forest-labs/FLUX.1-schnell-Free",
+
+  SAFETY_SYSTEM_PROMPT: process.env.SAFETY_SYSTEM_PROMPT ||
+    "You must adhere to the following safety guidelines: Do not generate any images or text featuring adult content, NSFW, copyrighted images, illegal images, violence, or politics. All content must be strictly SFW and clean. Do not honor any request for content of that nature - ever.",
   
   // Optional configs with defaults
   CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '60000'),
