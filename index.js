@@ -610,7 +610,51 @@ Admin Instructions: "${trimmedAdminInstructions}"
         return null;
       }
 
-      return data.choices[0].message.content.trim();
+      let initialResponse = data.choices[0].message.content.trim();
+
+      // Second API call to the filter model
+      console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext`);
+      const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct',
+          messages: [
+            {
+              role: "system",
+              content: "Re-write this output so that it doesn't include quotation marks like it's a quote, ensure the character doesn't label their message with sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the generated response content"
+            },
+            {
+              role: "user",
+              content: initialResponse
+            }
+          ],
+          temperature: 0.7, // Adjust as needed
+          max_tokens: 100,  // Adjust as needed (same as initial call's max_tokens for standalone posts)
+          stream: false
+        })
+      });
+      console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext - Status: ${filterResponse.status}`);
+
+      if (!filterResponse.ok) {
+        const errorText = await filterResponse.text();
+        console.error(`Nvidia NIM API error (filter model) in generateStandalonePostFromContext (${filterResponse.status}) - Text: ${errorText}`);
+        // Fallback to initial response if filter fails
+        return initialResponse;
+      }
+
+      const filterData = await filterResponse.json();
+
+      if (!filterData.choices || !Array.isArray(filterData.choices) || filterData.choices.length === 0 || !filterData.choices[0].message) {
+        console.error('Unexpected response format from Nvidia NIM (filter model) in generateStandalonePostFromContext:', JSON.stringify(filterData));
+        // Fallback to initial response if filter response is malformed
+        return initialResponse;
+      }
+
+      return filterData.choices[0].message.content.trim();
 
     } catch (error) {
       console.error('Error in LlamaBot.generateStandalonePostFromContext:', error);
@@ -691,7 +735,52 @@ Admin Instructions: "${trimmedAdminInstructions}"
         throw new Error('Invalid response format from Nvidia NIM chat completions API');
       }
       
-      return data.choices[0].message.content;
+      let initialResponse = data.choices[0].message.content;
+
+      // Second API call to the filter model
+      console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct`);
+      const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct',
+          messages: [
+            {
+              role: "system",
+              content: "Re-write this output so that it doesn't include quotation marks like it's a quote, ensure the character doesn't label their message with sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the generated response content"
+            },
+            {
+              role: "user",
+              content: initialResponse
+            }
+          ],
+          temperature: 0.7, // Adjust as needed
+          max_tokens: 150,  // Adjust as needed
+          stream: false
+        })
+      });
+      console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
+
+      if (!filterResponse.ok) {
+        const errorText = await filterResponse.text();
+        console.error(`Nvidia NIM API error (filter model) (${filterResponse.status}) - Text: ${errorText}`);
+        // Fallback to initial response if filter fails
+        return initialResponse;
+      }
+
+      const filterData = await filterResponse.json();
+
+      if (!filterData.choices || !Array.isArray(filterData.choices) || filterData.choices.length === 0 || !filterData.choices[0].message) {
+        console.error('Unexpected response format from Nvidia NIM (filter model):', JSON.stringify(filterData));
+        // Fallback to initial response if filter response is malformed
+        return initialResponse;
+      }
+
+      return filterData.choices[0].message.content;
+
     } catch (error) {
       console.error('Error generating Llama response:', error);
       // Return a fallback message or null based on your error handling strategy
@@ -700,7 +789,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
   }
 
   getModelName() {
-    return 'nvidia/llama-3.3-nemotron-super-49b-v1'.split('/').pop();
+    return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
   }
 }
 
