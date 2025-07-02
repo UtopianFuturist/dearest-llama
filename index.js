@@ -560,31 +560,44 @@ class BaseBot {
         }
       };
 
-      if (imageBase64) {
+      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+        console.log(`[postReply] imageBase64 received, length: ${imageBase64.length}. Attempting to upload.`);
         try {
           // Convert base64 string to Uint8Array
           const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
-          console.log(`Uploading image of size: ${imageBytes.length} bytes`);
+          console.log(`[postReply] Converted base64 to Uint8Array, size: ${imageBytes.length} bytes.`);
 
-          const uploadedImage = await this.agent.uploadBlob(imageBytes, {
-            encoding: 'image/png' // Assuming PNG, adjust if TogetherAI specifies format
-          });
-          console.log('Successfully uploaded image:', uploadedImage);
+          if (imageBytes.length === 0) {
+            console.error('[postReply] Image byte array is empty after conversion. Skipping image upload.');
+          } else {
+            const uploadedImage = await this.agent.uploadBlob(imageBytes, {
+              encoding: 'image/png' // Assuming PNG, adjust if TogetherAI specifies format or returns it
+            });
+            console.log('[postReply] Successfully uploaded image to Bluesky:', JSON.stringify(uploadedImage));
 
-          replyObject.embed = {
-            $type: 'app.bsky.embed.images',
-            images: [{
-              image: uploadedImage.data.blob, // Use the blob object from the upload response
-              alt: 'Generated image' // You might want a more descriptive alt text
-            }]
-          };
+            if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+              replyObject.embed = {
+                $type: 'app.bsky.embed.images',
+                images: [{
+                  image: uploadedImage.data.blob,
+                  alt: 'Generated image'
+                }]
+              };
+              console.log('[postReply] Image embed object created.');
+            } else {
+              console.error('[postReply] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
+            }
+          }
         } catch (uploadError) {
-          console.error('Error uploading image to Bluesky:', uploadError);
-          // Decide if you want to post the text reply anyway or fail
-          // For now, it will post without the image if upload fails
+          console.error('[postReply] Error during image upload or embed creation:', uploadError);
         }
+      } else if (imageBase64) {
+        console.warn(`[postReply] imageBase64 was present but invalid (not a non-empty string). Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
+      } else {
+        console.log('[postReply] No imageBase64 provided. Posting text-only reply.');
       }
 
+      console.log('[postReply] Final replyObject before posting:', JSON.stringify(replyObject));
       const result = await this.agent.post(replyObject);
       console.log('Successfully posted reply:', result.uri);
       this.repliedPosts.add(post.uri);
@@ -884,46 +897,62 @@ Admin Instructions: "${trimmedAdminInstructions}"
   }
 
   async generateImage(prompt) {
-    console.log(`TOGETHER AI CALL START: generateImage for model ${this.config.IMAGE_GENERATION_MODEL}`);
+    const modelToUse = "black-forest-labs/FLUX.1-schnell-Free"; // Hardcoded model
+    const apiKey = this.config.TOGETHER_AI_API_KEY;
+
+    if (!apiKey) {
+      console.error('TOGETHER_AI_API_KEY is not configured. Cannot generate image.');
+      return null;
+    }
+    // No longer need to check for modelToUse as it's hardcoded
+
+    console.log(`TOGETHER AI CALL START: generateImage for model "${modelToUse}" with prompt "${prompt}"`);
+
+    const requestBody = {
+      model: modelToUse, // This now uses the hardcoded value
+      prompt: prompt,
+      n: 1,
+      size: "1024x1024"
+    };
+    console.log('Together AI Request Body:', JSON.stringify(requestBody));
+
     try {
       const response = await fetch('https://api.together.xyz/v1/images/generations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.TOGETHER_AI_API_KEY}`
+          'Authorization': `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-          model: this.config.IMAGE_GENERATION_MODEL,
-          prompt: prompt,
-          n: 1, // Number of images to generate
-          size: "1024x1024" // Specify image size if available for the model
-        })
+        body: JSON.stringify(requestBody)
       });
-      console.log(`TOGETHER AI CALL END: generateImage - Status: ${response.status}`);
+
+      const responseStatus = response.status;
+      const responseText = await response.text(); // Read text first to ensure it's always available for logging
+      console.log(`TOGETHER AI CALL END: generateImage - Status: ${responseStatus}`);
+      console.log(`TOGETHER AI CALL Full Response Text: ${responseText}`);
 
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Together AI API error (${response.status}) for generateImage - Text: ${errorText}`);
+        console.error(`Together AI API error (${responseStatus}) for generateImage with prompt "${prompt}" - Full Response: ${responseText}`);
         try {
-          const errorJson = JSON.parse(errorText);
-          console.error(`Together AI API error (${response.status}) for generateImage - JSON:`, errorJson);
+          const errorJson = JSON.parse(responseText); // Try to parse as JSON
+          console.error(`Together AI API error (${responseStatus}) for generateImage - Parsed JSON:`, errorJson);
         } catch (e) {
-          // Not a JSON response
+          // Not a JSON response, already logged the full text
         }
         return null;
       }
 
-      const data = await response.json();
+      const data = JSON.parse(responseText); // Parse JSON now that we know it's likely okay
 
       if (!data.data || !Array.isArray(data.data) || data.data.length === 0 || !data.data[0].b64_json) {
-        console.error('Unexpected response format from Together AI for generateImage:', JSON.stringify(data));
+        console.error(`Unexpected response format from Together AI for generateImage (prompt: "${prompt}"):`, JSON.stringify(data));
         return null;
       }
-      // Assuming the API returns base64 encoded image data
+      console.log(`Successfully received image data from Together AI for prompt "${prompt}".`);
       return data.data[0].b64_json;
 
     } catch (error) {
-      console.error('Error in LlamaBot.generateImage:', error);
+      console.error(`Error in LlamaBot.generateImage (prompt: "${prompt}"):`, error);
       return null;
     }
   }
@@ -954,24 +983,25 @@ Admin Instructions: "${trimmedAdminInstructions}"
           stream: false
         })
       });
-      console.log(`NIM CALL END: isPromptSafe - Status: ${response.status}`);
+      console.log(`NIM CALL END: isPromptSafe for prompt "${prompt}" - Status: ${response.status}`);
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`Nvidia NIM API error (${response.status}) for isPromptSafe - Text: ${errorText}`);
+        console.error(`Nvidia NIM API error (${response.status}) for isPromptSafe (prompt: "${prompt}") - Text: ${errorText}`);
         return false; // Default to unsafe on error
       }
 
       const data = await response.json();
+      console.log(`NIM CALL RESPONSE: isPromptSafe for prompt "${prompt}" - Data:`, JSON.stringify(data));
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
         const decision = data.choices[0].message.content.trim().toLowerCase();
-        console.log(`Safety check for prompt "${prompt}": ${decision}`);
+        console.log(`Safety check for prompt "${prompt}": AI decision: "${decision}"`);
         return decision === 'safe';
       }
-      console.error('Unexpected response format from Nvidia NIM for isPromptSafe:', JSON.stringify(data));
+      console.error(`Unexpected response format from Nvidia NIM for isPromptSafe (prompt: "${prompt}"):`, JSON.stringify(data));
       return false; // Default to unsafe on unexpected format
     } catch (error) {
-      console.error('Error in LlamaBot.isPromptSafe:', error);
+      console.error(`Error in LlamaBot.isPromptSafe (prompt: "${prompt}"):`, error);
       return false; // Default to unsafe on error
     }
   }

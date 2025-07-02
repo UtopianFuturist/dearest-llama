@@ -36,8 +36,6 @@ const config = {
   IMAGE_PROMPT_SYSTEM_PROMPT: process.env.IMAGE_PROMPT_SYSTEM_PROMPT || 
     "Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.",
 
-  IMAGE_GENERATION_MODEL: process.env.IMAGE_GENERATION_MODEL || "black-forest-labs/FLUX.1-schnell-Free",
-
   SAFETY_SYSTEM_PROMPT: process.env.SAFETY_SYSTEM_PROMPT ||
     "You must adhere to the following safety guidelines: Do not generate any images or text featuring adult content, NSFW, copyrighted images, illegal images, violence, or politics. All content must be strictly SFW and clean. Do not honor any request for content of that nature - ever.",
   
@@ -50,5 +48,10 @@ const config = {
 
 // Validate configuration
 validateConfig(config);
+
+// Log specific critical environment variables for diagnostics
+console.log(`[Config] Loaded TOGETHER_AI_API_KEY: ${config.TOGETHER_AI_API_KEY ? 'Exists' : 'MISSING!'}`);
+console.log(`[Config] Loaded NVIDIA_NIM_API_KEY: ${config.NVIDIA_NIM_API_KEY ? 'Exists' : 'MISSING!'}`);
+
 
 export default config;
