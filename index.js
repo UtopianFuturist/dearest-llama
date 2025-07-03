@@ -1011,13 +1011,13 @@ class LlamaBot extends BaseBot {
         // Profile analysis prompt
         nemotronUserPrompt = `The user's current question is: "${post.record.text}"
 
-You have been provided with a selection of the user's recent Bluesky activity below under "USER'S RECENT BLUESKY ACTIVITY".
-Based PRIMARILY on the provided "USER'S RECENT BLUESKY ACTIVITY", please analyze their posts and formulate a comprehensive answer to their question. Identify themes, common topics, or aspects of their online presence as reflected in their posts, replies, quote posts, and reposts (paying attention to the original authors of reposted content).
+Please use your "User Profile Analyzer" capability. You have been provided with a selection of the user's recent Bluesky activity below under "USER'S RECENT BLUESKY ACTIVITY".
+Your task is to analyze THIS PROVIDED TEXT (their posts, replies, quote posts, and attributed reposts) to formulate a comprehensive answer to their question. Identify themes, common topics, or aspects of their online presence as reflected in this activity.
 
 USER'S RECENT BLUESKY ACTIVITY:
 ${userBlueskyPostsContext}
 ---
-Your analysis and response (incorporating the conversation history below if it adds crucial context to the user's immediate question):
+Your analysis and response, drawing insights from the activity above (you may also consider the brief conversation history below if it's directly relevant to clarifying the user's immediate question about their profile):
 ${conversationHistory}
 ---
 ${baseInstruction}`;
