@@ -46,7 +46,7 @@ const utils = {
   },
 
   truncateResponse(text, maxLength = 300) {
-    if (text.length <= maxLength) return text;
+    if (!text || text.length <= maxLength) return text;
     
     const searchEnd = Math.min(maxLength, text.length);
     const searchStart = Math.max(0, searchEnd - 50);
@@ -100,10 +100,8 @@ const RateLimit = {
   }
 };
 
-// Replace static ALLOWED_USERS with a Set for better performance
 let ALLOWED_USERS = new Set();
 
-// Create a base Bot class
 class BaseBot {
   constructor(config, agent) {
     this.config = config;
@@ -115,15 +113,15 @@ class BaseBot {
     throw new Error('generateResponse must be implemented by child class');
   }
 
-  async generateImage(prompt) { // Added to BaseBot
+  async generateImage(prompt) {
     throw new Error('generateImage must be implemented by child class');
   }
 
-  async isTextSafeScout(prompt) { // Renamed from isPromptSafe
+  async isTextSafeScout(prompt) {
     throw new Error('isTextSafeScout must be implemented by child class');
   }
 
-  async processImagePromptWithScout(user_prompt_text) { // Added to BaseBot
+  async processImagePromptWithScout(user_prompt_text) {
     throw new Error('processImagePromptWithScout must be implemented by child class');
   }
 
@@ -131,32 +129,23 @@ class BaseBot {
     throw new Error('generateImagePrompt must be implemented by child class');
   }
 
-  // Shared methods can go here
   async hasAlreadyReplied(post) {
     try {
-      // First check our local Set
       if (this.repliedPosts.has(post.uri)) {
         console.log('Found post in local reply history');
         return true;
       }
-
       console.log(`Checking for existing replies to post: ${post.uri}`);
       const { data: thread } = await this.agent.getPostThread({
         uri: post.uri,
         depth: 1,
         parentHeight: 1
       });
-
-      console.log(`Thread data:`, JSON.stringify(thread, null, 2));
-
       if (thread.thread.replies && thread.thread.replies.length > 0) {
         const hasReply = thread.thread.replies.some(reply => 
           reply.post.author.handle === this.config.BLUESKY_IDENTIFIER
         );
-        if (hasReply) {
-          // Add to our Set if we find an existing reply
-          this.repliedPosts.add(post.uri);
-        }
+        if (hasReply) this.repliedPosts.add(post.uri);
         console.log(`Has existing reply: ${hasReply}`);
         return hasReply;
       }
@@ -168,52 +157,58 @@ class BaseBot {
     }
   }
 
-  async handleAdminPostCommand(post, rawAdminInstructions) {
-    // Explicit check at the beginning of command handling
+  async handleAdminPostCommand(post, commandContent, isImageCommand) {
     if (await this.hasAlreadyReplied(post)) {
       console.log(`[ADMIN_CMD_SKIP_REPLIED] Post URI ${post.uri} already replied or processed, skipping in handleAdminPostCommand.`);
       return;
     }
 
-    console.log(`[HANDLE_ADMIN_POST_COMMAND_ENTER] Timestamp: ${new Date().toISOString()}, Post URI: ${post.uri}, Raw Admin Instructions: "${rawAdminInstructions}"`);
+    console.log(`[HANDLE_ADMIN_POST_COMMAND_ENTER] Timestamp: ${new Date().toISOString()}, Post URI: ${post.uri}, Command Content: "${commandContent}", IsImageCommand: ${isImageCommand}`);
 
     try {
       this.repliedPosts.add(post.uri);
       console.log(`[HANDLE_ADMIN_POST_COMMAND_PROCESSED_URI] Timestamp: ${new Date().toISOString()}, Added to repliedPosts: ${post.uri}`);
 
       const context = await this.getReplyContext(post);
-      if (!context || context.length === 0) {
-        console.warn(`Admin command: Context for post ${post.uri} is empty or could not be fetched (this might be fine for !post).`);
-      }
+      // Not logging full context to reduce noise.
+      // if (!context || context.length === 0) {
+      //   console.warn(`Admin command: Context for post ${post.uri} is empty or could not be fetched (this might be fine for !post).`);
+      // }
 
-      let textForLLM = rawAdminInstructions;
+      let textForLLM = commandContent;
       let imgPrompt = "";
-      let imageRequested = false;
 
-      if (rawAdminInstructions && rawAdminInstructions.includes('+image')) {
-        console.log("[DEBUG_IMG_FLOW] '+image' detected in rawAdminInstructions.");
-        imageRequested = true;
-        const parts = rawAdminInstructions.split('+image');
-        textForLLM = parts[0].trim();
-        imgPrompt = parts.length > 1 ? parts[1].trim() : "";
-        console.log(`[DEBUG_IMG_FLOW] textForLLM: "${textForLLM}", imgPrompt: "${imgPrompt}"`);
+      if (isImageCommand) {
+        console.log(`[DEBUG_IMG_FLOW] isImageCommand is true. Initial commandContent for splitting: "${commandContent}"`);
+        // If isImageCommand is true, commandContent is the full string *after* "!post+image "
+        // This content might be "text part +image image part" or just "image part"
+        const parts = commandContent.split('+image');
+        if (parts.length > 1 && commandContent.includes('+image')) { // Check if '+image' was indeed a separator in the content
+            textForLLM = parts[0].trim();
+            imgPrompt = parts[1].trim();
+        } else { // Assumed that the entire commandContent is the image prompt if no internal '+image' separator
+            textForLLM = "";
+            imgPrompt = commandContent.trim();
+        }
+        console.log(`[DEBUG_IMG_FLOW] Determined for Image Command: textForLLM: "${textForLLM}", imgPrompt: "${imgPrompt}"`);
       } else {
-        console.log("[DEBUG_IMG_FLOW] '+image' NOT detected in rawAdminInstructions.");
+        // Not an image command, so textForLLM is just commandContent, imgPrompt remains empty.
+        console.log(`[DEBUG_IMG_FLOW] isImageCommand is false. textForLLM set to commandContent: "${textForLLM}"`);
       }
 
-      // Handle case where !post+image is used but textForLLM and imgPrompt are both empty
-      if (imageRequested && !textForLLM && !imgPrompt) {
-          console.warn(`Admin command: !post+image used but both text and image prompts are effectively empty. Post URI: ${post.uri}`);
-          await this.postReply(post, "Admin command '!post+image' requires either text before '+image' or an image prompt after it.");
+      // Initial check for completely empty prompts if an image was intended
+      if (isImageCommand && !textForLLM && !imgPrompt) {
+          console.warn(`Admin command: !post+image used but both text and image prompts are effectively empty after parsing. Post URI: ${post.uri}`);
+          await this.postReply(post, "Admin command '!post+image' requires a valid image prompt or text for the post.");
           return;
       }
 
       const newPostText = await this.generateStandalonePostFromContext(context, textForLLM);
 
       if (newPostText) {
-        console.log(`Admin command: Generated new post text: "${newPostText}"`);
+        console.log(`Admin command: Generated new post text (first 50 chars): "${newPostText.substring(0,50)}..."`);
       } else {
-        console.warn(`Admin command: generateStandalonePostFromContext returned no text for LLM prompt: "${textForLLM}".`);
+        console.warn(`Admin command: generateStandalonePostFromContext returned no text for LLM prompt: "${textForLLM}"`);
       }
 
       let finalPostText = newPostText;
@@ -221,9 +216,9 @@ class BaseBot {
       let imageAltText = "Generated image";
       let imageGenError = null;
 
-      if (imageRequested) {
-        console.log(`[DEBUG_IMG_BLOCK] Image processing initiated. Original image prompt part: "${imgPrompt}"`);
-        if (imgPrompt) {
+      if (isImageCommand) { // Use the boolean passed from monitor
+        console.log(`[DEBUG_IMG_BLOCK] Image processing initiated. Actual image prompt to use: "${imgPrompt}"`);
+        if (imgPrompt && imgPrompt.length > 0) {
           console.log(`Admin command: Image requested. Passing to Scout. Prompt: "${imgPrompt}"`);
           const scoutResult = await this.processImagePromptWithScout(imgPrompt);
           console.log(`[DEBUG_IMG_BLOCK] Scout result: ${JSON.stringify(scoutResult)}`);
@@ -246,12 +241,13 @@ class BaseBot {
                 console.warn(`Admin command: Scout failed to describe the image. Using default alt text: "${imageAltText}"`);
               }
 
-              if (!textForLLM && !finalPostText) {
+              // If textForLLM was empty (e.g. from "!post+image just_image_prompt") AND LLM returned no text (finalPostText is null/empty)
+              if (!textForLLM && (!finalPostText || finalPostText.trim() === "")) {
                 if (imageAltText !== "Generated image" && imageAltText.length > 0) {
                     finalPostText = imageAltText;
                     console.log(`[DEBUG_IMG_BLOCK] Used image alt text as finalPostText because textForLLM and newPostText were empty.`);
                 } else {
-                    finalPostText = "Here's an image I generated:";
+                    finalPostText = "Here's an image I generated:"; // Fallback text
                     console.log(`[DEBUG_IMG_BLOCK] Used generic message as finalPostText because textForLLM, newPostText were empty and alt text was default/empty.`);
                 }
               }
@@ -260,17 +256,16 @@ class BaseBot {
               console.warn(`Admin command: Image generation failed for prompt (Flux returned null): "${scoutResult.image_prompt}"`);
             }
           }
-        } else { // imgPrompt is empty, but imageRequested was true
-          imageGenError = "Image requested with '+image', but no specific image prompt was provided after the flag.";
-          console.log(`Admin command: '+image' specified, but no image prompt was provided after it. Setting error: "${imageGenError}"`);
+        } else {
+          imageGenError = "Image requested with '+image' command, but no image prompt was actually provided or extracted.";
+          console.log(`Admin command: isImageCommand was true, but imgPrompt was empty. Setting error: "${imageGenError}"`);
         }
       } else {
-         console.log(`[DEBUG_IMG_BLOCK] No image was requested (imageRequested is false).`);
+         console.log(`[DEBUG_IMG_BLOCK] No image was requested (isImageCommand is false).`);
       }
 
-      // ===== POSTING LOGIC =====
       if (finalPostText || imageBase64) {
-        console.log(`[DEBUG_POSTING_LOGIC] Attempting post. finalPostText: "${finalPostText ? finalPostText.substring(0,50)+'...' : 'null'}", imageBase64 present: ${!!imageBase64}`);
+        console.log(`[DEBUG_POSTING_LOGIC] Attempting post. finalPostText (first 50): "${finalPostText ? finalPostText.substring(0,50)+'...' : 'null'}", imageBase64 present: ${!!imageBase64}`);
         const postSuccess = await this.postToOwnFeed(finalPostText, imageBase64, imageAltText);
 
         if (postSuccess) {
@@ -283,10 +278,9 @@ class BaseBot {
             confirmationMessage += ` I've posted an image to my feed.`;
           }
 
-          if (imageRequested && imageGenError) {
+          if (isImageCommand && imageGenError) {
             confirmationMessage += ` (Note: Image processing failed: ${imageGenError})`;
-          } else if (imageRequested && !imageBase64 && !imageGenError) {
-            // This case might happen if imgPrompt was empty but imageRequested was true
+          } else if (isImageCommand && !imageBase64 && !imageGenError) {
             confirmationMessage += ` (Note: Image was requested but not generated; verify prompt if provided).`;
           }
 
@@ -297,23 +291,19 @@ class BaseBot {
           console.warn(failureReason);
           await this.postReply(post, "Admin command failed: Could not post to my own feed. " + (imageGenError ? `Image error: ${imageGenError}`: ""));
         }
-      } else if (imageGenError) { // No text, and image generation failed (and image was requested)
+      } else if (imageGenError && isImageCommand) {
          const reason = `Admin command: No text generated AND image generation failed for post URI: ${post.uri}. Error: ${imageGenError}`;
          console.warn(reason);
          await this.postReply(post, `Admin command failed: No text was generated and image generation failed: ${imageGenError}`);
-      } else if (!finalPostText && !imageRequested) { // No text, and no image was even asked for
+      } else if (!finalPostText && !isImageCommand) {
          const reason = `Admin command: Could not generate any content for the post (no text from LLM, and no image requested). Post URI: ${post.uri}.`;
          console.warn(reason);
          await this.postReply(post, "Admin command failed: Could not generate any content for the post.");
       } else {
-        // This case: no finalPostText, and if image was requested, it didn't result in imageBase64 or imageGenError being set meaningfully for a reply.
-        // Example: !post +image (empty text, empty image prompt) - this is now caught earlier.
-        // Or: !post (empty text, no image) - caught by the condition above.
-        console.log(`[DEBUG_POSTING_LOGIC] Nothing to post. finalPostText is empty/null and no imageBase64. imageRequested: ${imageRequested}, imageGenError: ${imageGenError}`);
-        if (!imageGenError) {
+        console.log(`[DEBUG_POSTING_LOGIC] Nothing to post. finalPostText is empty/null and no imageBase64. isImageCommand: ${isImageCommand}, imageGenError: ${imageGenError}`);
+        if (!imageGenError && !(finalPostText && finalPostText.length > 0) && !imageBase64 ) {
             await this.postReply(post, "Admin command resulted in no content to post.");
         }
-        // If there was an imageGenError, it should have been caught by the "else if (imageGenError)" block.
       }
     } catch (error) {
       console.error(`FATAL Error handling admin command for post ${post.uri}:`, error);
@@ -322,25 +312,27 @@ class BaseBot {
   }
 
   async generateStandalonePostFromContext(context, adminInstructions) {
-    console.log('BaseBot.generateStandalonePostFromContext called. Context:', JSON.stringify(context, null, 2), 'Instructions:', adminInstructions);
+    console.log('BaseBot.generateStandalonePostFromContext called. Context (sample):', context ? JSON.stringify(context.slice(0,1)) : "null", 'Instructions:', adminInstructions);
     return 'Placeholder post text generated from context by BaseBot.';
   }
 
   async postToOwnFeed(text, imageBase64 = null, altText = "Generated image") {
     const postText = text ? utils.truncateResponse(text) : (imageBase64 ? "" : null);
-
     if (postText === null && !imageBase64) {
       console.warn(`[postToOwnFeed] Attempted to post with no text and no image. Aborting.`);
       return false;
     }
-
     console.log(`Attempting to post to own feed. Text: "${postText}"`, imageBase64 ? `Image included (Alt: "${altText}")` : "No image.");
-
     try {
       RateLimit.check();
       const postObject = {};
-      if (postText !== null) {
+      if (postText !== null && postText.trim() !== "") {
         postObject.text = postText;
+      } else if (postText === "" && !imageBase64) {
+        console.warn('[postToOwnFeed] Attempting to post with empty text and no image. Aborting.');
+        return false;
+      } else if (postText === "" && imageBase64) {
+         postObject.text = "";
       }
 
       if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
@@ -348,37 +340,28 @@ class BaseBot {
         try {
           const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
           console.log(`[postToOwnFeed] Converted base64 to Uint8Array, size: ${imageBytes.length} bytes.`);
-
           if (imageBytes.length === 0) {
             console.error('[postToOwnFeed] Image byte array is empty after conversion. Skipping image upload for this attempt.');
           } else {
-            const uploadedImage = await this.agent.uploadBlob(imageBytes, {
-              encoding: 'image/png'
-            });
+            const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
             console.log('[postToOwnFeed] Successfully uploaded image to Bluesky:', JSON.stringify(uploadedImage));
-
             if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
               postObject.embed = {
                 $type: 'app.bsky.embed.images',
-                images: [{
-                  image: uploadedImage.data.blob,
-                  alt: altText
-                }]
+                images: [{ image: uploadedImage.data.blob, alt: altText }]
               };
               console.log(`[postToOwnFeed] Image embed object created with alt text: "${altText}"`);
             } else {
               console.error('[postToOwnFeed] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
             }
           }
-        } catch (uploadError) {
-          console.error('[postToOwnFeed] Error during image upload or embed creation:', uploadError);
-        }
+        } catch (uploadError) { console.error('[postToOwnFeed] Error during image upload or embed creation:', uploadError); }
       } else if (imageBase64) {
         console.warn(`[postToOwnFeed] imageBase64 was present but invalid. Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
       }
 
-      if (!postObject.text && !postObject.embed) {
-          console.warn('[postToOwnFeed] Post object is empty (no text and no image embed). Aborting post.');
+      if (Object.keys(postObject).length === 0 || (postObject.text === undefined && !postObject.embed)) {
+          console.warn('[postToOwnFeed] Post object is effectively empty (no text and no image embed). Aborting post.');
           return false;
       }
 
@@ -396,72 +379,78 @@ class BaseBot {
   async monitor() {
     let consecutiveErrors = 0;
     const MAX_RETRIES = 5;
-    const BACKOFF_DELAY = 60000; // 1 minute
+    const BACKOFF_DELAY = 60000;
 
     try {
       await this.authenticate();
-      
       console.log('Starting monitoring...');
-
       let lastCheckedPost = null;
 
       while (true) {
         try {
           const posts = await this.getRecentPosts();
-          
           if (!posts.length) {
-            console.log('No posts found');
+            // console.log('No posts found'); // Reduce noise
             await utils.sleep(this.config.CHECK_INTERVAL);
             continue;
           }
-
           const latestPost = posts[0];
-          
           if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
-            console.log('Already processed this post, skipping...');
+            // console.log('Already processed this post, skipping...'); // Reduce noise
             await utils.sleep(this.config.CHECK_INTERVAL);
             continue;
           }
-          
           lastCheckedPost = latestPost.uri;
 
-          // Check for Admin Command
+          let isAdminCmd = false;
           if (latestPost.post &&
               latestPost.post.author &&
               latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
               latestPost.post.record &&
               latestPost.post.record.text &&
               latestPost.post.record.text.includes('!post')) {
+            isAdminCmd = true;
+          }
 
+          if (isAdminCmd) {
             const commandText = latestPost.post.record.text;
-            let adminInstructions = '';
+            let commandContent = "";
+            let isImageCommand = false;
 
-            const postCommandIndex = commandText.indexOf('!post');
-
-            if (postCommandIndex !== -1) {
-              const instructionPart = commandText.substring(postCommandIndex);
-              const instructionMatch = instructionPart.match(/^!post(?:\+image)?\s+(.+)/s);
-              if (instructionMatch && instructionMatch[1]) {
-                adminInstructions = instructionMatch[1].trim();
-              } else {
-                adminInstructions = "";
-              }
+            let commandSearchText = commandText;
+            const botMention = `@${this.config.BLUESKY_IDENTIFIER}`;
+            if (commandText.startsWith(botMention)) {
+                commandSearchText = commandText.substring(botMention.length).trim();
             }
-            
-            console.log(`[DEBUG] Extracted adminInstructions: "${adminInstructions}" from commandText: "${commandText}"`);
-            await this.handleAdminPostCommand(latestPost.post, adminInstructions);
 
-          } else { // Regular reply logic (image or text)
+            console.log(`[DEBUG_MONITOR] commandSearchText after potential mention strip: "${commandSearchText}"`);
+
+            if (commandSearchText.startsWith("!post+image ")) {
+                isImageCommand = true;
+                commandContent = commandSearchText.substring("!post+image ".length).trim();
+                console.log(`[DEBUG_MONITOR] Detected !post+image. Content to pass: "${commandContent}"`);
+            } else if (commandSearchText.startsWith("!post ")) {
+                isImageCommand = false;
+                commandContent = commandSearchText.substring("!post ".length).trim();
+                console.log(`[DEBUG_MONITOR] Detected !post. Content to pass: "${commandContent}"`);
+            } else {
+                // This means '!post' was in the text but not as a recognized prefix after potential mention.
+                // It will fall through to regular reply logic.
+                console.log(`[MONITOR] Admin post included '!post' but not as a recognized command prefix: "${commandSearchText}". Treating as regular mention.`);
+                isAdminCmd = false; // Force it to non-admin path
+            }
+
+            if (isAdminCmd) { // Check again in case it was invalidated
+              await this.handleAdminPostCommand(latestPost.post, commandContent, isImageCommand);
+            }
+          }
+
+          if (!isAdminCmd) { // Regular reply logic if not an admin command or if admin command was malformed
             const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
-
             if (!alreadyReplied) {
               const imageRequestKeywords = [
-                "generate image",
-                "generate an image",
-                "create a picture of",
-                "draw a picture of",
-                "create an image of",
-                "draw an image of"
+                "generate image", "generate an image", "create a picture of",
+                "draw a picture of", "create an image of", "draw an image of"
               ];
               let isImageRequest = false;
               let imagePrompt = "";
@@ -469,66 +458,31 @@ class BaseBot {
               if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text && typeof latestPost.post.record.text === 'string') {
                 const originalText = latestPost.post.record.text;
                 const lowercasedText = originalText.toLowerCase();
-                console.log(`[KeywordLoop] Processing text: "${originalText}" (Lowercase: "${lowercasedText}")`);
-
-                let textCharCodes = '';
-                for (let i = 0; i < lowercasedText.length; i++) {
-                  textCharCodes += `${lowercasedText.charCodeAt(i)} `;
-                }
-                console.log(`[KeywordLoop] Char codes for lowercasedText: ${textCharCodes.trim()}`);
-
-
                 for (const keyword of imageRequestKeywords) {
-                  console.log(`[KeywordLoop] Checking keyword: "${keyword}"`);
-                  let keywordCharCodes = '';
-                  for (let i = 0; i < keyword.length; i++) {
-                    keywordCharCodes += `${keyword.charCodeAt(i)} `;
-                  }
-                  console.log(`[KeywordLoop] Char codes for keyword "${keyword}": ${keywordCharCodes.trim()}`);
-
                   const keywordIndex = lowercasedText.indexOf(keyword);
-                  console.log(`[KeywordLoop] Keyword index for "${keyword}": ${keywordIndex}`);
-
                   if (keywordIndex !== -1) {
                     let tempPrompt = originalText.substring(keywordIndex + keyword.length).trim();
-                    console.log(`[KeywordLoop] Initial tempPrompt for "${keyword}": "${tempPrompt}"`);
-
                     if (tempPrompt.toLowerCase().startsWith("of ")) {
                       tempPrompt = tempPrompt.substring(3).trim();
-                      console.log(`[KeywordLoop] tempPrompt after 'of ' trim: "${tempPrompt}"`);
                     }
-
-                    console.log(`[KeywordLoop] Validating tempPrompt: "${tempPrompt}", Length: ${tempPrompt.length}`);
                     const isLengthValid = tempPrompt.length >= 5 && tempPrompt.length <= 300;
-                    console.log(`[KeywordLoop] Is length valid (5-300 chars)? ${isLengthValid}`);
-
                     if (isLengthValid) {
                       imagePrompt = tempPrompt;
                       isImageRequest = true;
                       console.log(`[KeywordLoop] Valid image request. Keyword: "${keyword}". Prompt: "${imagePrompt}"`);
                       break;
-                    } else {
-                      console.warn(`[KeywordLoop] Keyword "${keyword}" led to invalid prompt (length ${tempPrompt.length}): "${tempPrompt}". Checking next keyword.`);
                     }
                   }
                 }
-              } else {
-                console.log(`Post URI ${latestPost.post?.uri || 'Unknown URI'} lacks text content or text is not a string. Skipping keyword-based processing for this post.`);
               }
-
-              console.log(`[DEBUG] Before decision logic: isImageRequest = ${isImageRequest}, imagePrompt (raw user text for image) = "${imagePrompt}" (Length: ${imagePrompt.length})`);
-
               let standardTextResponse = null;
               if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
                   const context = await this.getReplyContext(latestPost.post);
                   standardTextResponse = await this.generateResponse(latestPost.post, context);
-              } else {
-                  console.log("No text in the original post to process for a standard text reply.");
               }
 
               if (isImageRequest && imagePrompt) {
                 const scoutResult = await this.processImagePromptWithScout(imagePrompt);
-
                 if (!scoutResult.safe) {
                   console.warn(`Image prompt "${imagePrompt}" deemed unsafe by Scout. Reply: "${scoutResult.reply_text}"`);
                   let replyText = scoutResult.reply_text;
@@ -540,10 +494,8 @@ class BaseBot {
                   console.log(`Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
                   const imageBase64 = await this.generateImage(scoutResult.image_prompt);
                   let finalAltText = "Generated image";
-
                   if (imageBase64) {
                     const imageDescriptionFromScout = await this.describeImageWithScout(imageBase64);
-
                     if (imageDescriptionFromScout) {
                       console.log(`Scout successfully described the image: "${imageDescriptionFromScout}"`);
                       finalAltText = imageDescriptionFromScout;
@@ -561,15 +513,12 @@ class BaseBot {
                     const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this, keeping the message under 150 characters. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
                     const fluxFailureContext = [{ author: 'system', text: 'Informing user about image generation failure.' }];
                     let fluxFailureReply = await this.generateResponse({ record: { text: fluxFailureUserPrompt } }, fluxFailureContext);
-
                     if (!fluxFailureReply) {
                         fluxFailureReply = "I understood your request for an image, and the prompt was safe, but unfortunately, I couldn't generate the image this time.";
                     }
-
                     let finalReplyText = standardTextResponse ? standardTextResponse : "";
                     if (finalReplyText) finalReplyText += "\n\n";
                     finalReplyText += fluxFailureReply;
-
                     await this.postReply(latestPost.post, finalReplyText);
                   }
                 }
@@ -581,28 +530,21 @@ class BaseBot {
                 }
                 await this.postReply(latestPost.post, failureText);
               } else {
-                console.log('No image request detected. Posting standard text response if available.');
                 if (standardTextResponse) {
                     await this.postReply(latestPost.post, standardTextResponse);
-                } else {
-                    console.log("No standard text response generated, and no image request. Nothing to post.");
                 }
               }
             }
           }
-
           consecutiveErrors = 0;
           await utils.sleep(this.config.CHECK_INTERVAL);
-
         } catch (error) {
           console.error('Error in monitoring loop:', error);
           consecutiveErrors++;
-          
           if (consecutiveErrors >= MAX_RETRIES) {
             console.error(`Maximum retries (${MAX_RETRIES}) reached, restarting monitor...`);
             break;
           }
-          
           const delay = BACKOFF_DELAY * Math.pow(2, consecutiveErrors - 1);
           console.log(`Retrying in ${delay/1000} seconds...`);
           await utils.sleep(delay);
@@ -629,29 +571,11 @@ class BaseBot {
 
   async getRecentPosts() {
     try {
-      const { data: notifications } = await this.agent.listNotifications({
-        limit: 20
-      });
-      
-      if (!notifications || !notifications.notifications) {
-        throw new Error('No notifications returned');
-      }
-      
+      const { data: notifications } = await this.agent.listNotifications({ limit: 20 });
+      if (!notifications || !notifications.notifications) throw new Error('No notifications returned');
       const relevantPosts = notifications.notifications
-        .filter(notif => {
-          if (notif.reason === 'like') return false;
-          return notif.author.handle !== this.config.BLUESKY_IDENTIFIER;
-        })
-        .map(notif => ({
-          post: {
-            uri: notif.uri,
-            cid: notif.cid,
-            author: notif.author,
-            record: notif.record
-          }
-        }));
-      
-      console.log(`Found ${relevantPosts.length} relevant mentions`);
+        .filter(notif => notif.reason !== 'like' && notif.author.handle !== this.config.BLUESKY_IDENTIFIER)
+        .map(notif => ({ post: { uri: notif.uri, cid: notif.cid, author: notif.author, record: notif.record } }));
       return relevantPosts;
     } catch (error) {
       console.error('Error in getRecentPosts:', error);
@@ -662,28 +586,12 @@ class BaseBot {
   async getReplyContext(post) {
     try {
       const conversation = [];
-      const extractImages = (record) => {
-        const images = record?.embed?.images || 
-                      record?.embed?.media?.images || 
-                      [];
-        return images.map(img => ({
-          alt: img.alt,
-          url: img.fullsize || img.thumb
-        }));
-      };
-
-      conversation.push({
-        author: post.author.handle,
-        text: post.record.text,
-        images: extractImages(post.record)
-      });
-
+      const extractImages = (record) => (record?.embed?.images || record?.embed?.media?.images || []).map(img => ({ alt: img.alt, url: img.fullsize || img.thumb }));
+      conversation.push({ author: post.author.handle, text: post.record.text, images: extractImages(post.record) });
       if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed) {
         try {
-          console.log('Processing embed record');
           const uri = post.record.embed.record.uri;
           const matches = uri.match(/at:\/\/([^/]+)\/[^/]+\/([^/]+)/);
-          
           if (matches) {
             const [_, repo, rkey] = matches;
             const quotedPostResponse = await this.agent.getPost({ repo, rkey });
@@ -691,47 +599,27 @@ class BaseBot {
               const authorDid = matches[1];
               const postValue = quotedPostResponse.value;
               if (postValue.text) {
-                console.log('Found a quote post with text:', postValue.text);
                 const quotedImages = postValue.embed?.images || postValue.embed?.media?.images || [];
-                conversation.unshift({
-                  author: authorDid,
-                  text: postValue.text,
-                  images: quotedImages.map(img => ({ alt: img.alt, url: img.fullsize || img.thumb }))
-                });
+                conversation.unshift({ author: authorDid, text: postValue.text, images: quotedImages.map(img => ({ alt: img.alt, url: img.fullsize || img.thumb })) });
               }
             }
           }
-        } catch (error) {
-          console.error('Error fetching quoted post:', error);
-        }
+        } catch (error) { console.error('Error fetching quoted post:', error); }
       }
-
       if (post.record?.reply) {
         let currentUri = post.uri;
         while (currentUri) {
-          const { data: thread } = await this.agent.getPostThread({
-            uri: currentUri,
-            depth: 0,
-            parentHeight: 1
-          });
+          const { data: thread } = await this.agent.getPostThread({ uri: currentUri, depth: 0, parentHeight: 1 });
           if (!thread.thread.post) break;
           const images = thread.thread.post.record.embed?.images || thread.thread.post.record.embed?.media?.images || [];
           conversation.unshift({
             author: thread.thread.post.author.handle,
             text: thread.thread.post.record.text,
-            images: images.map(img => ({
-              alt: img.alt,
-              url: thread.thread.post.embed?.images?.[0]?.fullsize || 
-                   thread.thread.post.embed?.images?.[0]?.thumb ||
-                   img.image?.fullsize || 
-                   img.image?.thumb
-            }))
+            images: images.map(img => ({ alt: img.alt, url: thread.thread.post.embed?.images?.[0]?.fullsize || thread.thread.post.embed?.images?.[0]?.thumb || img.image?.fullsize || img.image?.thumb }))
           });
           currentUri = thread.thread.parent?.post?.uri;
         }
       }
-
-      console.log('Conversation context with images:', JSON.stringify(conversation, null, 2));
       return conversation;
     } catch (error) {
       console.error('Error fetching reply context:', error);
@@ -744,42 +632,26 @@ class BaseBot {
       RateLimit.check();
       const replyObject = {
         text: utils.truncateResponse(response),
-        reply: {
-          root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
-          parent: { uri: post.uri, cid: post.cid }
-        }
+        reply: { root: post.record?.reply?.root || { uri: post.uri, cid: post.cid }, parent: { uri: post.uri, cid: post.cid } }
       };
-
       if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
-        console.log(`[postReply] imageBase64 received, length: ${imageBase64.length}. Attempting to upload.`);
         try {
           const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
-          console.log(`[postReply] Converted base64 to Uint8Array, size: ${imageBytes.length} bytes.`);
           if (imageBytes.length === 0) {
             console.error('[postReply] Image byte array is empty after conversion. Skipping image upload.');
           } else {
             const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
-            console.log('[postReply] Successfully uploaded image to Bluesky:', JSON.stringify(uploadedImage));
             if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
-              replyObject.embed = {
-                $type: 'app.bsky.embed.images',
-                images: [{ image: uploadedImage.data.blob, alt: altText }]
-              };
+              replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
               console.log(`[postReply] Image embed object created with alt text: "${altText}"`);
             } else {
               console.error('[postReply] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
             }
           }
-        } catch (uploadError) {
-          console.error('[postReply] Error during image upload or embed creation:', uploadError);
-        }
+        } catch (uploadError) { console.error('[postReply] Error during image upload or embed creation:', uploadError); }
       } else if (imageBase64) {
         console.warn(`[postReply] imageBase64 was present but invalid (not a non-empty string). Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
-      } else {
-        console.log('[postReply] No imageBase64 provided. Posting text-only reply.');
       }
-
-      console.log('[postReply] Final replyObject before posting:', JSON.stringify(replyObject));
       const result = await this.agent.post(replyObject);
       console.log('Successfully posted reply:', result.uri);
       this.repliedPosts.add(post.uri);
@@ -801,37 +673,32 @@ class LlamaBot extends BaseBot {
   }
 
   async generateStandalonePostFromContext(context, adminInstructions) {
-    console.log('LlamaBot.generateStandalonePostFromContext called. Context:', JSON.stringify(context, null, 2), 'Instructions:', adminInstructions);
+    console.log('LlamaBot.generateStandalonePostFromContext called. Context (sample):', context ? JSON.stringify(context.slice(0,1)) : "null", 'Instructions:', adminInstructions);
     try {
       const trimmedAdminInstructions = adminInstructions ? adminInstructions.trim() : '';
       const isContextMinimal = !context || context.length === 0 ||
                                (context.length === 1 && context[0] && typeof context[0].text === 'string' && context[0].text.startsWith('!post'));
       let userPrompt;
 
-      if (isContextMinimal && trimmedAdminInstructions) {
+      if (trimmedAdminInstructions === "" && (!context || context.length === 0)) {
+        console.warn('LlamaBot.generateStandalonePostFromContext: Both context and admin instructions are effectively empty. Cannot generate post content.');
+        return null;
+      } else if (isContextMinimal && trimmedAdminInstructions) {
         userPrompt = `The administrator has provided specific instructions to generate a new Bluesky post. Please create a post based directly on the following instructions. Ensure the post adheres to the bot's persona (as defined in the system prompt: "${this.config.TEXT_SYSTEM_PROMPT}") and is under 300 characters.\n\nAdmin Instructions: "${trimmedAdminInstructions}"\n\n(Do not attempt to summarize a prior conversation; generate directly from the instructions.)`;
         console.log('LlamaBot.generateStandalonePostFromContext: Using admin instructions-focused prompt due to minimal context.');
-      } else if (trimmedAdminInstructions === "" && (!context || context.length === 0)) {
-        // Explicitly handle case where instructions are empty AND context is minimal/empty.
-        console.warn('LlamaBot.generateStandalonePostFromContext: Both context and admin instructions are effectively empty. Cannot generate post content.');
-        return null; // Return null if there's nothing to generate from.
-      }
-      else {
+      } else {
         let conversationHistory = '';
         if (context && context.length > 0) {
           for (const msg of context) {
             conversationHistory += `${msg.author}: ${msg.text}\n`;
             if (msg.images && msg.images.length > 0) {
-              msg.images.forEach(image => {
-                if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`;
-              });
+              msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
             }
           }
-        } else if (!trimmedAdminInstructions) { // Should be caught by prior condition, but defensive.
+        } else if (!trimmedAdminInstructions) {
             console.warn('LlamaBot.generateStandalonePostFromContext: Context is empty and no admin instructions to act on.');
             return null;
         }
-
         userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
         if (trimmedAdminInstructions) {
           userPrompt += `\n\nImportant specific instructions from the admin for this post: "${trimmedAdminInstructions}". Please ensure the generated post carefully follows these instructions while also drawing from the conversation themes where appropriate.`;
@@ -845,15 +712,11 @@ class LlamaBot extends BaseBot {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
           model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
-          messages: [
-            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` },
-            { role: "user", content: userPrompt }
-          ],
+          messages: [ { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` }, { role: "user", content: userPrompt } ],
           temperature: 0.90, max_tokens: 100, stream: false
         })
       });
       console.log(`NIM CALL END: generateStandalonePostFromContext for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
-
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Nvidia NIM API error (${response.status}) for generateStandalonePostFromContext - Text: ${errorText}`);
@@ -881,7 +744,6 @@ class LlamaBot extends BaseBot {
         })
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext - Status: ${filterResponse.status}`);
-
       if (!filterResponse.ok) {
         const errorText = await filterResponse.text();
         console.error(`Nvidia NIM API error (filter model) in generateStandalonePostFromContext (${filterResponse.status}) - Text: ${errorText}`);
@@ -895,7 +757,6 @@ class LlamaBot extends BaseBot {
       const finalResponse = filterData.choices[0].message.content.trim();
       console.log(`[LlamaBot.generateStandalonePostFromContext] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
       return finalResponse;
-
     } catch (error) {
       console.error('Error in LlamaBot.generateStandalonePostFromContext:', error);
       return null;
@@ -909,13 +770,10 @@ class LlamaBot extends BaseBot {
         for (const msg of context) {
           conversationHistory += `${msg.author}: ${msg.text}\n`;
           if (msg.images && msg.images.length > 0) {
-            msg.images.forEach(image => {
-              if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`;
-            });
+            msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
           }
         }
       }
-
       console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
@@ -930,14 +788,10 @@ class LlamaBot extends BaseBot {
         })
       });
       console.log(`NIM CALL END: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
-
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Nvidia NIM API error (${response.status}) - Text: ${errorText}`);
-        try {
-          const errorJson = JSON.parse(errorText);
-          console.error(`Nvidia NIM API error (${response.status}) - JSON:`, errorJson);
-        } catch (e) {}
+        try { const errorJson = JSON.parse(errorText); console.error(`Nvidia NIM API error (${response.status}) - JSON:`, errorJson); } catch (e) {}
         if (response.status === 429 || response.status === 503 || response.status === 504) {
           console.log('Rate limit or server error, retrying after delay...');
           await utils.sleep(2000);
@@ -952,7 +806,6 @@ class LlamaBot extends BaseBot {
       }
       let initialResponse = data.choices[0].message.content;
       console.log(`[LlamaBot.generateResponse] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
-
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct`);
       const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
@@ -967,7 +820,6 @@ class LlamaBot extends BaseBot {
         })
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
-
       if (!filterResponse.ok) {
         const errorText = await filterResponse.text();
         console.error(`Nvidia NIM API error (filter model) (${filterResponse.status}) - Text: ${errorText}`);
@@ -981,7 +833,6 @@ class LlamaBot extends BaseBot {
       const finalResponse = filterData.choices[0].message.content;
       console.log(`[LlamaBot.generateResponse] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
       return finalResponse;
-
     } catch (error) {
       console.error('Error generating Llama response:', error);
       return null;
@@ -995,13 +846,10 @@ class LlamaBot extends BaseBot {
   async generateImage(prompt) {
     const modelToUse = "black-forest-labs/FLUX.1-schnell-Free";
     const apiKey = this.config.TOGETHER_AI_API_KEY;
-    if (!apiKey) {
-      console.error('TOGETHER_AI_API_KEY is not configured. Cannot generate image.');
-      return null;
-    }
+    if (!apiKey) { console.error('TOGETHER_AI_API_KEY is not configured. Cannot generate image.'); return null; }
     console.log(`TOGETHER AI CALL START: generateImage for model "${modelToUse}" with prompt "${prompt}"`);
     const requestBody = { model: modelToUse, prompt: prompt, n: 1, size: "1024x1024" };
-    console.log('Together AI Request Body:', JSON.stringify(requestBody));
+    // console.log('Together AI Request Body:', JSON.stringify(requestBody)); // Reduce noise
     try {
       const response = await fetch('https://api.together.xyz/v1/images/generations', {
         method: 'POST',
@@ -1011,13 +859,10 @@ class LlamaBot extends BaseBot {
       const responseStatus = response.status;
       const responseText = await response.text();
       console.log(`TOGETHER AI CALL END: generateImage - Status: ${responseStatus}`);
-      console.log(`TOGETHER AI CALL Full Response Text: ${responseText}`);
+      // console.log(`TOGETHER AI CALL Full Response Text: ${responseText}`); // Reduce noise
       if (!response.ok) {
         console.error(`Together AI API error (${responseStatus}) for generateImage with prompt "${prompt}" - Full Response: ${responseText}`);
-        try {
-          const errorJson = JSON.parse(responseText);
-          console.error(`Together AI API error (${responseStatus}) for generateImage - Parsed JSON:`, errorJson);
-        } catch (e) {}
+        try { const errorJson = JSON.parse(responseText); console.error(`Together AI API error (${responseStatus}) for generateImage - Parsed JSON:`, errorJson); } catch (e) {}
         return null;
       }
       const data = JSON.parse(responseText);
@@ -1030,25 +875,14 @@ class LlamaBot extends BaseBot {
           console.log(`Received image URL from Together AI: ${firstImageData.url}. Attempting to download and convert to base64 for prompt "${prompt}".`);
           try {
             const base64Image = await utils.imageUrlToBase64(firstImageData.url);
-            if (base64Image) {
-              console.log(`Successfully downloaded and converted image from URL to base64 for prompt "${prompt}".`);
-              return base64Image;
-            } else {
-              console.error(`Failed to convert image from URL to base64 for prompt "${prompt}". URL: ${firstImageData.url}`);
-              return null;
-            }
-          } catch (urlConversionError) {
-            console.error(`Error downloading or converting image from URL (${firstImageData.url}) for prompt "${prompt}":`, urlConversionError);
-            return null;
-          }
+            if (base64Image) { console.log(`Successfully downloaded and converted image from URL to base64 for prompt "${prompt}".`); return base64Image; }
+            else { console.error(`Failed to convert image from URL to base64 for prompt "${prompt}". URL: ${firstImageData.url}`); return null; }
+          } catch (urlConversionError) { console.error(`Error downloading or converting image from URL (${firstImageData.url}) for prompt "${prompt}":`, urlConversionError); return null; }
         }
       }
       console.error(`Unexpected response format or missing image data from Together AI for generateImage (prompt: "${prompt}"):`, JSON.stringify(data));
       return null;
-    } catch (error) {
-      console.error(`Error in LlamaBot.generateImage (prompt: "${prompt}"):`, error);
-      return null;
-    }
+    } catch (error) { console.error(`Error in LlamaBot.generateImage (prompt: "${prompt}"):`, error); return null; }
   }
 
   async isTextSafeScout(prompt) {
@@ -1073,7 +907,7 @@ class LlamaBot extends BaseBot {
         return false;
       }
       const data = await response.json();
-      console.log(`NIM CALL RESPONSE: isTextSafeScout for prompt "${prompt}" - Data:`, JSON.stringify(data));
+      // console.log(`NIM CALL RESPONSE: isTextSafeScout for prompt "${prompt}" - Data:`, JSON.stringify(data)); // Reduce noise
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
         const decision = data.choices[0].message.content.trim().toLowerCase();
         console.log(`Safety check for text "${prompt}": AI decision: "${decision}"`);
@@ -1081,10 +915,7 @@ class LlamaBot extends BaseBot {
       }
       console.error(`Unexpected response format from Nvidia NIM for isTextSafeScout (prompt: "${prompt}"):`, JSON.stringify(data));
       return false;
-    } catch (error) {
-      console.error(`Error in LlamaBot.isTextSafeScout (prompt: "${prompt}"):`, error);
-      return false;
-    }
+    } catch (error) { console.error(`Error in LlamaBot.isTextSafeScout (prompt: "${prompt}"):`, error); return false; }
   }
 
   async processImagePromptWithScout(user_prompt_text) {
@@ -1096,16 +927,12 @@ class LlamaBot extends BaseBot {
 3. If the text is safe, extract the core artistic request. Rephrase it if necessary to be a concise and effective prompt for an image generation model like Flux.1 Schnell. The prompt should be descriptive and clear.
 4. If safe, respond with a JSON object: \`{ "safe": true, "image_prompt": "your_refined_image_prompt_here" }\`.
 Ensure your entire response is ONLY the JSON object.`;
-
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
-          messages: [
-            { role: "system", content: system_instruction },
-            { role: "user", content: user_prompt_text }
-          ],
+          messages: [ { role: "system", content: system_instruction }, { role: "user", content: user_prompt_text } ],
           temperature: 0.3, max_tokens: 150, stream: false,
         })
       });
@@ -1116,17 +943,16 @@ Ensure your entire response is ONLY the JSON object.`;
         return { safe: false, reply_text: "Sorry, I encountered an issue processing your image request. Please try again later." };
       }
       const apiResponseText = await response.text();
-      console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - API Raw Text: ${apiResponseText}`);
+      // console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - API Raw Text: ${apiResponseText}`); // Reduce noise
       try {
         const apiData = JSON.parse(apiResponseText);
         if (apiData.choices && apiData.choices.length > 0 && apiData.choices[0].message && apiData.choices[0].message.content) {
           let nestedJsonString = apiData.choices[0].message.content.trim();
-          console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw Nested String: ${nestedJsonString}`);
+          // console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw Nested String: ${nestedJsonString}`); // Reduce noise
           const markdownJsonRegex = /^```(?:json)?\s*([\s\S]*?)\s*```$/;
           const match = nestedJsonString.match(markdownJsonRegex);
-          if (match && match[1]) {
-            nestedJsonString = match[1].trim();
-            console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Cleaned Nested JSON String: ${nestedJsonString}`);
+          if (match && match[1]) { nestedJsonString = match[1].trim();
+            // console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Cleaned Nested JSON String: ${nestedJsonString}`); // Reduce noise
           }
           try {
             const scoutDecision = JSON.parse(nestedJsonString);
@@ -1171,10 +997,7 @@ Ensure your entire response is ONLY the JSON object.`;
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
           model: modelToUse,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] }
-          ],
+          messages: [ { role: "system", content: systemPrompt }, { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] } ],
           temperature: 0.5, max_tokens: 100, stream: false
         })
       });
@@ -1182,45 +1005,33 @@ Ensure your entire response is ONLY the JSON object.`;
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - Text: ${errorText}`);
-        try {
-            const errorJson = JSON.parse(errorText);
-            console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - JSON:`, errorJson);
-        } catch (e) { }
+        try { const errorJson = JSON.parse(errorText); console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - JSON:`, errorJson); } catch (e) { }
         return null;
       }
       const data = await response.json();
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
         const description = data.choices[0].message.content.trim();
         console.log(`NIM CALL RESPONSE: describeImageWithScout - Description: "${description}"`);
-        if (description && description.length > 5) {
-            return description;
-        } else {
-            console.warn(`describeImageWithScout received an empty or too short description: "${description}"`);
-            return null;
-        }
+        if (description && description.length > 5) { return description; }
+        else { console.warn(`describeImageWithScout received an empty or too short description: "${description}"`); return null; }
       }
       console.error(`Unexpected response format from Nvidia NIM for describeImageWithScout:`, JSON.stringify(data));
       return null;
-    } catch (error) {
-      console.error(`Error in LlamaBot.describeImageWithScout:`, error);
-      return null;
-    }
+    } catch (error) { console.error(`Error in LlamaBot.describeImageWithScout:`, error); return null; }
   }
 }
 
 // Initialize and run the bot
 async function startBots() {
   const agent = new AtpAgent({ service: 'https://bsky.social' });
-
   const llamaBot = new LlamaBot({
     ...config,
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
     BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD,
   }, agent);
-
-  // Run bot
   await llamaBot.monitor().catch(console.error);
 }
 
-// Start the bot
 startBots().catch(console.error);
+
+[end of index.js]
