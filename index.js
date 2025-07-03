@@ -114,8 +114,12 @@ class BaseBot {
     throw new Error('generateImage must be implemented by child class');
   }
 
-  async isPromptSafe(prompt) { // Added to BaseBot
-    throw new Error('isPromptSafe must be implemented by child class');
+  async isTextSafeScout(prompt) { // Renamed from isPromptSafe
+    throw new Error('isTextSafeScout must be implemented by child class');
+  }
+
+  async processImagePromptWithScout(user_prompt_text) { // Added to BaseBot
+    throw new Error('processImagePromptWithScout must be implemented by child class');
   }
 
   async generateImagePrompt(post, response) {
@@ -339,44 +343,77 @@ class BaseBot {
                 console.log(`Post URI ${latestPost.post?.uri || 'Unknown URI'} lacks text content or text is not a string. Skipping keyword-based processing for this post.`);
               }
 
-              console.log(`[DEBUG] Before decision logic: isImageRequest = ${isImageRequest}, imagePrompt = "${imagePrompt}" (Prompt length: ${imagePrompt.length})`);
+              console.log(`[DEBUG] Before decision logic: isImageRequest = ${isImageRequest}, imagePrompt (raw user text for image) = "${imagePrompt}" (Length: ${imagePrompt.length})`);
+
+              // Standard text response generation - can happen regardless of image request
+              let standardTextResponse = null;
+              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
+                  const context = await this.getReplyContext(latestPost.post);
+                  standardTextResponse = await this.generateResponse(latestPost.post, context);
+              } else {
+                  console.log("No text in the original post to process for a standard text reply.");
+              }
 
               if (isImageRequest && imagePrompt) {
-                const safePrompt = await this.isPromptSafe(imagePrompt);
-                if (safePrompt) {
-                  console.log('Prompt is safe, proceeding to generate image...');
-                  const imageBase64 = await this.generateImage(imagePrompt);
-                  if (imageBase64) {
-                    const imageResponseText = `Here's the image you requested:`;
-                    await this.postReply(latestPost.post, imageResponseText, imageBase64);
-                  } else {
-                    const failureText = "Sorry, I couldn't generate the image at this time (generation process failed).";
-                    await this.postReply(latestPost.post, failureText);
+                const scoutResult = await this.processImagePromptWithScout(imagePrompt);
+
+                if (!scoutResult.safe) {
+                  // Prompt is unsafe
+                  console.warn(`Image prompt "${imagePrompt}" deemed unsafe by Scout. Reply: "${scoutResult.reply_text}"`);
+                  let replyText = scoutResult.reply_text;
+                  if (standardTextResponse) {
+                    replyText = `${standardTextResponse}\n\nRegarding your image request: ${scoutResult.reply_text}`;
                   }
+                  await this.postReply(latestPost.post, replyText);
                 } else {
-                  console.warn(`Image prompt "${imagePrompt}" was deemed unsafe. Replying with a refusal.`);
-                  const refusalText = "I'm sorry, but I cannot generate an image based on that request due to safety guidelines. Please try a different prompt.";
-                  await this.postReply(latestPost.post, refusalText);
-                }
-                await utils.sleep(2000);
+                  // Prompt is safe, proceed to generate image
+                  console.log(`Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
+                  const imageBase64 = await this.generateImage(scoutResult.image_prompt);
 
-              } else if (isImageRequest && !imagePrompt) {
-                console.warn(`Image request was detected, but no valid prompt could be finalized (e.g., all attempts were too short/long).`);
-                const failureText = "It looks like you wanted an image, but I couldn't quite understand the details, or the description was too short/long. Please try again with a clear prompt between 5 and 300 characters, like: 'generate image of a happy cat'.";
-                await this.postReply(latestPost.post, failureText);
-                await utils.sleep(2000);
+                  if (imageBase64) {
+                    // Flux succeeded
+                    let combinedResponseText = standardTextResponse ? standardTextResponse : "";
+                    if (combinedResponseText) combinedResponseText += "\n\n"; // Add separator if text response exists
+                    combinedResponseText += "Here's the image you requested:"; // Default image intro
+                    // Consider if Scout should generate this accompanying text for the image too, for consistency. For now, it's fixed.
+                    console.log(`Flux succeeded. Posting text response (if any) and image.`);
+                    await this.postReply(latestPost.post, combinedResponseText, imageBase64);
+                  } else {
+                    // Flux failed after a safe prompt
+                    console.log(`Flux failed to generate image for safe prompt: "${scoutResult.image_prompt}". Generating failure message with Scout.`);
+                    const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
 
-              } else {
-                console.log('No valid image request detected, proceeding with standard text response if applicable.');
-                if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) { // Ensure text still exists for text response
-                    const context = await this.getReplyContext(latestPost.post);
-                    const response = await this.generateResponse(latestPost.post, context);
-                    if (response) {
-                        await this.postReply(latestPost.post, response);
-                        await utils.sleep(2000);
+                    // Using generateResponse (which uses Nemotron + Scout filter) to craft this message.
+                    // We pass a minimal context, as this is a system-initiated message.
+                    const fluxFailureContext = [{ author: 'system', text: 'Informing user about image generation failure.' }];
+                    let fluxFailureReply = await this.generateResponse({ record: { text: fluxFailureUserPrompt } }, fluxFailureContext); // Simplified post object for context
+
+                    if (!fluxFailureReply) {
+                        fluxFailureReply = "I understood your request for an image, and the prompt was safe, but unfortunately, I couldn't generate the image this time."; // Fallback message
                     }
+
+                    let finalReplyText = standardTextResponse ? standardTextResponse : "";
+                    if (finalReplyText) finalReplyText += "\n\n";
+                    finalReplyText += fluxFailureReply;
+
+                    await this.postReply(latestPost.post, finalReplyText);
+                  }
+                }
+              } else if (isImageRequest && !imagePrompt) {
+                // Image request keywords detected, but prompt extraction failed (e.g., too short/long before Scout)
+                console.warn(`Image request was detected, but no valid prompt could be finalized for Scout (e.g., all attempts were too short/long).`);
+                let failureText = "It looks like you wanted an image, but I couldn't quite understand the details, or the description was too short/long. Please try again with a clear prompt between 5 and 300 characters, like: 'generate image of a happy cat'.";
+                if (standardTextResponse) {
+                    failureText = `${standardTextResponse}\n\nRegarding your image request: ${failureText}`;
+                }
+                await this.postReply(latestPost.post, failureText);
+              } else {
+                // No image request, just post the standard text response if available
+                console.log('No image request detected. Posting standard text response if available.');
+                if (standardTextResponse) {
+                    await this.postReply(latestPost.post, standardTextResponse);
                 } else {
-                    console.log("Skipping text response as there's no text in the original post to process for a text reply.");
+                    console.log("No standard text response generated, and no image request. Nothing to post.");
                 }
               }
             }
@@ -989,8 +1026,8 @@ Admin Instructions: "${trimmedAdminInstructions}"
     }
   }
 
-  async isPromptSafe(prompt) {
-    console.log(`NIM CALL START: isPromptSafe for model meta/llama-4-scout-17b-16e-instruct`);
+  async isTextSafeScout(prompt) { // Renamed from isPromptSafe
+    console.log(`NIM CALL START: isTextSafeScout for model meta/llama-4-scout-17b-16e-instruct`); // Renamed log
     try {
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
@@ -1003,7 +1040,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI safety moderator. Analyze the following user prompt for image generation. If the prompt violates any of the safety guidelines (adult content, NSFW, copyrighted material, illegal content, violence, politics), respond with "unsafe". Otherwise, respond with "safe". Only respond with "safe" or "unsafe".`
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI safety moderator. Analyze the following user text. If the text violates any of the safety guidelines (adult content, NSFW, copyrighted material, illegal content, violence, politics), respond with "unsafe". Otherwise, respond with "safe". Only respond with "safe" or "unsafe".` // Modified system prompt slightly for general text
             },
             {
               role: "user",
@@ -1015,26 +1052,89 @@ Admin Instructions: "${trimmedAdminInstructions}"
           stream: false
         })
       });
-      console.log(`NIM CALL END: isPromptSafe for prompt "${prompt}" - Status: ${response.status}`);
+      console.log(`NIM CALL END: isTextSafeScout for prompt "${prompt}" - Status: ${response.status}`); // Renamed log
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`Nvidia NIM API error (${response.status}) for isPromptSafe (prompt: "${prompt}") - Text: ${errorText}`);
+        console.error(`Nvidia NIM API error (${response.status}) for isTextSafeScout (prompt: "${prompt}") - Text: ${errorText}`); // Renamed log
         return false; // Default to unsafe on error
       }
 
       const data = await response.json();
-      console.log(`NIM CALL RESPONSE: isPromptSafe for prompt "${prompt}" - Data:`, JSON.stringify(data));
+      console.log(`NIM CALL RESPONSE: isTextSafeScout for prompt "${prompt}" - Data:`, JSON.stringify(data)); // Renamed log
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
         const decision = data.choices[0].message.content.trim().toLowerCase();
-        console.log(`Safety check for prompt "${prompt}": AI decision: "${decision}"`);
+        console.log(`Safety check for text "${prompt}": AI decision: "${decision}"`); // Renamed log
         return decision === 'safe';
       }
-      console.error(`Unexpected response format from Nvidia NIM for isPromptSafe (prompt: "${prompt}"):`, JSON.stringify(data));
+      console.error(`Unexpected response format from Nvidia NIM for isTextSafeScout (prompt: "${prompt}"):`, JSON.stringify(data)); // Renamed log
       return false; // Default to unsafe on unexpected format
     } catch (error) {
-      console.error(`Error in LlamaBot.isPromptSafe (prompt: "${prompt}"):`, error);
+      console.error(`Error in LlamaBot.isTextSafeScout (prompt: "${prompt}"):`, error); // Renamed log
       return false; // Default to unsafe on error
+    }
+  }
+
+  async processImagePromptWithScout(user_prompt_text) {
+    console.log(`NIM CALL START: processImagePromptWithScout for model meta/llama-4-scout-17b-16e-instruct`);
+    try {
+      const system_instruction = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI assistant. Analyze the following user text intended as a prompt for an image generation model.
+1. First, determine if the user's text is safe according to the safety guidelines. The guidelines include: no adult content, no NSFW material, no copyrighted characters or concepts unless very generic, no illegal activities, no violence, no political content.
+2. If the text is unsafe, respond with a JSON object: \`{ "safe": false, "reply_text": "I cannot generate an image based on that request due to safety guidelines. Please try a different prompt." }\`.
+3. If the text is safe, extract the core artistic request. Rephrase it if necessary to be a concise and effective prompt for an image generation model like Flux.1 Schnell. The prompt should be descriptive and clear.
+4. If safe, respond with a JSON object: \`{ "safe": true, "image_prompt": "your_refined_image_prompt_here" }\`.
+Ensure your entire response is ONLY the JSON object.`;
+
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct',
+          messages: [
+            { role: "system", content: system_instruction },
+            { role: "user", content: user_prompt_text }
+          ],
+          temperature: 0.3, // Slightly higher for nuanced extraction but still constrained
+          max_tokens: 150,  // Enough for the JSON response + a reasonable prompt
+          stream: false,
+          // Enforce JSON output if the model/API supports it directly, otherwise rely on prompt engineering
+        })
+      });
+
+      console.log(`NIM CALL END: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for processImagePromptWithScout (user_prompt_text: "${user_prompt_text}") - Text: ${errorText}`);
+        return { safe: false, reply_text: "Sorry, I encountered an issue processing your image request. Please try again later." };
+      }
+
+      const responseText = await response.text();
+      console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - Raw Text: ${responseText}`);
+
+      try {
+        const data = JSON.parse(responseText);
+        // Basic validation of the expected structure
+        if (typeof data.safe === 'boolean') {
+          if (data.safe === false && typeof data.reply_text === 'string') {
+            return data;
+          } else if (data.safe === true && typeof data.image_prompt === 'string') {
+            return data;
+          }
+        }
+        console.error(`Unexpected JSON structure from Nvidia NIM for processImagePromptWithScout: ${responseText}`);
+        return { safe: false, reply_text: "Sorry, I received an unexpected response while processing your image request." };
+      } catch (jsonError) {
+        console.error(`Error parsing JSON from Nvidia NIM for processImagePromptWithScout: ${jsonError}. Raw response: ${responseText}`);
+        return { safe: false, reply_text: "Sorry, I had trouble understanding the response for your image request." };
+      }
+
+    } catch (error) {
+      console.error(`Error in LlamaBot.processImagePromptWithScout (user_prompt_text: "${user_prompt_text}"):`, error);
+      return { safe: false, reply_text: "An unexpected error occurred while processing your image request." };
     }
   }
 }
