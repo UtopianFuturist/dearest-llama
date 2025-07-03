@@ -1184,7 +1184,7 @@ class LlamaBot extends BaseBot {
           console.error(`[SearchHistory] Nvidia NIM API error for search response (${nimSearchResponse.status}) - Text: ${errorText}`);
           await this.postReply(post, "I had a little trouble formulating a response for your search query. Please try again!");
         }
-        return null; // End processing for this interaction
+        return null, // End processing for this interaction
       }
 
       } else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
