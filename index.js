@@ -289,7 +289,14 @@ class BaseBot {
             const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
 
             if (!alreadyReplied) {
-              const imageRequestKeywords = ["generate image", "create a picture of", "draw a picture of"];
+              const imageRequestKeywords = [
+                "generate image",
+                "generate an image",
+                "create a picture of",
+                "draw a picture of",
+                "create an image of", // Added "of" for consistency with others
+                "draw an image of"    // Added "of" for consistency with others
+              ];
               let isImageRequest = false;
               let imagePrompt = "";
 
