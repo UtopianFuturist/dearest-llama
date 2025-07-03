@@ -933,24 +933,61 @@ Ensure your entire response is ONLY the JSON object.`;
       try {
         const apiData = JSON.parse(apiResponseText);
         if (apiData.choices && apiData.choices.length > 0 && apiData.choices[0].message && apiData.choices[0].message.content) {
-          let nestedJsonString = apiData.choices[0].message.content.trim();
-          // console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw Nested String: ${nestedJsonString}`); // Reduce noise
-          const markdownJsonRegex = /^```(?:json)?\s*([\s\S]*?)\s*```$/;
-          const match = nestedJsonString.match(markdownJsonRegex);
-          if (match && match[1]) { nestedJsonString = match[1].trim();
-            // console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Cleaned Nested JSON String: ${nestedJsonString}`); // Reduce noise
-          }
-          try {
-            const scoutDecision = JSON.parse(nestedJsonString);
-            if (typeof scoutDecision.safe === 'boolean') {
-              if (scoutDecision.safe === false && typeof scoutDecision.reply_text === 'string') return scoutDecision;
-              if (scoutDecision.safe === true && typeof scoutDecision.image_prompt === 'string') return scoutDecision;
+          let rawContent = apiData.choices[0].message.content.trim();
+          console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw content from model: "${rawContent}"`);
+
+          let jsonString = null;
+
+          const markdownJsonRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/;
+          const markdownMatch = rawContent.match(markdownJsonRegex);
+
+          if (markdownMatch && markdownMatch[1]) {
+            jsonString = markdownMatch[1].trim();
+            console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Extracted JSON from markdown: "${jsonString}"`);
+          } else {
+            const firstBrace = rawContent.indexOf('{');
+            const lastBrace = rawContent.lastIndexOf('}');
+
+            if (firstBrace !== -1 && lastBrace > firstBrace) {
+                jsonString = rawContent.substring(firstBrace, lastBrace + 1);
+                console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Attempting to parse substring from first '{' to last '}': "${jsonString}"`);
+                 try {
+                    JSON.parse(jsonString);
+                } catch (e) {
+                    console.warn(`NIM CALL RESPONSE: processImagePromptWithScout - Substring from first '{' to last '}' is not valid JSON. Will try broader regex.`);
+                    jsonString = null;
+                }
             }
-            console.error(`Unexpected JSON structure within Scout's message content: ${nestedJsonString}`);
-            return { safe: false, reply_text: "Sorry, I received an unexpected structured response while processing your image request." };
-          } catch (nestedJsonError) {
-            console.error(`Error parsing nested JSON from Scout's message content: ${nestedJsonError}. Nested JSON string: ${nestedJsonString}`);
-            return { safe: false, reply_text: "Sorry, I had trouble understanding the structured response for your image request." };
+
+            if (!jsonString) {
+                const embeddedJsonRegex = /(\{[\s\S]*?\})(?=\s*$|\s*\w)/;
+                const embeddedMatch = rawContent.match(embeddedJsonRegex);
+                 if (embeddedMatch && embeddedMatch[1]) {
+                    jsonString = embeddedMatch[1].trim();
+                    console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Extracted embedded JSON via regex: "${jsonString}"`);
+                }
+            }
+          }
+
+          if (jsonString) {
+            try {
+              const scoutDecision = JSON.parse(jsonString);
+              if (typeof scoutDecision.safe === 'boolean') {
+                if (scoutDecision.safe === false && typeof scoutDecision.reply_text === 'string') {
+                  return scoutDecision;
+                } else if (scoutDecision.safe === true && typeof scoutDecision.image_prompt === 'string') {
+                  return scoutDecision;
+                }
+              }
+              console.error(`Unexpected JSON structure after parsing extracted string: "${jsonString}". Parsed object: ${JSON.stringify(scoutDecision)}`);
+              return { safe: false, reply_text: "Sorry, the structured response I received was not in the expected format." };
+            } catch (parseError) {
+              console.error(`Error parsing extracted JSON string: "${jsonString}". Error: ${parseError}. Original raw content: "${rawContent}"`);
+              return { safe: false, reply_text: "Sorry, I had trouble parsing the structured response for your image request." };
+            }
+          } else {
+            console.error(`Could not extract any JSON string from Scout's response: "${rawContent}"`);
+            return { safe: false, reply_text: "Sorry, I couldn't find a structured response for your image request." };
           }
         } else {
           console.error(`Unexpected API structure from Nvidia NIM for processImagePromptWithScout (missing choices/message/content): ${apiResponseText}`);
