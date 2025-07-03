@@ -1187,7 +1187,112 @@ class LlamaBot extends BaseBot {
         return null; // End processing for this interaction
       }
 
-      // If not a search history intent, proceed with existing logic
+      } else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
+        console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
+
+        const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
+        if (!isQuerySafe) {
+          console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
+          const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
+          // No LLM call needed for this fixed response, but Scout formatting is good practice
+           const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: unsafeQueryResponse }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                })
+            });
+             if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                     await this.postReply(post, unsafeQueryResponse);
+                }
+            } else {
+               await this.postReply(post, unsafeQueryResponse);
+            }
+          return null;
+        }
+
+        const searchResults = await this.performWebSearch(searchIntent.search_query);
+        let nemotronWebServicePrompt = "";
+        const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}".
+Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
+Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
+If the search results do not provide a clear answer, state that you couldn't find specific information from the web for their query.
+Do not make up information not present in the search results. Keep the response suitable for a social media post.`;
+
+        if (searchResults && searchResults.length > 0) {
+          const resultsText = searchResults.map((res, idx) =>
+            `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`
+          ).join("\n\n---\n");
+          nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nWeb Search Results:\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
+        } else {
+          nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nNo clear results were found from the web search. Please inform the user politely that you couldn't find information for their query via web search and suggest they rephrase or try a search engine directly.`;
+        }
+
+        console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
+        const nimWebResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or another suitable model for synthesis
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${webSearchSystemPrompt}` },
+              { role: "user", content: nemotronWebServicePrompt }
+            ],
+            temperature: 0.6,
+            max_tokens: 250, // Allow for a slightly longer synthesized answer
+            stream: false
+          })
+        });
+
+        if (nimWebResponse.ok) {
+          const nimWebData = await nimWebResponse.json();
+          if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
+            const synthesizedResponse = nimWebData.choices[0].message.content.trim();
+            // Scout formatting
+            const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: synthesizedResponse }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                })
+            });
+            if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                    await this.postReply(post, synthesizedResponse);
+                }
+            } else {
+               await this.postReply(post, synthesizedResponse);
+            }
+          } else {
+            await this.postReply(post, "I searched the web but had a little trouble putting together an answer. You could try rephrasing your question!");
+          }
+        } else {
+          const errorText = await nimWebResponse.text();
+          console.error(`[WebSearchFlow] Nvidia NIM API error for web synthesis (${nimWebResponse.status}) - Text: ${errorText}`);
+          await this.postReply(post, "I encountered an issue while trying to process information from the web. Please try again later.");
+        }
+        return null; // End processing for this interaction
+      }
+
+
+      // If not a search history or web_search intent, proceed with existing logic
       let conversationHistory = '';
       if (context && context.length > 0) {
         for (const msg of context) {
@@ -1788,51 +1893,117 @@ ${baseInstruction}`;
     return finalResults;
   }
 
+  async performWebSearch(searchQuery, freshness = null) {
+    console.log(`[WebSearch] Performing web search for query: "${searchQuery}", Freshness: ${freshness}`);
+    if (!this.config.LANGSEARCH_API_KEY) {
+      console.error("[WebSearch] LANGSEARCH_API_KEY is not set. Cannot perform web search.");
+      return [];
+    }
+
+    const requestBody = { query: searchQuery };
+    if (freshness && ["oneDay", "oneWeek", "oneMonth"].includes(freshness)) { // Basic validation for freshness
+      requestBody.freshness = freshness;
+    }
+
+    try {
+      const response = await fetch('https://api.langsearch.com/v1/web-search', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.config.LANGSEARCH_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[WebSearch] LangSearch API error: ${response.status} - ${errorText}`);
+        return [];
+      }
+
+      const data = await response.json();
+
+      if (data.webPages && data.webPages.value && data.webPages.value.length > 0) {
+        const results = data.webPages.value.slice(0, 3).map(page => ({ // Take top 3 results
+          title: page.name || "No title",
+          url: page.url,
+          snippet: page.snippet || "No snippet available.",
+          // summary: page.summary || null // If summary parameter were used and field existed
+        }));
+        console.log(`[WebSearch] Found ${results.length} results for query "${searchQuery}"`);
+        return results;
+      } else {
+        console.log(`[WebSearch] No web page results found for query "${searchQuery}"`);
+        return [];
+      }
+    } catch (error) {
+      console.error(`[WebSearch] Exception during web search for query "${searchQuery}":`, error);
+      return [];
+    }
+  }
+
   async getSearchHistoryIntent(userQueryText) {
     if (!userQueryText || userQueryText.trim() === "") {
       return { intent: "none" };
     }
     const modelId = 'meta/llama-4-scout-17b-16e-instruct';
-    const systemPrompt = `Your task is to analyze the user's query to determine if they are asking to find a specific item (an image, a link, or a general post/message) from past interactions.
+    const systemPrompt = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
 
-Output a JSON object with the following structure:
+Output a JSON object. Choose ONE of the following intent structures:
+
+1. If searching PAST INTERACTIONS (conversation history, bot's gallery):
 {
-  "intent": "search_history" | "none",
-  "target_type": "image" | "link" | "post" | "message" | "unknown", // REQUIRED if intent is "search_history".
-  "author_filter": "user" | "bot" | "any", // REQUIRED if intent is "search_history".
-  "keywords": ["keyword1", ...], // Content-specific keywords ONLY. EXCLUDE recency cues & target_type words like "image", "link". Max 5.
-  "recency_cue": "textual cue for recency" | null, // e.g., "yesterday", "last week". Null if not specified.
-  "search_scope": "bot_gallery" | "conversation" | null // REQUIRED if intent is "search_history" & target_type is "image" & author_filter is "bot". Is it a general request for any image the bot made ("bot_gallery") or one from this specific conversation ("conversation")? Default to "conversation" if ambiguous. Null otherwise.
+  "intent": "search_history",
+  "target_type": "image" | "link" | "post" | "message" | "unknown", // REQUIRED.
+  "author_filter": "user" | "bot" | "any", // REQUIRED.
+  "keywords": ["keyword1", ...], // Content-specific keywords. EXCLUDE recency cues & type words. Max 5.
+  "recency_cue": "textual cue for recency" | null,
+  "search_scope": "bot_gallery" | "conversation" | null // REQUIRED for bot image searches. Default "conversation". Null otherwise.
 }
 
-IMPORTANT RULES:
-1.  "target_type": If "image", "picture", "photo", "generated image", "drew", "pic of" are mentioned, set to "image". This takes precedence. If "link", "URL", "site", set to "link". Otherwise, default to "message" or "post" if a search intent is clear.
-2.  "author_filter": Determine if the user implies they sent it ("user"), you (the bot) sent/generated it ("bot"), or if it's unclear ("any").
-3.  "keywords": Extract core content nouns, adjectives, or verbs. EXCLUDE recency cues (like "yesterday", "last week"), and also exclude generic type words already covered by "target_type" (like "image", "link", "post", "message").
-4.  "recency_cue": Capture time-related phrases (e.g., "yesterday", "last week", "recently"). Store as null if not specified.
-5.  "search_scope":
-    *   If "target_type" is "image" AND "author_filter" is "bot":
-        *   If the query is general (e.g., "show me an image you made of X", "find your picture of Y", "did you ever draw Z?"), set to "bot_gallery".
-        *   If the query implies it was part of the current user's direct conversation (e.g., "the image you sent *me*", "the picture from *our chat* yesterday"), set to "conversation".
-        *   If ambiguous, default "search_scope" to "conversation".
-    *   Set to null for other target_types or author_filters.
-6.  If the query is NOT a request to find a past item, "intent" MUST be "none". All other fields can be omitted or null.
-7.  Output ONLY the JSON object.
+2. If it's a GENERAL QUESTION for a WEB SEARCH:
+{
+  "intent": "web_search",
+  "search_query": "optimized query for web search engine" // REQUIRED. The user's question, possibly rephrased for search.
+}
+
+3. If NEITHER of the above:
+{
+  "intent": "none"
+}
+
+IMPORTANT RULES for "search_history":
+- "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
+- "author_filter": "user" (they sent/posted), "bot" (you sent/generated), or "any".
+- "keywords": Core content terms. EXCLUDE recency cues (e.g., "yesterday") AND type words (e.g., "image", "link").
+- "recency_cue": Time phrases (e.g., "yesterday", "last week"). Null if none.
+- "search_scope": For "target_type": "image" AND "author_filter": "bot":
+    - "bot_gallery" if general request (e.g., "image you made of X", "your picture of Y").
+    - "conversation" if implies shared context (e.g., "image you sent *me*"). Default to "conversation" if ambiguous.
+    - Null otherwise.
+
+IMPORTANT RULES for "web_search":
+- Use "web_search" for general knowledge questions, requests for current information/news, or explanations of concepts not tied to your direct prior interactions or capabilities (e.g., "What is the capital of France?", "latest advancements in AI", "how do black holes work?").
+- "search_query" should be the essence of the user's question, suitable for a search engine.
+
+PRIORITIZATION:
+- If a query mentions past interactions directly (e.g., "you sent me", "we discussed", "in our chat"), prefer "search_history".
+- If it's a straightforward factual question about the world, prefer "web_search".
+
+If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.
 
 Examples:
 - User query: "find the image you generated for me of a cat yesterday"
   Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": "yesterday", "search_scope": "conversation"}
 - User query: "show me a picture you made of a dog"
   Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["dog"], "recency_cue": null, "search_scope": "bot_gallery"}
-- User query: "did you ever post an image of a sunset?"
-  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["sunset"], "recency_cue": null, "search_scope": "bot_gallery"}
-- User query: "the link about space you shared with me"
-  Response: {"intent": "search_history", "target_type": "link", "author_filter": "bot", "keywords": ["space"], "recency_cue": null, "search_scope": "conversation"}
 - User query: "what was that link about dogs I sent last tuesday?"
   Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday", "search_scope": null}
-- User query: "search for the message about our meeting"
-  Response: {"intent": "search_history", "target_type": "message", "author_filter": "any", "keywords": ["meeting"], "recency_cue": null, "search_scope": null}
-- User query: "can you generate a new image of a forest?"
+- User query: "What is the tallest mountain in the world?"
+  Response: {"intent": "web_search", "search_query": "tallest mountain in the world"}
+- User query: "latest news about the Mars rover"
+  Response: {"intent": "web_search", "search_query": "latest news Mars rover"}
+- User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
 
@@ -1894,30 +2065,35 @@ Examples:
               let validScope = true;
               if (parsedJson.target_type === "image" && parsedJson.author_filter === "bot") {
                 validScope = ["bot_gallery", "conversation", null].includes(parsedJson.search_scope);
-                 if (parsedJson.search_scope === undefined) parsedJson.search_scope = "conversation"; // Default if undefined by Scout
+                if (parsedJson.search_scope === undefined) parsedJson.search_scope = "conversation"; // Default if undefined
               } else {
-                // If not bot image search, scope should ideally be null or not present.
-                // For simplicity, we'll just ensure it doesn't break if present with an unexpected value,
-                // but it's not strictly validated here unless it's a bot image search.
                 if (parsedJson.search_scope !== null && parsedJson.search_scope !== undefined) {
-                    // It's okay if it's null or undefined here.
+                  // Non-bot-image searches shouldn't ideally have a scope, but allow null/undefined
                 }
               }
-
               if (!validTarget || !validAuthor || !validKeywords || !validScope) {
-                console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has intent 'search_history' but malformed structure: ${jsonString}. Validations: target=${validTarget}, author=${validAuthor}, keywords=${validKeywords}, scope=${validScope}`);
-                // Attempt to salvage by defaulting problematic parts if possible, or return error
-                if (!parsedJson.target_type) parsedJson.target_type = "unknown";
-                if (!parsedJson.author_filter) parsedJson.author_filter = "any";
-                if (!parsedJson.keywords) parsedJson.keywords = [];
+                console.warn(`[IntentClassifier] Scout 'search_history' response malformed: ${jsonString}. Validations: target=${validTarget}, author=${validAuthor}, keywords=${validKeywords}, scope=${validScope}`);
+                // Attempt to salvage with defaults
+                parsedJson.target_type = parsedJson.target_type || "unknown";
+                parsedJson.author_filter = parsedJson.author_filter || "any";
+                parsedJson.keywords = parsedJson.keywords || [];
                 if (parsedJson.target_type === "image" && parsedJson.author_filter === "bot" && !validScope) {
-                    parsedJson.search_scope = "conversation"; // Default scope
+                  parsedJson.search_scope = "conversation";
                 }
-                // If fundamental parts are missing, it might still be better to return an error or intent:none
-                // For now, we try to proceed with defaults.
               }
+            } else if (parsedJson.intent === "web_search") {
+              if (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim()) {
+                console.warn(`[IntentClassifier] Scout 'web_search' response missing or empty 'search_query': ${jsonString}`);
+                return { intent: "none", error: "Malformed web_search intent from Scout (missing search_query)." };
+              }
+              // Ensure other search_history fields are not present or are null for web_search intent
+              parsedJson.target_type = null;
+              parsedJson.author_filter = null;
+              parsedJson.keywords = [];
+              parsedJson.recency_cue = null;
+              parsedJson.search_scope = null;
             } else if (parsedJson.intent !== "none") {
-               console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has unknown intent: ${jsonString}`);
+               console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
                return { intent: "none", error: "Unknown intent from Scout."};
             }
             console.log(`[IntentClassifier] Scout parsed intent (getSearchHistoryIntent) for query "${userQueryText}":`, parsedJson);

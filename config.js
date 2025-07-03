@@ -13,6 +13,7 @@ const validateConfig = (config) => {
     'BLUESKY_IDENTIFIER',
     'BLUESKY_APP_PASSWORD',
     'ADMIN_BLUESKY_HANDLE',
+    'LANGSEARCH_API_KEY',
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -28,6 +29,7 @@ const config = {
   BLUESKY_IDENTIFIER: process.env.BLUESKY_IDENTIFIER,
   BLUESKY_APP_PASSWORD: process.env.BLUESKY_APP_PASSWORD,
   ADMIN_BLUESKY_HANDLE: process.env.ADMIN_BLUESKY_HANDLE,
+  LANGSEARCH_API_KEY: process.env.LANGSEARCH_API_KEY,
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
@@ -62,6 +64,7 @@ validateConfig(config);
 // Log specific critical environment variables for diagnostics
 console.log(`[Config] Loaded TOGETHER_AI_API_KEY: ${config.TOGETHER_AI_API_KEY ? 'Exists' : 'MISSING!'}`);
 console.log(`[Config] Loaded NVIDIA_NIM_API_KEY: ${config.NVIDIA_NIM_API_KEY ? 'Exists' : 'MISSING!'}`);
+console.log(`[Config] Loaded LANGSEARCH_API_KEY: ${config.LANGSEARCH_API_KEY ? 'Exists' : 'MISSING!'}`);
 
 
 export default config;
