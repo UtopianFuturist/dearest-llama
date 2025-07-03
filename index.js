@@ -381,15 +381,26 @@ class BaseBot {
                   // Prompt is safe, proceed to generate image
                   console.log(`Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
                   const imageBase64 = await this.generateImage(scoutResult.image_prompt);
+                  let finalAltText = "Generated image"; // Default alt text
 
                   if (imageBase64) {
-                    // Flux succeeded
-                    let combinedResponseText = standardTextResponse ? standardTextResponse : "";
-                    if (combinedResponseText) combinedResponseText += "\n\n"; // Add separator if text response exists
-                    combinedResponseText += "Here's the image you requested:"; // Default image intro
-                    // Consider if Scout should generate this accompanying text for the image too, for consistency. For now, it's fixed.
-                    console.log(`Flux succeeded. Posting text response (if any) and image.`);
-                    await this.postReply(latestPost.post, combinedResponseText, imageBase64);
+                    // Flux succeeded, now try to describe it with Scout
+                    const imageDescriptionFromScout = await this.describeImageWithScout(imageBase64);
+
+                    if (imageDescriptionFromScout) {
+                      console.log(`Scout successfully described the image: "${imageDescriptionFromScout}"`);
+                      finalAltText = imageDescriptionFromScout; // Use Scout's description for Alt Text
+                      let combinedResponseText = `${imageDescriptionFromScout}\n\nHere's the image you requested:`;
+                      // The standardTextResponse from Nemotron is now replaced by Scout's image description
+                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
+                    } else {
+                      // Scout failed to describe the image, fallback to standard text response (if any) + generic image intro
+                      console.warn(`Scout failed to describe the image. Falling back to Nemotron's text (if available) and generic alt text.`);
+                      let combinedResponseText = standardTextResponse ? standardTextResponse : "";
+                      if (combinedResponseText) combinedResponseText += "\n\n";
+                      combinedResponseText += "Here's the image you requested:";
+                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText); // finalAltText is still "Generated image"
+                    }
                   } else {
                     // Flux failed after a safe prompt
                     console.log(`Flux failed to generate image for safe prompt: "${scoutResult.image_prompt}". Generating failure message with Scout.`);
@@ -620,7 +631,7 @@ class BaseBot {
   }
 
   // Modify the postReply function
-  async postReply(post, response, imageBase64 = null) {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image") { // Added altText parameter
     try {
       RateLimit.check();
       
@@ -652,10 +663,10 @@ class BaseBot {
                 $type: 'app.bsky.embed.images',
                 images: [{
                   image: uploadedImage.data.blob,
-                  alt: 'Generated image'
+                  alt: altText // Use the dynamic altText parameter
                 }]
               };
-              console.log('[postReply] Image embed object created.');
+              console.log(`[postReply] Image embed object created with alt text: "${altText}"`);
             } else {
               console.error('[postReply] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
             }
@@ -1182,6 +1193,88 @@ Ensure your entire response is ONLY the JSON object.`;
     } catch (error) {
       console.error(`Error in LlamaBot.processImagePromptWithScout (user_prompt_text: "${user_prompt_text}"):`, error);
       return { safe: false, reply_text: "An unexpected error occurred while processing your image request." };
+    }
+  }
+
+  async describeImageWithScout(imageBase64) {
+    const modelToUse = 'meta/llama-4-scout-17b-16e-instruct'; // Assuming Scout is multimodal as per user request
+    console.log(`NIM CALL START: describeImageWithScout for model ${modelToUse}`);
+
+    if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
+      console.error('describeImageWithScout: imageBase64 data is invalid or empty.');
+      return null;
+    }
+
+    // Assuming the image is JPEG based on previous Bluesky upload log.
+    // If not, this might need to be more dynamic or configurable.
+    const mimeType = 'image/jpeg';
+    const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+
+    const systemPrompt = "You are an AI assistant. Your task is to describe the provided image for a social media post. Be descriptive, engaging, and try to capture the essence of the image. Keep your description concise, ideally under 200 characters, as it will also be used for alt text. Focus solely on describing the visual elements of the image.";
+    const userPromptText = "Please describe this image.";
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: modelToUse,
+          messages: [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: userPromptText },
+                {
+                  type: "image_url", // Common pattern; might be 'image' or other depending on actual NIM spec for this model
+                  image_url: {
+                    url: dataUrl
+                  }
+                }
+              ]
+            }
+          ],
+          temperature: 0.5, // Temperature for descriptive task
+          max_tokens: 100,  // Approx 200 chars / 4 chars_per_token ~ 50 tokens, add buffer. Max 300 chars for Bluesky.
+          stream: false
+        })
+      });
+
+      console.log(`NIM CALL END: describeImageWithScout - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - Text: ${errorText}`);
+        try {
+            const errorJson = JSON.parse(errorText);
+            console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - JSON:`, errorJson);
+        } catch (e) { /* Not a JSON error response */ }
+        return null;
+      }
+
+      const data = await response.json();
+
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const description = data.choices[0].message.content.trim();
+        console.log(`NIM CALL RESPONSE: describeImageWithScout - Description: "${description}"`);
+        // Further check if description is not empty or placeholder
+        if (description && description.length > 5) { // Arbitrary short length check
+            return description;
+        } else {
+            console.warn(`describeImageWithScout received an empty or too short description: "${description}"`);
+            return null;
+        }
+      }
+
+      console.error(`Unexpected response format from Nvidia NIM for describeImageWithScout:`, JSON.stringify(data));
+      return null;
+
+    } catch (error) {
+      console.error(`Error in LlamaBot.describeImageWithScout:`, error);
+      return null;
     }
   }
 }
