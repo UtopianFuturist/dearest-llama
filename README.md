@@ -1,13 +1,13 @@
-# Dearest Llama (Modified for Nvidia NIM)
+# Dearest Llama (Modified for Nvidia NIM & Together AI Image Generation)
 
-A Bluesky bot that responds to mentions using Nvidia NIM, specifically with the Llama 3.3 Nemotron Super 49B Instruct model.
+A Bluesky bot that responds to mentions using Nvidia NIM for text generation (specifically Llama 3.3 Nemotron Super 49B Instruct) and Together AI for image generation (specifically black-forest-labs/FLUX.1-schnell-Free).
 
 ## Environment Variables
 
 ### Required Environment Variables
 
-- `NVIDIA_NIM_API_KEY`: Your Nvidia NIM API key (used for Nemotron 49B Instruct text generation).
-You'll need a free Nvidia NIM account. You can obtain your API key from the Nvidia build website (e.g., by searching for the Nemotron 49B Instruct model).
+- `NVIDIA_NIM_API_KEY`: Your Nvidia NIM API key (used for text generation). You'll need a free Nvidia NIM account.
+- `TOGETHER_AI_API_KEY`: Your Together AI API key (used for image generation). You'll need a Together AI account.
 - `BLUESKY_IDENTIFIER`: Your Bluesky handle (e.g., `username.bsky.social`)
 - `BLUESKY_APP_PASSWORD`: Your Bluesky app password
 - `ADMIN_BLUESKY_HANDLE`: (Required for admin features) The Bluesky handle of the bot's administrator (e.g., `adminuser.bsky.social`). Only this user can issue admin commands.
@@ -17,6 +17,12 @@ Note: These require an active BlueSky account.
 
 #### System Prompts (Customizable)
 - `TEXT_SYSTEM_PROMPT`: System prompt for text generation (default: "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters.")
+- `SAFETY_SYSTEM_PROMPT`: System prompt defining safety guidelines for all text and image generation (default: "You must adhere to the following safety guidelines: Do not generate any images or text featuring adult content, NSFW, copyrighted images, illegal images, violence, or politics. All content must be strictly SFW and clean. Do not honor any request for content of that nature - ever.")
+
+#### Model Configuration
+- **Image Generation Model**: The bot uses `black-forest-labs/FLUX.1-schnell-Free` via Together AI, which is hardcoded in the application.
+- `IMAGE_PROMPT_SYSTEM_PROMPT`: (Currently not used with the new direct image generation flow but defined in code) System prompt for an auxiliary model to generate image prompts (default: "Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.")
+
 
 #### Additional Render Variables
 - `CHECK_INTERVAL`: Milliseconds between checks for new mentions (default: `60000`)
@@ -52,11 +58,17 @@ The `!post` command allows the administrator to instruct the bot to create a new
     `!post Please summarize the key points of this discussion and ask an open-ended question related to future developments.`
     The bot will analyze the discussion in that thread, and then, guided by the admin's instruction, generate a new post for its own feed that summarizes the key points and includes a relevant open-ended question. The LLM will attempt to adhere to the bot's persona and Bluesky's character limits.
 
+## Image Generation
+
+The bot can generate images when prompted with phrases like "generate image of..." or "create a picture of...".
+- It uses the `black-forest-labs/FLUX.1-schnell-Free` model via Together AI.
+- **Safety:** All image generation requests are first validated by a text model (`meta/llama-4-scout-17b-16e-instruct`) against the safety guidelines defined in `SAFETY_SYSTEM_PROMPT`. If a prompt is deemed unsafe, the bot will refuse the request. The text models also adhere to these safety guidelines for their responses.
+
 ## Deployment
 
 This bot is designed to be deployed on Render.com's free tier. You can use the included `render.yaml` file for easy deployment.
 You will need a Render account to deploy this bot.
-When deploying on Render, ensure you set it up as a 'Web Service'. You must add all the required environment variables mentioned above. The `TEXT_MODEL` environment variable is no longer used by the core bot logic as the model is specified directly in the code.
+When deploying on Render, ensure you set it up as a 'Web Service'. You must add all the required environment variables mentioned above (including `NVIDIA_NIM_API_KEY` and `TOGETHER_AI_API_KEY`). The `IMAGE_GENERATION_MODEL` is now hardcoded in the application, so it does not need to be set as an environment variable in Render. The `TEXT_MODEL` environment variable from previous versions is no longer used by the core bot logic as models are specified directly in the code or via more specific environment variables.
 
 **Important Note for Render's Free Tier:**
 

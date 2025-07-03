@@ -33,9 +33,14 @@ const utils = {
   async imageUrlToBase64(imageUrl) {
     try {
       const response = await fetch(imageUrl);
-      return (await response.buffer()).toString('base64');
+      if (!response.ok) {
+        console.error(`Error fetching image from URL: ${response.status} ${response.statusText}. URL: ${imageUrl}`);
+        return null;
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer).toString('base64');
     } catch (error) {
-      console.error('Error converting image to base64:', error);
+      console.error(`Error converting image to base64 (URL: ${imageUrl}):`, error);
       return null;
     }
   },
@@ -108,6 +113,18 @@ class BaseBot {
 
   async generateResponse(post, context) {
     throw new Error('generateResponse must be implemented by child class');
+  }
+
+  async generateImage(prompt) { // Added to BaseBot
+    throw new Error('generateImage must be implemented by child class');
+  }
+
+  async isTextSafeScout(prompt) { // Renamed from isPromptSafe
+    throw new Error('isTextSafeScout must be implemented by child class');
+  }
+
+  async processImagePromptWithScout(user_prompt_text) { // Added to BaseBot
+    throw new Error('processImagePromptWithScout must be implemented by child class');
   }
 
   async generateImagePrompt(post, response) {
@@ -264,31 +281,163 @@ class BaseBot {
               latestPost.post.author &&
               latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
               latestPost.post.record &&
-              latestPost.post.record.text &&
+              latestPost.post.record.text && // Ensure text exists for admin command parsing
               latestPost.post.record.text.includes('!post')) {
 
             const commandText = latestPost.post.record.text;
-            // Removed ^ from regex to allow !post anywhere in the text
             const instructionMatch = commandText.match(/!post\s+(.+)/s);
             const adminInstructions = instructionMatch ? instructionMatch[1].trim() : '';
             
             await this.handleAdminPostCommand(latestPost.post, adminInstructions);
 
-          } else {
-            // Existing logic for handling regular replies
-            // The condition to check for BLUESKY_IDENTIFIER in post text has been removed.
-            // The bot will now attempt to reply to any post that passes the getRecentPosts filter.
+          } else { // Regular reply logic (image or text)
             const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
 
             if (!alreadyReplied) {
-              console.log('Generating and posting response...');
-              const context = await this.getReplyContext(latestPost.post);
-              const response = await this.generateResponse(latestPost.post, context);
-              
-              if (response) {
-                await this.postReply(latestPost.post, response);
-                // Add rate limiting delay after posting
-                await utils.sleep(2000);
+              const imageRequestKeywords = [
+                "generate image",
+                "generate an image",
+                "create a picture of",
+                "draw a picture of",
+                "create an image of", // Added "of" for consistency with others
+                "draw an image of"    // Added "of" for consistency with others
+              ];
+              let isImageRequest = false;
+              let imagePrompt = "";
+
+              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text && typeof latestPost.post.record.text === 'string') {
+                const originalText = latestPost.post.record.text;
+                const lowercasedText = originalText.toLowerCase();
+                console.log(`[KeywordLoop] Processing text: "${originalText}" (Lowercase: "${lowercasedText}")`);
+
+                let textCharCodes = '';
+                for (let i = 0; i < lowercasedText.length; i++) {
+                  textCharCodes += `${lowercasedText.charCodeAt(i)} `;
+                }
+                console.log(`[KeywordLoop] Char codes for lowercasedText: ${textCharCodes.trim()}`);
+
+
+                for (const keyword of imageRequestKeywords) {
+                  console.log(`[KeywordLoop] Checking keyword: "${keyword}"`);
+                  let keywordCharCodes = '';
+                  for (let i = 0; i < keyword.length; i++) {
+                    keywordCharCodes += `${keyword.charCodeAt(i)} `;
+                  }
+                  console.log(`[KeywordLoop] Char codes for keyword "${keyword}": ${keywordCharCodes.trim()}`);
+
+                  const keywordIndex = lowercasedText.indexOf(keyword);
+                  console.log(`[KeywordLoop] Keyword index for "${keyword}": ${keywordIndex}`);
+
+                  if (keywordIndex !== -1) {
+                    let tempPrompt = originalText.substring(keywordIndex + keyword.length).trim();
+                    console.log(`[KeywordLoop] Initial tempPrompt for "${keyword}": "${tempPrompt}"`);
+
+                    if (tempPrompt.toLowerCase().startsWith("of ")) {
+                      tempPrompt = tempPrompt.substring(3).trim();
+                      console.log(`[KeywordLoop] tempPrompt after 'of ' trim: "${tempPrompt}"`);
+                    }
+
+                    console.log(`[KeywordLoop] Validating tempPrompt: "${tempPrompt}", Length: ${tempPrompt.length}`);
+                    const isLengthValid = tempPrompt.length >= 5 && tempPrompt.length <= 300;
+                    console.log(`[KeywordLoop] Is length valid (5-300 chars)? ${isLengthValid}`);
+
+                    if (isLengthValid) {
+                      imagePrompt = tempPrompt;
+                      isImageRequest = true;
+                      console.log(`[KeywordLoop] Valid image request. Keyword: "${keyword}". Prompt: "${imagePrompt}"`);
+                      break;
+                    } else {
+                      console.warn(`[KeywordLoop] Keyword "${keyword}" led to invalid prompt (length ${tempPrompt.length}): "${tempPrompt}". Checking next keyword.`);
+                    }
+                  }
+                }
+              } else {
+                console.log(`Post URI ${latestPost.post?.uri || 'Unknown URI'} lacks text content or text is not a string. Skipping keyword-based processing for this post.`);
+              }
+
+              console.log(`[DEBUG] Before decision logic: isImageRequest = ${isImageRequest}, imagePrompt (raw user text for image) = "${imagePrompt}" (Length: ${imagePrompt.length})`);
+
+              // Standard text response generation - can happen regardless of image request
+              let standardTextResponse = null;
+              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
+                  const context = await this.getReplyContext(latestPost.post);
+                  standardTextResponse = await this.generateResponse(latestPost.post, context);
+              } else {
+                  console.log("No text in the original post to process for a standard text reply.");
+              }
+
+              if (isImageRequest && imagePrompt) {
+                const scoutResult = await this.processImagePromptWithScout(imagePrompt);
+
+                if (!scoutResult.safe) {
+                  // Prompt is unsafe
+                  console.warn(`Image prompt "${imagePrompt}" deemed unsafe by Scout. Reply: "${scoutResult.reply_text}"`);
+                  let replyText = scoutResult.reply_text;
+                  if (standardTextResponse) {
+                    replyText = `${standardTextResponse}\n\nRegarding your image request: ${scoutResult.reply_text}`;
+                  }
+                  await this.postReply(latestPost.post, replyText);
+                } else {
+                  // Prompt is safe, proceed to generate image
+                  console.log(`Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
+                  const imageBase64 = await this.generateImage(scoutResult.image_prompt);
+                  let finalAltText = "Generated image"; // Default alt text
+
+                  if (imageBase64) {
+                    // Flux succeeded, now try to describe it with Scout
+                    const imageDescriptionFromScout = await this.describeImageWithScout(imageBase64);
+
+                    if (imageDescriptionFromScout) {
+                      console.log(`Scout successfully described the image: "${imageDescriptionFromScout}"`);
+                      finalAltText = imageDescriptionFromScout; // Use Scout's description for Alt Text
+                      let combinedResponseText = `Here's the image you requested:\n\n${imageDescriptionFromScout}`; // Flipped order
+                      // The standardTextResponse from Nemotron is now replaced by Scout's image description
+                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
+                    } else {
+                      // Scout failed to describe the image, fallback to standard text response (if any) + generic image intro
+                      console.warn(`Scout failed to describe the image. Falling back to Nemotron's text (if available) and generic alt text.`);
+                      let combinedResponseText = standardTextResponse ? standardTextResponse : "";
+                      if (combinedResponseText) combinedResponseText += "\n\n";
+                      combinedResponseText += "Here's the image you requested:";
+                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText); // finalAltText is still "Generated image"
+                    }
+                  } else {
+                    // Flux failed after a safe prompt
+                    console.log(`Flux failed to generate image for safe prompt: "${scoutResult.image_prompt}". Generating failure message with Scout.`);
+                    const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this, keeping the message under 150 characters. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
+
+                    // Using generateResponse (which uses Nemotron + Scout filter) to craft this message.
+                    // We pass a minimal context, as this is a system-initiated message.
+                    const fluxFailureContext = [{ author: 'system', text: 'Informing user about image generation failure.' }];
+                    let fluxFailureReply = await this.generateResponse({ record: { text: fluxFailureUserPrompt } }, fluxFailureContext); // Simplified post object for context
+
+                    if (!fluxFailureReply) {
+                        fluxFailureReply = "I understood your request for an image, and the prompt was safe, but unfortunately, I couldn't generate the image this time."; // Fallback message
+                    }
+
+                    let finalReplyText = standardTextResponse ? standardTextResponse : "";
+                    if (finalReplyText) finalReplyText += "\n\n";
+                    finalReplyText += fluxFailureReply;
+
+                    await this.postReply(latestPost.post, finalReplyText);
+                  }
+                }
+              } else if (isImageRequest && !imagePrompt) {
+                // Image request keywords detected, but prompt extraction failed (e.g., too short/long before Scout)
+                console.warn(`Image request was detected, but no valid prompt could be finalized for Scout (e.g., all attempts were too short/long).`);
+                let failureText = "It looks like you wanted an image, but I couldn't quite understand the details, or the description was too short/long. Please try again with a clear prompt between 5 and 300 characters, like: 'generate image of a happy cat'.";
+                if (standardTextResponse) {
+                    failureText = `${standardTextResponse}\n\nRegarding your image request: ${failureText}`;
+                }
+                await this.postReply(latestPost.post, failureText);
+              } else {
+                // No image request, just post the standard text response if available
+                console.log('No image request detected. Posting standard text response if available.');
+                if (standardTextResponse) {
+                    await this.postReply(latestPost.post, standardTextResponse);
+                } else {
+                    console.log("No standard text response generated, and no image request. Nothing to post.");
+                }
               }
             }
           }
@@ -482,7 +631,7 @@ class BaseBot {
   }
 
   // Modify the postReply function
-  async postReply(post, response) {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image") { // Added altText parameter
     try {
       RateLimit.check();
       
@@ -494,6 +643,44 @@ class BaseBot {
         }
       };
 
+      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+        console.log(`[postReply] imageBase64 received, length: ${imageBase64.length}. Attempting to upload.`);
+        try {
+          // Convert base64 string to Uint8Array
+          const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+          console.log(`[postReply] Converted base64 to Uint8Array, size: ${imageBytes.length} bytes.`);
+
+          if (imageBytes.length === 0) {
+            console.error('[postReply] Image byte array is empty after conversion. Skipping image upload.');
+          } else {
+            const uploadedImage = await this.agent.uploadBlob(imageBytes, {
+              encoding: 'image/png' // Assuming PNG, adjust if TogetherAI specifies format or returns it
+            });
+            console.log('[postReply] Successfully uploaded image to Bluesky:', JSON.stringify(uploadedImage));
+
+            if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+              replyObject.embed = {
+                $type: 'app.bsky.embed.images',
+                images: [{
+                  image: uploadedImage.data.blob,
+                  alt: altText // Use the dynamic altText parameter
+                }]
+              };
+              console.log(`[postReply] Image embed object created with alt text: "${altText}"`);
+            } else {
+              console.error('[postReply] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
+            }
+          }
+        } catch (uploadError) {
+          console.error('[postReply] Error during image upload or embed creation:', uploadError);
+        }
+      } else if (imageBase64) {
+        console.warn(`[postReply] imageBase64 was present but invalid (not a non-empty string). Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
+      } else {
+        console.log('[postReply] No imageBase64 provided. Posting text-only reply.');
+      }
+
+      console.log('[postReply] Final replyObject before posting:', JSON.stringify(replyObject));
       const result = await this.agent.post(replyObject);
       console.log('Successfully posted reply:', result.uri);
       this.repliedPosts.add(post.uri);
@@ -576,7 +763,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: this.config.TEXT_SYSTEM_PROMPT
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}`
             },
             {
               role: "user",
@@ -611,6 +798,8 @@ Admin Instructions: "${trimmedAdminInstructions}"
       }
 
       let initialResponse = data.choices[0].message.content.trim();
+      console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
+
 
       // Second API call to the filter model
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext`);
@@ -654,7 +843,9 @@ Admin Instructions: "${trimmedAdminInstructions}"
         return initialResponse;
       }
 
-      return filterData.choices[0].message.content.trim();
+      const finalResponse = filterData.choices[0].message.content.trim();
+      console.log(`[LlamaBot.generateStandalonePostFromContext] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
+      return finalResponse;
 
     } catch (error) {
       console.error('Error in LlamaBot.generateStandalonePostFromContext:', error);
@@ -692,7 +883,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: this.config.TEXT_SYSTEM_PROMPT
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}`
             },
             {
               role: "user",
@@ -736,6 +927,8 @@ Admin Instructions: "${trimmedAdminInstructions}"
       }
       
       let initialResponse = data.choices[0].message.content;
+      // ADDED LOGGING HERE
+      console.log(`[LlamaBot.generateResponse] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
 
       // Second API call to the filter model
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct`);
@@ -750,7 +943,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: "Re-write this output so that it doesn't include quotation marks like it's a quote, ensure the character doesn't label their message with sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the generated response content"
+              content: "You are an AI assistant that refines text for Bluesky posts. Re-write the user-provided text to meet these CRITICAL requirements: 1. The final text MUST be UNDER 300 characters. Aggressively shorten if necessary, preserving core meaning and persona. 2. Remove any quotation marks that make the text sound like a direct quote. 3. Ensure the character does not label their message with 'sent-by' identifiers. 4. Remove any double asterisks (they don't render as bold). 5. Otherwise, maintain the persona and core content of the original text. DO NOT mention this re-writing/formatting process in your response."
             },
             {
               role: "user",
@@ -779,7 +972,10 @@ Admin Instructions: "${trimmedAdminInstructions}"
         return initialResponse;
       }
 
-      return filterData.choices[0].message.content;
+      const finalResponse = filterData.choices[0].message.content;
+      // ADDED LOGGING HERE
+      console.log(`[LlamaBot.generateResponse] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
+      return finalResponse;
 
     } catch (error) {
       console.error('Error generating Llama response:', error);
@@ -790,6 +986,304 @@ Admin Instructions: "${trimmedAdminInstructions}"
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  async generateImage(prompt) {
+    const modelToUse = "black-forest-labs/FLUX.1-schnell-Free"; // Hardcoded model
+    const apiKey = this.config.TOGETHER_AI_API_KEY;
+
+    if (!apiKey) {
+      console.error('TOGETHER_AI_API_KEY is not configured. Cannot generate image.');
+      return null;
+    }
+    // No longer need to check for modelToUse as it's hardcoded
+
+    console.log(`TOGETHER AI CALL START: generateImage for model "${modelToUse}" with prompt "${prompt}"`);
+
+    const requestBody = {
+      model: modelToUse, // This now uses the hardcoded value
+      prompt: prompt,
+      n: 1,
+      size: "1024x1024"
+    };
+    console.log('Together AI Request Body:', JSON.stringify(requestBody));
+
+    try {
+      const response = await fetch('https://api.together.xyz/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      const responseStatus = response.status;
+      const responseText = await response.text(); // Read text first to ensure it's always available for logging
+      console.log(`TOGETHER AI CALL END: generateImage - Status: ${responseStatus}`);
+      console.log(`TOGETHER AI CALL Full Response Text: ${responseText}`);
+
+      if (!response.ok) {
+        console.error(`Together AI API error (${responseStatus}) for generateImage with prompt "${prompt}" - Full Response: ${responseText}`);
+        try {
+          const errorJson = JSON.parse(responseText); // Try to parse as JSON
+          console.error(`Together AI API error (${responseStatus}) for generateImage - Parsed JSON:`, errorJson);
+        } catch (e) {
+          // Not a JSON response, already logged the full text
+        }
+        return null;
+      }
+
+      const data = JSON.parse(responseText); // Parse JSON now that we know it's likely okay
+
+      if (data.data && Array.isArray(data.data) && data.data.length > 0) {
+        const firstImageData = data.data[0];
+        if (firstImageData.b64_json) {
+          console.log(`Successfully received b64_json image data from Together AI for prompt "${prompt}".`);
+          return firstImageData.b64_json;
+        } else if (firstImageData.url) {
+          console.log(`Received image URL from Together AI: ${firstImageData.url}. Attempting to download and convert to base64 for prompt "${prompt}".`);
+          try {
+            const base64Image = await utils.imageUrlToBase64(firstImageData.url);
+            if (base64Image) {
+              console.log(`Successfully downloaded and converted image from URL to base64 for prompt "${prompt}".`);
+              return base64Image;
+            } else {
+              console.error(`Failed to convert image from URL to base64 for prompt "${prompt}". URL: ${firstImageData.url}`);
+              return null;
+            }
+          } catch (urlConversionError) {
+            console.error(`Error downloading or converting image from URL (${firstImageData.url}) for prompt "${prompt}":`, urlConversionError);
+            return null;
+          }
+        }
+      }
+
+      // If neither b64_json nor URL path yielded an image
+      console.error(`Unexpected response format or missing image data from Together AI for generateImage (prompt: "${prompt}"):`, JSON.stringify(data));
+      return null;
+
+    } catch (error) {
+      console.error(`Error in LlamaBot.generateImage (prompt: "${prompt}"):`, error);
+      return null;
+    }
+  }
+
+  async isTextSafeScout(prompt) { // Renamed from isPromptSafe
+    console.log(`NIM CALL START: isTextSafeScout for model meta/llama-4-scout-17b-16e-instruct`); // Renamed log
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct', // Using the filter model for this check
+          messages: [
+            {
+              role: "system",
+              content: `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI safety moderator. Analyze the following user text. If the text violates any of the safety guidelines (adult content, NSFW, copyrighted material, illegal content, violence, politics), respond with "unsafe". Otherwise, respond with "safe". Only respond with "safe" or "unsafe".` // Modified system prompt slightly for general text
+            },
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
+          temperature: 0.1, // Low temperature for deterministic safety check
+          max_tokens: 10,   // "safe" or "unsafe"
+          stream: false
+        })
+      });
+      console.log(`NIM CALL END: isTextSafeScout for prompt "${prompt}" - Status: ${response.status}`); // Renamed log
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for isTextSafeScout (prompt: "${prompt}") - Text: ${errorText}`); // Renamed log
+        return false; // Default to unsafe on error
+      }
+
+      const data = await response.json();
+      console.log(`NIM CALL RESPONSE: isTextSafeScout for prompt "${prompt}" - Data:`, JSON.stringify(data)); // Renamed log
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toLowerCase();
+        console.log(`Safety check for text "${prompt}": AI decision: "${decision}"`); // Renamed log
+        return decision === 'safe';
+      }
+      console.error(`Unexpected response format from Nvidia NIM for isTextSafeScout (prompt: "${prompt}"):`, JSON.stringify(data)); // Renamed log
+      return false; // Default to unsafe on unexpected format
+    } catch (error) {
+      console.error(`Error in LlamaBot.isTextSafeScout (prompt: "${prompt}"):`, error); // Renamed log
+      return false; // Default to unsafe on error
+    }
+  }
+
+  async processImagePromptWithScout(user_prompt_text) {
+    console.log(`NIM CALL START: processImagePromptWithScout for model meta/llama-4-scout-17b-16e-instruct`);
+    try {
+      const system_instruction = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI assistant. Analyze the following user text intended as a prompt for an image generation model.
+1. First, determine if the user's text is safe according to the safety guidelines. The guidelines include: no adult content, no NSFW material, no copyrighted characters or concepts unless very generic, no illegal activities, no violence, no political content.
+2. If the text is unsafe, respond with a JSON object: \`{ "safe": false, "reply_text": "I cannot generate an image based on that request due to safety guidelines. Please try a different prompt." }\`.
+3. If the text is safe, extract the core artistic request. Rephrase it if necessary to be a concise and effective prompt for an image generation model like Flux.1 Schnell. The prompt should be descriptive and clear.
+4. If safe, respond with a JSON object: \`{ "safe": true, "image_prompt": "your_refined_image_prompt_here" }\`.
+Ensure your entire response is ONLY the JSON object.`;
+
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'meta/llama-4-scout-17b-16e-instruct',
+          messages: [
+            { role: "system", content: system_instruction },
+            { role: "user", content: user_prompt_text }
+          ],
+          temperature: 0.3, // Slightly higher for nuanced extraction but still constrained
+          max_tokens: 150,  // Enough for the JSON response + a reasonable prompt
+          stream: false,
+          // Enforce JSON output if the model/API supports it directly, otherwise rely on prompt engineering
+        })
+      });
+
+      console.log(`NIM CALL END: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for processImagePromptWithScout (user_prompt_text: "${user_prompt_text}") - Text: ${errorText}`);
+        return { safe: false, reply_text: "Sorry, I encountered an issue processing your image request. Please try again later." };
+      }
+
+      const apiResponseText = await response.text();
+      console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - API Raw Text: ${apiResponseText}`);
+
+      try {
+        const apiData = JSON.parse(apiResponseText);
+
+        if (apiData.choices && apiData.choices.length > 0 && apiData.choices[0].message && apiData.choices[0].message.content) {
+          let nestedJsonString = apiData.choices[0].message.content.trim();
+          console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw Nested String: ${nestedJsonString}`);
+
+          // Remove Markdown code block fences if present
+          const markdownJsonRegex = /^```(?:json)?\s*([\s\S]*?)\s*```$/;
+          const match = nestedJsonString.match(markdownJsonRegex);
+          if (match && match[1]) {
+            nestedJsonString = match[1].trim();
+            console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Cleaned Nested JSON String: ${nestedJsonString}`);
+          }
+
+          try {
+            const scoutDecision = JSON.parse(nestedJsonString);
+            // Basic validation of the expected structure from Scout's JSON content
+            if (typeof scoutDecision.safe === 'boolean') {
+              if (scoutDecision.safe === false && typeof scoutDecision.reply_text === 'string') {
+                return scoutDecision;
+              } else if (scoutDecision.safe === true && typeof scoutDecision.image_prompt === 'string') {
+                return scoutDecision;
+              }
+            }
+            console.error(`Unexpected JSON structure within Scout's message content: ${nestedJsonString}`);
+            return { safe: false, reply_text: "Sorry, I received an unexpected structured response while processing your image request." };
+          } catch (nestedJsonError) {
+            console.error(`Error parsing nested JSON from Scout's message content: ${nestedJsonError}. Nested JSON string: ${nestedJsonString}`);
+            return { safe: false, reply_text: "Sorry, I had trouble understanding the structured response for your image request." };
+          }
+        } else {
+          console.error(`Unexpected API structure from Nvidia NIM for processImagePromptWithScout (missing choices/message/content): ${apiResponseText}`);
+          return { safe: false, reply_text: "Sorry, I received an incomplete response while processing your image request." };
+        }
+      } catch (apiJsonError) {
+        console.error(`Error parsing main API JSON from Nvidia NIM for processImagePromptWithScout: ${apiJsonError}. Raw API response: ${apiResponseText}`);
+        return { safe: false, reply_text: "Sorry, I had trouble understanding the API response for your image request." };
+      }
+
+    } catch (error) {
+      console.error(`Error in LlamaBot.processImagePromptWithScout (user_prompt_text: "${user_prompt_text}"):`, error);
+      return { safe: false, reply_text: "An unexpected error occurred while processing your image request." };
+    }
+  }
+
+  async describeImageWithScout(imageBase64) {
+    const modelToUse = 'meta/llama-4-scout-17b-16e-instruct'; // Assuming Scout is multimodal as per user request
+    console.log(`NIM CALL START: describeImageWithScout for model ${modelToUse}`);
+
+    if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
+      console.error('describeImageWithScout: imageBase64 data is invalid or empty.');
+      return null;
+    }
+
+    // Assuming the image is JPEG based on previous Bluesky upload log.
+    // If not, this might need to be more dynamic or configurable.
+    const mimeType = 'image/jpeg';
+    const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+
+    const systemPrompt = "You are an AI assistant. Your task is to describe the provided image for a social media post. Be descriptive, engaging, and try to capture the essence of the image. Keep your description concise, ideally under 200 characters, as it will also be used for alt text. Focus solely on describing the visual elements of the image.";
+    const userPromptText = "Please describe this image.";
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: modelToUse,
+          messages: [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: userPromptText },
+                {
+                  type: "image_url", // Common pattern; might be 'image' or other depending on actual NIM spec for this model
+                  image_url: {
+                    url: dataUrl
+                  }
+                }
+              ]
+            }
+          ],
+          temperature: 0.5, // Temperature for descriptive task
+          max_tokens: 100,  // Approx 200 chars / 4 chars_per_token ~ 50 tokens, add buffer. Max 300 chars for Bluesky.
+          stream: false
+        })
+      });
+
+      console.log(`NIM CALL END: describeImageWithScout - Status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - Text: ${errorText}`);
+        try {
+            const errorJson = JSON.parse(errorText);
+            console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - JSON:`, errorJson);
+        } catch (e) { /* Not a JSON error response */ }
+        return null;
+      }
+
+      const data = await response.json();
+
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const description = data.choices[0].message.content.trim();
+        console.log(`NIM CALL RESPONSE: describeImageWithScout - Description: "${description}"`);
+        // Further check if description is not empty or placeholder
+        if (description && description.length > 5) { // Arbitrary short length check
+            return description;
+        } else {
+            console.warn(`describeImageWithScout received an empty or too short description: "${description}"`);
+            return null;
+        }
+      }
+
+      console.error(`Unexpected response format from Nvidia NIM for describeImageWithScout:`, JSON.stringify(data));
+      return null;
+
+    } catch (error) {
+      console.error(`Error in LlamaBot.describeImageWithScout:`, error);
+      return null;
+    }
   }
 }
 

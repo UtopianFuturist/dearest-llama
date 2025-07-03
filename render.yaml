@@ -10,6 +10,8 @@ services:
         value: production
       - key: NVIDIA_NIM_API_KEY
         sync: false
+      - key: TOGETHER_AI_API_KEY # New environment variable for Together AI
+        sync: false
       - key: BLUESKY_IDENTIFIER
         sync: false
       - key: BLUESKY_APP_PASSWORD
@@ -18,8 +20,7 @@ services:
         value: meta/llama-4-maverick-17b-128e-instruct
       - key: IMAGE_PROMPT_MODEL
         value: meta/llama-4-scout-17b-16e-instruct
-      - key: IMAGE_GENERATION_MODEL
-        value: black-forest-labs/flux.1-dev
+      # IMAGE_GENERATION_MODEL is now hardcoded in index.js
       - key: TEXT_SYSTEM_PROMPT
         value: "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters."
       - key: IMAGE_PROMPT_SYSTEM_PROMPT
