@@ -616,34 +616,146 @@ class BaseBot {
   async postReply(post, response, imageBase64 = null, altText = "Generated image") {
     try {
       RateLimit.check();
-      const replyObject = {
-        text: utils.truncateResponse(response),
-        reply: { root: post.record?.reply?.root || { uri: post.uri, cid: post.cid }, parent: { uri: post.uri, cid: post.cid } }
+      RateLimit.check();
+      const CHAR_LIMIT_PER_POST = 290; // Leave room for (N/M) prefix
+      const MAX_PARTS = 3;
+      let textParts = [];
+      let currentReplyTo = { // Initial reply target is the original post
+          root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
+          parent: { uri: post.uri, cid: post.cid }
       };
-      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
-        try {
-          const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
-          if (imageBytes.length === 0) {
-            console.error('[postReply] Image byte array is empty after conversion. Skipping image upload.');
-          } else {
-            const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
-            if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
-              replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
-              console.log(`[postReply] Image embed object created with alt text: "${altText}"`);
-            } else {
-              console.error('[postReply] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
-            }
+      let lastPostedPartUri = null;
+      let lastPostedPartCid = null;
+
+      // Helper function for smart splitting
+      const splitTextIntoParts = (text, limit) => {
+          const parts = [];
+          let remainingText = text.trim();
+          while (remainingText.length > 0 && parts.length < MAX_PARTS) {
+              if (remainingText.length <= limit) {
+                  parts.push(remainingText);
+                  break;
+              }
+              let splitAt = limit;
+              // Try to find a sentence boundary or space to split at
+              let foundSplit = false;
+              for (let i = limit; i > limit / 2; i--) { // Look back halfway
+                  if (['.', '!', '?'].includes(remainingText[i])) {
+                      splitAt = i + 1;
+                      foundSplit = true;
+                      break;
+                  }
+              }
+              if (!foundSplit) {
+                for (let i = limit; i > limit / 2; i--) {
+                    if (remainingText[i] === ' ') {
+                        splitAt = i;
+                        foundSplit = true;
+                        break;
+                    }
+                }
+              }
+              // If no good split point, just split at the limit
+              parts.push(remainingText.substring(0, splitAt).trim());
+              remainingText = remainingText.substring(splitAt).trim();
           }
-        } catch (uploadError) { console.error('[postReply] Error during image upload or embed creation:', uploadError); }
-      } else if (imageBase64) {
-        console.warn(`[postReply] imageBase64 was present but invalid (not a non-empty string). Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
+          if (remainingText.length > 0 && parts.length >= MAX_PARTS) { // If text remains after max parts
+            parts[MAX_PARTS - 1] = parts[MAX_PARTS - 1].substring(0, limit - 3) + "..."; // Truncate last part
+          }
+          return parts;
+      };
+
+      if (response && response.length > CHAR_LIMIT_PER_POST) {
+          const effectiveLimitPerPost = CHAR_LIMIT_PER_POST - "(X/Y) ".length;
+          textParts = splitTextIntoParts(response, effectiveLimitPerPost);
+          if (textParts.length > MAX_PARTS) {
+              textParts = textParts.slice(0, MAX_PARTS);
+              // Ensure the last part indicates truncation if it was originally longer
+              if (response.length > textParts.join("").length) { // Heuristic
+                  const lastPart = textParts[MAX_PARTS-1];
+                  if (lastPart.length > effectiveLimitPerPost - 3) {
+                     textParts[MAX_PARTS-1] = lastPart.substring(0, effectiveLimitPerPost - 6) + "...";
+                  } else {
+                     textParts[MAX_PARTS-1] += "...";
+                  }
+              }
+          }
+      } else if (response) {
+          textParts.push(response);
+      } else {
+          // No text response, but maybe an image?
+          if (!imageBase64) {
+            console.warn("[postReply] No text and no image to post. Aborting.");
+            return;
+          }
+          // If only image, textParts will be empty, image handled below
       }
-      const result = await this.agent.post(replyObject);
-      console.log('Successfully posted reply:', result.uri);
-      this.repliedPosts.add(post.uri);
+
+      const totalParts = textParts.length > 0 ? textParts.length : (imageBase64 ? 1 : 0) ;
+      if (totalParts === 0) {
+          console.warn("[postReply] Calculated 0 parts. Nothing to post.");
+          return;
+      }
+
+
+      for (let i = 0; i < totalParts; i++) {
+          const isLastPart = (i === totalParts - 1);
+          let partText = textParts[i] || ""; // Use empty string if only image on last part
+
+          if (totalParts > 1) {
+              partText = `(${i + 1}/${totalParts}) ${partText}`;
+          }
+
+          // Ensure even the prefixed part doesn't exceed Bluesky's hard limit (approx 300)
+          // This is a safeguard; CHAR_LIMIT_PER_POST should mostly handle it.
+          partText = utils.truncateResponse(partText, 300);
+
+
+          const replyObject = {
+              text: partText,
+              reply: currentReplyTo
+          };
+
+          if (isLastPart && imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+              try {
+                  const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+                  if (imageBytes.length === 0) {
+                      console.error('[postReply] Image byte array is empty for last part. Skipping image upload.');
+                  } else {
+                      const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+                      if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+                          replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
+                          console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}"`);
+                      } else {
+                          console.error('[postReply] Uploaded image data or blob is missing. Cannot embed image for last part.');
+                      }
+                  }
+              } catch (uploadError) { console.error(`[postReply] Error during image upload for part ${i+1}/${totalParts}:`, uploadError); }
+          } else if (isLastPart && imageBase64) {
+              console.warn(`[postReply] imageBase64 was present for last part but invalid. Skipping image embed.`);
+          }
+
+          // If only an image is being posted (no text parts initially)
+          if (totalParts === 1 && textParts.length === 0 && imageBase64) {
+            replyObject.text = ""; // Ensure text is empty if only posting an image
+          }
+
+
+          console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..."`);
+          const result = await this.agent.post(replyObject);
+          console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}`);
+
+          if (!isLastPart) { // For the next part, reply to the part just posted
+              currentReplyTo = {
+                  root: currentReplyTo.root, // Root stays the same
+                  parent: { uri: result.uri, cid: result.cid }
+              };
+          }
+      }
+      this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
     } catch (error) {
-      console.error('Error posting reply:', error);
-      this.repliedPosts.add(post.uri);
+      console.error('Error posting multi-part reply:', error);
+      this.repliedPosts.add(post.uri); // Still mark as replied to avoid loops on error
     }
   }
 
@@ -884,7 +996,7 @@ class LlamaBot extends BaseBot {
         }
       }
 
-      const nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n${userBlueskyPostsContext}Please respond to the request in the most recent message in 300 characters or less. The user profile context above may contain the user's own posts, replies, quote posts, and items they've reposted (with original authors noted). Use this information to inform your response if relevant, paying attention to the nature of each activity. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`;
+      const nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n${userBlueskyPostsContext}Please respond to the request in the most recent message. The user profile context above may contain the user's own posts, replies, quote posts, and items they've reposted (with original authors noted). Use this information to inform your response if relevant, paying attention to the nature of each activity. For detailed topics like profile analysis, you can generate a response up to about 870 characters; it will be split into multiple posts if needed. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`;
 
       console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -896,7 +1008,8 @@ class LlamaBot extends BaseBot {
             { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` },
             { role: "user", content: nemotronUserPrompt }
           ],
-          temperature: 0.7, max_tokens: 150, stream: false
+          temperature: 0.7, max_tokens: 350, // Increased max_tokens for Nemotron
+          stream: false
         })
       });
       console.log(`NIM CALL END: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
@@ -925,11 +1038,11 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
-            { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it." },
+            { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences (this is a soft limit, final splitting is handled later). 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens). Apply your formatting rules consistently. The final splitting into multiple posts will be handled after your step, but ensure your output is clean and respects the other rules." },
             { role: "user", content: initialResponse }
           ],
           temperature: 0.1, // Temperature for formatting (already lowered)
-          max_tokens: 150,
+          max_tokens: 350, // Increased max_tokens for Scout to handle longer Nemotron output
           stream: false
         })
       });
