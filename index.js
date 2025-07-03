@@ -985,119 +985,19 @@ class LlamaBot extends BaseBot {
       const fetchContextDecision = await this.shouldFetchProfileContext(post.record.text);
 
       if (fetchContextDecision) {
-        console.log(`[Context] Scout determined profile context should be fetched for DID: ${post.author.did}. Query: "${post.record.text}"`);
+        console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${post.record.text}"`);
         try {
-          let fetchedPostsCount = 0;
-          let authorFeedCursor = undefined;
-          const maxPostsToFetch = 100;
-          let postsLimitPerCall = 50; // Max per call is often 100, but 50 is safe.
-
-          const collectedPosts = [];
-
-          while (fetchedPostsCount < maxPostsToFetch) {
-            if (maxPostsToFetch - fetchedPostsCount < postsLimitPerCall) {
-                postsLimitPerCall = maxPostsToFetch - fetchedPostsCount;
-            }
-            if (postsLimitPerCall <= 0) break;
-
-            console.log(`[Context] Fetching posts for ${post.author.did}, limit: ${postsLimitPerCall}, cursor: ${authorFeedCursor}`);
-            const authorFeed = await this.agent.api.app.bsky.feed.getAuthorFeed({
-              actor: post.author.did,
-              limit: postsLimitPerCall,
-              cursor: authorFeedCursor,
-              filter: 'posts_with_replies' // or 'posts_no_replies' / 'posts_and_author_threads'
-            });
-
-            if (authorFeed.success && authorFeed.data.feed.length > 0) {
-              for (const feedItem of authorFeed.data.feed) {
-                if (feedItem.post && feedItem.post.record) {
-                  let postText = feedItem.post.record.text || "";
-                  const postAuthorHandle = feedItem.post.author.handle;
-                  const userWhoseFeedIsBeingFetched = post.author.handle; // Assuming 'post' here is the original post that triggered the bot
-
-                  let postDetail = "";
-                  const snippetMaxLength = 75; // Max length for text snippets in context
-                  const truncateText = (text, maxLength) => {
-                    if (!text) return "";
-                    return text.length > maxLength ? text.substring(0, maxLength - 3) + "..." : text;
-                  };
-
-                  if (feedItem.reason && feedItem.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
-                    // This is a repost BY THE USER whose feed we are fetching
-                    // The feedItem.post is the post that was reposted.
-                    const originalAuthorHandle = feedItem.post.author.handle;
-                    const originalPostText = truncateText(feedItem.post.record.text, snippetMaxLength);
-                    postDetail = `User (${userWhoseFeedIsBeingFetched}) reposted from @${originalAuthorHandle}: "${originalPostText}"`;
-                  } else if (postAuthorHandle === userWhoseFeedIsBeingFetched) {
-                    // This is an original action by the user (post, reply, quote post)
-                    if (feedItem.post.record.reply) {
-                      const parentAuthorHandle = feedItem.reply?.parent?.author?.handle || 'another user';
-                      postDetail = `User (${userWhoseFeedIsBeingFetched}) replied to @${parentAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
-                    } else if (feedItem.post.record.embed && feedItem.post.record.embed.$type === 'app.bsky.embed.record') {
-                      // This is a quote post by the user
-                      const quotedRecord = feedItem.post.record.embed.record;
-                      // The 'quotedRecord' could be a full post object or a more minimal reference.
-                      // We need to fetch the actual quoted post's content if it's just a reference,
-                      // but for simplicity in context, we'll try to get text if available directly.
-                      // A full implementation might require another fetch for `quotedRecord.uri` if text isn't readily available.
-                      let quotedTextSnippet = "a post";
-                      let quotedAuthor = "another user";
-                      if (quotedRecord && quotedRecord.value && quotedRecord.value.text) { // Ideal case: full record embedded
-                          quotedTextSnippet = truncateText(quotedRecord.value.text, snippetMaxLength);
-                          quotedAuthor = quotedRecord.author?.handle || quotedAuthor;
-                      } else if (quotedRecord && quotedRecord.uri) {
-                          // If only URI, we could fetch it, but let's keep it simple for now.
-                          // This part might need enhancement if full quoted text is critical.
-                          quotedTextSnippet = `a post (URI: ${quotedRecord.uri.split('/').pop()})`;
-                          // Attempt to get author from URI if possible, otherwise use a generic term
-                          const didMatch = quotedRecord.uri.match(/at:\/\/(did:[^/]+)/);
-                          if (didMatch && didMatch[1] && didMatch[1] !== post.author.did) { // Avoid self-quotes being confusingly attributed
-                            // Ideally, resolve DID to handle here, but that's another API call.
-                            // For now, we'll just note the DID or a generic term.
-                            // This is a simplification; resolving DID to handle would be better.
-                            // For now, we assume `feedItem.post.record.embed.record.author.handle` might exist if it's a resolved embed.
-                            quotedAuthor = feedItem.post.record.embed.record.author?.handle || `user (${didMatch[1].substring(0,10)}...)`;
-                          }
-                      }
-                      postDetail = `User (${userWhoseFeedIsBeingFetched}) quote posted (commenting on @${quotedAuthor}'s post): "${truncateText(postText, snippetMaxLength)}" which quoted: "${quotedTextSnippet}"`;
-                    } else {
-                      // Original post by the user
-                      postDetail = `User (${userWhoseFeedIsBeingFetched}) posted: "${truncateText(postText, snippetMaxLength)}"`;
-                    }
-                  } else {
-                    // This case should ideally not happen if getAuthorFeed is working as expected for 'userWhoseFeedIsBeingFetched'
-                    // It means a post in the feed is not by the user and not a repost by the user.
-                    // However, to be safe, we can log it or create a generic entry.
-                    console.log(`[Context] Encountered unexpected item in feed for ${userWhoseFeedIsBeingFetched}: Post by ${postAuthorHandle}`);
-                    postDetail = `Feed item concerning @${userWhoseFeedIsBeingFetched}: A post by @${postAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
-                  }
-
-                  if (postDetail) {
-                    collectedPosts.push(postDetail);
-                    fetchedPostsCount++;
-                    if (fetchedPostsCount >= maxPostsToFetch) break;
-                  }
-                }
-              }
-              authorFeedCursor = authorFeed.data.cursor;
-              if (!authorFeedCursor || authorFeed.data.feed.length < postsLimitPerCall || fetchedPostsCount >= maxPostsToFetch) {
-                console.log("[Context] No more posts or cursor from getAuthorFeed.");
-                break;
-              }
-            } else {
-              console.log("[Context] No posts found in this batch or API call failed.");
-              break;
-            }
-          }
-
-          if (collectedPosts.length > 0) {
-            userBlueskyPostsContext = "\n\nHere are some of the user's recent Bluesky posts for additional context:\n" + collectedPosts.join("\n---\n") + "\n\n";
-            console.log(`[Context] Added ${collectedPosts.length} posts to Nemotron context.`);
+          const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
+          if (conversationHistoryItems.length > 0) {
+            userBlueskyPostsContext = "\n\nRecent conversation history between you and the user (" + post.author.handle + "):\n" + conversationHistoryItems.map(item => `${item.authorHandle}: ${item.text}`).join("\n---\n") + "\n\n";
+            console.log(`[Context] Added ${conversationHistoryItems.length} conversation messages to Nemotron context.`);
           } else {
-            console.log(`[Context] No posts were fetched for ${post.author.did} to add to context.`);
+            console.log(`[Context] No direct conversation history found between user ${post.author.did} and bot ${this.agent.did}.`);
+            // Optionally, you could fall back to the old general user feed fetching here, or decide that no context is better.
+            // For now, we'll proceed without this specific context if it's empty.
           }
         } catch (error) {
-          console.error(`[Context] Error fetching Bluesky posts for ${post.author.did}:`, error);
+          console.error(`[Context] Error fetching conversation history between user ${post.author.did} and bot ${this.agent.did}:`, error);
         }
       }
 
@@ -1297,6 +1197,199 @@ ${baseInstruction}`;
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  /**
+   * Fetches and constructs a chronological conversation history between a specific user and the bot.
+   *
+   * Test Cases for getBotUserConversationHistory:
+   * 1.  Empty Feeds: Both user and bot feeds return no posts. Expected: Empty history.
+   * 2.  Only User Posts, No Interaction: User has posts, but none are replies to or mentions of the bot. Bot has no relevant posts. Expected: Empty history.
+   * 3.  Only Bot Posts, No Interaction: Bot has posts, but none are replies to or mentions of the user. User has no relevant posts. Expected: Empty history.
+   * 4.  User Replies to Bot: User's feed contains replies to the bot. Bot's feed is empty/irrelevant. Expected: History contains user's replies.
+   * 5.  Bot Replies to User: Bot's feed contains replies to the user. User's feed is empty/irrelevant. Expected: History contains bot's replies.
+   * 6.  User Mentions Bot: User's feed contains posts mentioning the bot (via DID in facet). Expected: History contains user's mentions.
+   * 7.  Bot Mentions User: Bot's feed contains posts mentioning the user (via DID in facet). Expected: History contains bot's mentions.
+   * 8.  Mixed Interaction: Both user and bot have replies and mentions involving each other. Expected: Combined, sorted history.
+   * 9.  Pagination and Limit: Interaction history is longer than `fetchLimitPerActor` but shorter than `maxAttempts * fetchLimitPerActor`.
+   *     Expected: History is correctly fetched across pages and limited by `historyLimit`.
+   * 10. Deduplication: Ensure posts fetched from both user and bot feeds (if one references the other directly) appear only once.
+   * 11. Sorting: Posts from different feeds and different timestamps are correctly interleaved and sorted chronologically (newest first).
+   * 12. `historyLimit` Enforcement: More than `historyLimit` relevant posts exist. Expected: Only the `historyLimit` most recent posts are returned.
+   * 13. Invalid DIDs/Handles: How it behaves if `getProfile` fails for user handle (should log warning, filtering from bot to user may be less effective).
+   * 14. Facet Variations: Test with different facet structures for mentions, ensuring DID-based matching is robust.
+   *
+   * @param {string} userDid - The DID of the user.
+   * @param {string} botDid - The DID of the bot.
+   * @param {number} historyLimit - The maximum number of conversation items to return.
+   * @returns {Promise<Array<Object>>} A promise that resolves to an array of post objects.
+   */
+  async getBotUserConversationHistory(userDid, botDid, historyLimit) {
+    console.log(`[ConvHistory] Fetching conversation history between user ${userDid} and bot ${botDid}, limit ${historyLimit}`);
+    const allRelevantPosts = [];
+    // Fetch slightly more posts than needed to account for filtering
+    const fetchLimitPerActor = Math.min(100, historyLimit + 25);
+
+    const botHandle = this.config.BLUESKY_IDENTIFIER; // Assuming this is the bot's handle
+
+    // Helper to fetch and filter one actor's feed
+    const fetchAndFilterActorFeed = async (actorToFetchDid, otherActorDid, otherActorHandleToMatch) => {
+      let cursor;
+      const actorPosts = [];
+      let fetchedCount = 0;
+      const maxAttempts = 3; // Max pages to fetch to avoid long loops if history is sparse
+      let attempts = 0;
+
+      while (fetchedCount < fetchLimitPerActor && attempts < maxAttempts) {
+        attempts++;
+        try {
+          console.log(`[ConvHistory] Fetching feed for ${actorToFetchDid}, limit: ${fetchLimitPerActor}, attempt: ${attempts}, cursor: ${cursor}`);
+          const response = await this.agent.api.app.bsky.feed.getAuthorFeed({
+            actor: actorToFetchDid,
+            limit: fetchLimitPerActor, // Request a decent number each time
+            cursor: cursor,
+            filter: 'posts_with_replies'
+          });
+
+          if (!response.success || !response.data.feed) {
+            console.warn(`[ConvHistory] Failed to fetch feed or empty feed for ${actorToFetchDid}`);
+            break;
+          }
+
+          for (const item of response.data.feed) {
+            if (!item.post || !item.post.record) continue;
+
+            const postRecord = item.post.record;
+            const postAuthorDid = item.post.author.did;
+            const postAuthorHandle = item.post.author.handle;
+            const postText = postRecord.text || "";
+            const createdAt = postRecord.createdAt;
+            const postUri = item.post.uri;
+
+            let isRelevant = false;
+
+            // 1. Check for direct replies
+            if (postRecord.reply) {
+              const parentPostUri = postRecord.reply.parent?.uri;
+              if (parentPostUri) {
+                // We need to check if the parent post was authored by the otherActorDid
+                // The `item.reply.parent.author.did` might not always be populated directly in getAuthorFeed.
+                // A more robust check might involve fetching the parent post, but that's expensive.
+                // Let's assume if `reply.parent.author.did` is available, we use it.
+                // Otherwise, we might rely on mentions if the reply structure is not fully detailed.
+                // For now, we'll be optimistic or rely on mentions as a fallback.
+                // A common pattern is that the reply object in the feed item *does* contain parent author info.
+                if (item.reply?.parent?.author?.did === otherActorDid) {
+                  isRelevant = true;
+                  console.log(`[ConvHistory] Relevant reply found: ${postUri} from ${postAuthorHandle} to ${otherActorHandleToMatch}`);
+                }
+              }
+            }
+
+            // 2. Check for mentions (if not already marked as a relevant reply)
+            if (!isRelevant && postRecord.facets) {
+              for (const facet of postRecord.facets) {
+                if (facet.features) {
+                  for (const feature of facet.features) {
+                    if (feature.$type === 'app.bsky.richtext.facet#mention') {
+                      // feature.did should be the DID of the mentioned user
+                      if (feature.did === otherActorDid) {
+                        isRelevant = true;
+                        console.log(`[ConvHistory] Relevant mention found: ${postUri} from ${postAuthorHandle} mentions ${otherActorHandleToMatch}`);
+                        break;
+                      }
+                    }
+                  }
+                }
+                if (isRelevant) break;
+              }
+            }
+
+            // 3. Alternative check for mentions if DID isn't in facet (less reliable but a fallback)
+            // This is more of a heuristic if the DID isn't available in the facet.
+            if (!isRelevant && postText.includes(`@${otherActorHandleToMatch}`)) {
+                 // This could lead to false positives if the handle is mentioned but not as a user mention facet.
+                 // Only use this if other checks fail and you accept potential inaccuracies.
+                 // For now, let's be conservative and rely on facet DIDs or reply structures.
+                 // console.log(`[ConvHistory] Potential relevant text mention: ${postUri} from ${postAuthorHandle} includes @${otherActorHandleToMatch}`);
+                 // isRelevant = true; // Uncomment with caution
+            }
+
+
+            if (isRelevant) {
+              actorPosts.push({
+                uri: postUri,
+                text: postText,
+                authorDid: postAuthorDid,
+                authorHandle: postAuthorHandle,
+                createdAt: createdAt,
+              });
+              fetchedCount++;
+            }
+          }
+
+          cursor = response.data.cursor;
+          if (!cursor || response.data.feed.length === 0) {
+            console.log(`[ConvHistory] No more posts or cursor for ${actorToFetchDid}. Fetched ${actorPosts.length} relevant posts so far.`);
+            break; // Exit if no cursor or no new posts
+          }
+          if (actorPosts.length >= fetchLimitPerActor) { // If we have enough relevant posts
+             console.log(`[ConvHistory] Sufficient relevant posts collected for ${actorToFetchDid} (${actorPosts.length}).`);
+             break;
+          }
+
+        } catch (error) {
+          console.error(`[ConvHistory] Error fetching feed for ${actorToFetchDid}:`, error);
+          break; // Exit on error
+        }
+      }
+      return actorPosts;
+    };
+
+    // We need the user's handle to check if the bot mentioned the user by handle (less reliable than DID)
+    // This requires an extra API call if we don't have it. Assuming `post.author.handle` is available from the triggering post.
+    // For now, we will primarily rely on DID matching in facets and reply parent author DIDs.
+    // Let's assume the calling context (`generateResponse`) has `post.author.handle`.
+    // For now, we'll assume `this.config.BLUESKY_IDENTIFIER` is the bot's handle.
+    // And we'll need the user's handle to check bot's mentions of the user.
+    // This is tricky because getAuthorFeed items don't always resolve handles for mentions if only DIDs are present.
+    // Let's refine the logic to pass the handles too.
+
+    let userHandle = ''; // We need this. Let's try to get it.
+    try {
+        const userProfile = await this.agent.getProfile({actor: userDid});
+        if (userProfile && userProfile.data && userProfile.data.handle) {
+            userHandle = userProfile.data.handle;
+        } else {
+            console.warn(`[ConvHistory] Could not fetch handle for user DID ${userDid}`);
+        }
+    } catch (e) {
+        console.error(`[ConvHistory] Error fetching profile for user DID ${userDid} to get handle:`, e);
+    }
+    if (!userHandle) { // Fallback if API call fails or no handle
+        console.warn(`[ConvHistory] User handle for ${userDid} is unknown. Mention filtering might be less effective.`);
+        // We could try to extract it from the `post` object passed to `generateResponse` if that's feasible
+        // For now, proceeding without it means mention filtering from bot to user might be impaired if only handle is used.
+    }
+
+
+    const userPostsFiltered = await fetchAndFilterActorFeed(userDid, botDid, botHandle);
+    const botPostsFiltered = await fetchAndFilterActorFeed(botDid, userDid, userHandle || "user"); // Pass userHandle if available
+
+    allRelevantPosts.push(...userPostsFiltered);
+    allRelevantPosts.push(...botPostsFiltered);
+
+    // Deduplicate posts based on URI
+    const uniquePosts = Array.from(new Map(allRelevantPosts.map(p => [p.uri, p])).values());
+
+    // Sort by creation date (newest first)
+    uniquePosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // Limit to the most recent `historyLimit` posts
+    const finalHistory = uniquePosts.slice(0, historyLimit);
+
+    console.log(`[ConvHistory] Found ${uniquePosts.length} unique relevant posts. Returning ${finalHistory.length} for history.`);
+    return finalHistory;
   }
 
   async shouldFetchProfileContext(userQueryText) {
