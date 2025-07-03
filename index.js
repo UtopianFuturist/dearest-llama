@@ -979,58 +979,71 @@ class LlamaBot extends BaseBot {
 
       if (searchIntent.intent === "search_history") {
         console.log(`[SearchHistory] Intent detected. Criteria:`, searchIntent);
-        const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
         let matches = [];
+        let searchPerformed = ""; // To describe which search was done
 
-        if (conversationHistoryItems && conversationHistoryItems.length > 0) {
-          matches = conversationHistoryItems.filter(item => {
-            let authorMatch = false;
-            if (searchIntent.author_filter === "user" && item.authorDid === post.author.did) authorMatch = true;
-            else if (searchIntent.author_filter === "bot" && item.authorDid === this.agent.did) authorMatch = true;
-            else if (searchIntent.author_filter === "any") authorMatch = true;
-            if (!authorMatch) return false;
+        // Priority 1: Bot gallery search for images by the bot
+        if (searchIntent.target_type === "image" && searchIntent.author_filter === "bot" && searchIntent.search_scope === "bot_gallery") {
+          console.log("[SearchHistory] Performing bot media gallery search.");
+          matches = await this.searchBotMediaGallery(searchIntent.keywords, 1); // Get top 1
+          searchPerformed = "in my own image gallery";
+        }
 
-            let typeMatch = false;
-            if (searchIntent.target_type === "image") {
-              if ((item.embedDetails?.type === 'images' && item.embedDetails.images?.length > 0) ||
-                  (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'images' && item.embedDetails.media.images?.length > 0)) {
+        // Priority 2 (or fallback): Conversation history search
+        // This will run if it's not a bot_gallery search, or if bot_gallery search yielded no results (and we decide to fallback)
+        if (matches.length === 0 && searchIntent.search_scope !== "bot_gallery_only") { // Added a hypothetical scope to prevent fallback if desired, default is to fallback
+          console.log("[SearchHistory] Performing conversation history search.");
+          const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
+          searchPerformed = "in our recent conversation history";
+          if (conversationHistoryItems && conversationHistoryItems.length > 0) {
+            matches = conversationHistoryItems.filter(item => {
+              let authorMatch = false;
+              if (searchIntent.author_filter === "user" && item.authorDid === post.author.did) authorMatch = true;
+              else if (searchIntent.author_filter === "bot" && item.authorDid === this.agent.did) authorMatch = true;
+              else if (searchIntent.author_filter === "any") authorMatch = true;
+              if (!authorMatch) return false;
+
+              let typeMatch = false;
+              if (searchIntent.target_type === "image") {
+                if ((item.embedDetails?.type === 'images' && item.embedDetails.images?.length > 0) ||
+                    (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'images' && item.embedDetails.media.images?.length > 0)) {
+                  typeMatch = true;
+                }
+              } else if (searchIntent.target_type === "link") {
+                if ((item.embedDetails?.type === 'external') ||
+                    (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'external')) {
+                  typeMatch = true;
+                }
+              } else if (searchIntent.target_type === "post" || searchIntent.target_type === "message" || searchIntent.target_type === "unknown") {
                 typeMatch = true;
               }
-            } else if (searchIntent.target_type === "link") {
-              if ((item.embedDetails?.type === 'external') ||
-                  (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'external')) {
-                typeMatch = true;
-              }
-            } else if (searchIntent.target_type === "post" || searchIntent.target_type === "message" || searchIntent.target_type === "unknown") {
-              typeMatch = true; // General match, keywords will do the main filtering
-            }
-            if (!typeMatch) return false;
+              if (!typeMatch) return false;
 
-            if (searchIntent.keywords && searchIntent.keywords.length > 0) {
-              const itemTextLower = (item.text || "").toLowerCase();
-              // Also check embed text for keywords
-              let embedTextLower = "";
-              if (item.embedDetails?.type === 'images' && item.embedDetails.images) {
-                embedTextLower += item.embedDetails.images.map(img => img.alt || "").join(" ").toLowerCase();
-              } else if (item.embedDetails?.type === 'external' && item.embedDetails.external) {
-                embedTextLower += (item.embedDetails.external.title || "").toLowerCase() + " " + (item.embedDetails.external.description || "").toLowerCase();
-              } else if (item.embedDetails?.type === 'record' && item.embedDetails.record) {
-                embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase();
-              } else if (item.embedDetails?.type === 'recordWithMedia') {
-                if (item.embedDetails.record) embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase() + " ";
-                if (item.embedDetails.media?.type === 'images' && item.embedDetails.media.images) {
-                   embedTextLower += item.embedDetails.media.images.map(img => img.alt || "").join(" ").toLowerCase();
-                } else if (item.embedDetails.media?.type === 'external' && item.embedDetails.media.external) {
-                   embedTextLower += (item.embedDetails.media.external.title || "").toLowerCase() + " " + (item.embedDetails.media.external.description || "").toLowerCase();
+              if (searchIntent.keywords && searchIntent.keywords.length > 0) {
+                const itemTextLower = (item.text || "").toLowerCase();
+                let embedTextLower = "";
+                if (item.embedDetails?.type === 'images' && item.embedDetails.images) {
+                  embedTextLower += item.embedDetails.images.map(img => img.alt || "").join(" ").toLowerCase();
+                } else if (item.embedDetails?.type === 'external' && item.embedDetails.external) {
+                  embedTextLower += (item.embedDetails.external.title || "").toLowerCase() + " " + (item.embedDetails.external.description || "").toLowerCase();
+                } else if (item.embedDetails?.type === 'record' && item.embedDetails.record) {
+                  embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase();
+                } else if (item.embedDetails?.type === 'recordWithMedia') {
+                  if (item.embedDetails.record) embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase() + " ";
+                  if (item.embedDetails.media?.type === 'images' && item.embedDetails.media.images) {
+                     embedTextLower += item.embedDetails.media.images.map(img => img.alt || "").join(" ").toLowerCase();
+                  } else if (item.embedDetails.media?.type === 'external' && item.embedDetails.media.external) {
+                     embedTextLower += (item.embedDetails.media.external.title || "").toLowerCase() + " " + (item.embedDetails.media.external.description || "").toLowerCase();
+                  }
+                }
+                const combinedTextForKeywordSearch = itemTextLower + " " + embedTextLower;
+                if (!searchIntent.keywords.every(kw => combinedTextForKeywordSearch.includes(kw.toLowerCase()))) {
+                  return false;
                 }
               }
-              const combinedTextForKeywordSearch = itemTextLower + " " + embedTextLower;
-              if (!searchIntent.keywords.every(kw => combinedTextForKeywordSearch.includes(kw.toLowerCase()))) {
-                return false;
-              }
-            }
-            return true; // All checks passed
-          });
+              return true;
+            });
+          }
         }
 
         let nemotronSearchPrompt = "";
@@ -1042,25 +1055,34 @@ class LlamaBot extends BaseBot {
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
+          // Add where it was found:
+          userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
 
-          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this: ${postUrl}" or "This might be what you're looking for from ${searchIntent.recency_cue || 'recently'}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
 
-          if (matches.length > 1) {
-            nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches, but I'm giving you the URL for the most relevant one based on recency and keywords. The user's recency cue was "${searchIntent.recency_cue}". Focus the user response on the single URL provided.)`;
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}" or "This might be what you're looking for from ${searchIntent.recency_cue || 'recently'} ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+
+          if (matches.length > 1 && searchPerformed === "in our recent conversation history") { // Only show multi-match note if it was from conversation history for now
+            nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches from our conversation, but I'm giving you the URL for the most relevant one based on recency and keywords. The user's recency cue was "${searchIntent.recency_cue}". Focus the user response on the single URL provided.)`;
+          } else if (matches.length > 1 && searchPerformed === "in my own image gallery"){
+             nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches in my gallery. Showing the most relevant. The user's recency cue was "${searchIntent.recency_cue}".)`;
           }
+
 
         } else {
           let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
-          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched our conversation history but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description from ${searchIntent.recency_cue || 'our recent history'} but couldn't find it. Could you try different keywords?"`;
+          // Add where it was searched, even for no results
+          userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
+
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched ${searchPerformed} but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description ${searchPerformed} from ${searchIntent.recency_cue || 'recently'} but couldn't find it. Could you try different keywords?"`;
         }
 
         console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
 
         // System prompt for Nemotron when handling search results - updated for conciseness
-        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's original query (including any recency cue they gave like 'yesterday') and the search result (either a direct Post URL if found, or a message that nothing was found along with the keywords used for the search). If a Post URL is provided, your response to the user MUST consist of a brief confirmation phrase (which can acknowledge their recency cue if provided) and then the Post URL itself. Do not add extra descriptions, author details, or text snippets unless they are part of the brief confirmation phrase. If nothing was found, state that clearly and politely, you can mention the keywords used for the search if it seems helpful for the user to refine their query.";
+        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's original query (including any recency cue they gave like 'yesterday') and the search result (either a direct Post URL if found, or a message that nothing was found along with the keywords used for the search and where the search was performed). If a Post URL is provided, your response to the user MUST consist of a brief confirmation phrase (which can acknowledge their recency cue and where it was found, e.g. 'in my gallery' or 'in our conversation') and then the Post URL itself. Do not add extra descriptions, author details, or text snippets unless they are part of the brief confirmation phrase. If nothing was found, state that clearly and politely, you can mention the keywords used for the search and where you looked if it seems helpful for the user to refine their query.";
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
           method: 'POST',
@@ -1616,43 +1638,145 @@ ${baseInstruction}`;
     return finalHistory;
   }
 
+  async searchBotMediaGallery(keywords, limit) {
+    console.log(`[BotMediaSearch] Searching bot's own media gallery. Keywords: ${JSON.stringify(keywords)}, Limit: ${limit}`);
+    const botDid = this.agent.did;
+    const matchingPosts = [];
+    let cursor = undefined;
+    const fetchPageLimit = 50; // How many to fetch per API call
+    let fetchedImagePostsCount = 0; // Count of posts with images we've processed enough of
+    const maxApiPages = 3; // Limit API calls to avoid excessive scanning for very broad searches
+    let apiPagesCalled = 0;
+
+    try {
+      while (apiPagesCalled < maxApiPages && (matchingPosts.length < limit || fetchedImagePostsCount < limit * 2 /* fetch a bit more to sort from */) ) {
+        apiPagesCalled++;
+        console.log(`[BotMediaSearch] Fetching bot's feed page ${apiPagesCalled}. Cursor: ${cursor}`);
+        const response = await this.agent.api.app.bsky.feed.getAuthorFeed({
+          actor: botDid,
+          limit: fetchPageLimit,
+          cursor: cursor
+        });
+
+        if (!response.success || !response.data.feed || response.data.feed.length === 0) {
+          console.log("[BotMediaSearch] No more posts in bot's feed or API error.");
+          break;
+        }
+
+        for (const item of response.data.feed) {
+          if (!item.post || !item.post.record || item.post.author.did !== botDid) {
+            continue; // Should always be bot's post, but double check
+          }
+
+          const postRecord = item.post.record;
+          const embed = item.post.embed;
+          let postImages = [];
+
+          if (embed) {
+            if (embed.$type === 'app.bsky.embed.images#view' || embed.$type === 'app.bsky.embed.images') {
+              postImages = embed.images?.map(img => ({
+                alt: img.alt || '',
+                cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+              })) || [];
+            } else if (embed.$type === 'app.bsky.embed.recordWithMedia#view' || embed.$type === 'app.bsky.embed.recordWithMedia') {
+              if (embed.media && (embed.media.$type === 'app.bsky.embed.images#view' || embed.media.$type === 'app.bsky.embed.images')) {
+                postImages = embed.media.images?.map(img => ({
+                  alt: img.alt || '',
+                  cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+                })) || [];
+              }
+            }
+          }
+
+          if (postImages.length > 0) {
+            fetchedImagePostsCount++;
+            const postTextLower = (postRecord.text || "").toLowerCase();
+            const altTextsLower = postImages.map(img => (img.alt || "").toLowerCase()).join(" ");
+            const combinedTextForSearch = `${postTextLower} ${altTextsLower}`;
+
+            let keywordsMatch = true;
+            if (keywords && keywords.length > 0) {
+              keywordsMatch = keywords.every(kw => combinedTextForSearch.includes(kw.toLowerCase()));
+            }
+
+            if (keywordsMatch) {
+              matchingPosts.push({
+                uri: item.post.uri,
+                text: postRecord.text || "",
+                authorHandle: item.post.author.handle, // Bot's handle
+                authorDid: item.post.author.did,     // Bot's DID
+                createdAt: postRecord.createdAt,
+                embedDetails: { type: 'images', images: postImages } // Store extracted image info
+              });
+              if (matchingPosts.length >= limit) break; // Found enough
+            }
+          }
+        }
+        if (matchingPosts.length >= limit) break;
+
+        cursor = response.data.cursor;
+        if (!cursor) {
+          console.log("[BotMediaSearch] No more cursor from bot's feed.");
+          break;
+        }
+      }
+    } catch (error) {
+      console.error(`[BotMediaSearch] Error searching bot's media gallery:`, error);
+    }
+
+    // Sort by creation date (newest first) - already fetched in this order generally, but good to ensure
+    matchingPosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const finalResults = matchingPosts.slice(0, limit);
+    console.log(`[BotMediaSearch] Found ${finalResults.length} matching image posts in bot's gallery.`);
+    return finalResults;
+  }
+
   async getSearchHistoryIntent(userQueryText) {
     if (!userQueryText || userQueryText.trim() === "") {
       return { intent: "none" };
     }
     const modelId = 'meta/llama-4-scout-17b-16e-instruct';
-    const systemPrompt = `Your task is to analyze the user's query to determine if they are asking to find a specific item (an image, a link, or a general post/message) from their past conversation history with you (the bot).
+    const systemPrompt = `Your task is to analyze the user's query to determine if they are asking to find a specific item (an image, a link, or a general post/message) from past interactions.
 
 Output a JSON object with the following structure:
 {
   "intent": "search_history" | "none",
-  "target_type": "image" | "link" | "post" | "message" | "unknown", // REQUIRED if intent is "search_history". Default to "message" if unsure but it's a search.
+  "target_type": "image" | "link" | "post" | "message" | "unknown", // REQUIRED if intent is "search_history".
   "author_filter": "user" | "bot" | "any", // REQUIRED if intent is "search_history".
-  "keywords": ["keyword1", "keyword2", ...], // Content-specific keywords ONLY. EXCLUDE recency cues. Max 5 keywords.
-  "recency_cue": "textual cue for recency" | null // e.g., "yesterday", "last week". Null if not specified.
+  "keywords": ["keyword1", ...], // Content-specific keywords ONLY. EXCLUDE recency cues & target_type words like "image", "link". Max 5.
+  "recency_cue": "textual cue for recency" | null, // e.g., "yesterday", "last week". Null if not specified.
+  "search_scope": "bot_gallery" | "conversation" | null // REQUIRED if intent is "search_history" & target_type is "image" & author_filter is "bot". Is it a general request for any image the bot made ("bot_gallery") or one from this specific conversation ("conversation")? Default to "conversation" if ambiguous. Null otherwise.
 }
 
 IMPORTANT RULES:
-1.  If the query mentions "image", "picture", "photo", "generated image", "drew", "showed me a pic of", set "target_type" to "image". This takes precedence even if "post" or "message" is also mentioned.
-2.  If the query mentions "link", "URL", "site", "article you sent", set "target_type" to "link".
-3.  Words indicating time (e.g., "yesterday", "last week", "a few days ago", "recently") are RECENCY CUES and MUST go into "recency_cue". DO NOT include them in "keywords".
-4.  "keywords" should only be for nouns, adjectives, or verbs describing the *content* of the item, not its type or when it was sent/generated.
-5.  If the query is NOT a request to find a past item, "intent" MUST be "none". All other fields can be omitted or null.
-6.  Be conservative: if very unsure about a search_history intent, classify as "intent": "none".
+1.  "target_type": If "image", "picture", "photo", "generated image", "drew", "pic of" are mentioned, set to "image". This takes precedence. If "link", "URL", "site", set to "link". Otherwise, default to "message" or "post" if a search intent is clear.
+2.  "author_filter": Determine if the user implies they sent it ("user"), you (the bot) sent/generated it ("bot"), or if it's unclear ("any").
+3.  "keywords": Extract core content nouns, adjectives, or verbs. EXCLUDE recency cues (like "yesterday", "last week"), and also exclude generic type words already covered by "target_type" (like "image", "link", "post", "message").
+4.  "recency_cue": Capture time-related phrases (e.g., "yesterday", "last week", "recently"). Store as null if not specified.
+5.  "search_scope":
+    *   If "target_type" is "image" AND "author_filter" is "bot":
+        *   If the query is general (e.g., "show me an image you made of X", "find your picture of Y", "did you ever draw Z?"), set to "bot_gallery".
+        *   If the query implies it was part of the current user's direct conversation (e.g., "the image you sent *me*", "the picture from *our chat* yesterday"), set to "conversation".
+        *   If ambiguous, default "search_scope" to "conversation".
+    *   Set to null for other target_types or author_filters.
+6.  If the query is NOT a request to find a past item, "intent" MUST be "none". All other fields can be omitted or null.
 7.  Output ONLY the JSON object.
 
 Examples:
 - User query: "find the image you generated for me of a cat yesterday"
-  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": "yesterday"}
-- User query: "show me the post with the mountain image you made"
-  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["mountain"], "recency_cue": null}
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": "yesterday", "search_scope": "conversation"}
+- User query: "show me a picture you made of a dog"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["dog"], "recency_cue": null, "search_scope": "bot_gallery"}
+- User query: "did you ever post an image of a sunset?"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["sunset"], "recency_cue": null, "search_scope": "bot_gallery"}
+- User query: "the link about space you shared with me"
+  Response: {"intent": "search_history", "target_type": "link", "author_filter": "bot", "keywords": ["space"], "recency_cue": null, "search_scope": "conversation"}
 - User query: "what was that link about dogs I sent last tuesday?"
-  Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday"}
+  Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday", "search_scope": null}
 - User query: "search for the message about our meeting"
-  Response: {"intent": "search_history", "target_type": "message", "author_filter": "any", "keywords": ["meeting"], "recency_cue": null}
+  Response: {"intent": "search_history", "target_type": "message", "author_filter": "any", "keywords": ["meeting"], "recency_cue": null, "search_scope": null}
 - User query: "can you generate a new image of a forest?"
-  Response: {"intent": "none"}
-- User query: "what time is it?"
   Response: {"intent": "none"}
 `;
 
@@ -1708,11 +1832,33 @@ Examples:
             const parsedJson = JSON.parse(jsonString);
             // Basic validation of the parsed structure
             if (parsedJson.intent === "search_history") {
-              if (!["image", "link", "post", "message", "unknown"].includes(parsedJson.target_type) ||
-                  !["user", "bot", "any"].includes(parsedJson.author_filter) ||
-                  !Array.isArray(parsedJson.keywords)) {
-                console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has intent 'search_history' but malformed structure: ${jsonString}`);
-                return { intent: "none", error: "Malformed search_history structure from Scout." };
+              const validTarget = ["image", "link", "post", "message", "unknown"].includes(parsedJson.target_type);
+              const validAuthor = ["user", "bot", "any"].includes(parsedJson.author_filter);
+              const validKeywords = Array.isArray(parsedJson.keywords);
+              let validScope = true;
+              if (parsedJson.target_type === "image" && parsedJson.author_filter === "bot") {
+                validScope = ["bot_gallery", "conversation", null].includes(parsedJson.search_scope);
+                 if (parsedJson.search_scope === undefined) parsedJson.search_scope = "conversation"; // Default if undefined by Scout
+              } else {
+                // If not bot image search, scope should ideally be null or not present.
+                // For simplicity, we'll just ensure it doesn't break if present with an unexpected value,
+                // but it's not strictly validated here unless it's a bot image search.
+                if (parsedJson.search_scope !== null && parsedJson.search_scope !== undefined) {
+                    // It's okay if it's null or undefined here.
+                }
+              }
+
+              if (!validTarget || !validAuthor || !validKeywords || !validScope) {
+                console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has intent 'search_history' but malformed structure: ${jsonString}. Validations: target=${validTarget}, author=${validAuthor}, keywords=${validKeywords}, scope=${validScope}`);
+                // Attempt to salvage by defaulting problematic parts if possible, or return error
+                if (!parsedJson.target_type) parsedJson.target_type = "unknown";
+                if (!parsedJson.author_filter) parsedJson.author_filter = "any";
+                if (!parsedJson.keywords) parsedJson.keywords = [];
+                if (parsedJson.target_type === "image" && parsedJson.author_filter === "bot" && !validScope) {
+                    parsedJson.search_scope = "conversation"; // Default scope
+                }
+                // If fundamental parts are missing, it might still be better to return an error or intent:none
+                // For now, we try to proceed with defaults.
               }
             } else if (parsedJson.intent !== "none") {
                console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has unknown intent: ${jsonString}`);
