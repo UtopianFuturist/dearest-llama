@@ -1289,25 +1289,22 @@ Do not make up information not present in the search results. Keep the response 
           await this.postReply(post, "I encountered an issue while trying to process information from the web. Please try again later.");
         }
         return null; // End processing for this interaction
-      }
-
-
-      // If not a search history or web_search intent, proceed with existing logic
-      let conversationHistory = '';
-      if (context && context.length > 0) {
-        for (const msg of context) {
-          conversationHistory += `${msg.author}: ${msg.text}\n`;
-          if (msg.images && msg.images.length > 0) {
-            msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
+      } else { // Neither search_history nor web_search: proceed with original logic (profile analysis / standard reply)
+        let conversationHistory = '';
+        if (context && context.length > 0) {
+          for (const msg of context) {
+            conversationHistory += `${msg.author}: ${msg.text}\n`;
+            if (msg.images && msg.images.length > 0) {
+              msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
+            }
           }
         }
-      }
 
-      let userBlueskyPostsContext = "";
-      const fetchContextDecision = await this.shouldFetchProfileContext(userQueryText);
+        let userBlueskyPostsContext = "";
+        const fetchContextDecision = await this.shouldFetchProfileContext(userQueryText);
 
-      if (fetchContextDecision) {
-        console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${userQueryText}"`);
+        if (fetchContextDecision) {
+          console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${userQueryText}"`);
         try {
           const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
           if (conversationHistoryItems.length > 0) {
