@@ -1729,7 +1729,7 @@ ${baseInstruction}`;
               */
               actorPosts.push(postToAdd);
               fetchedCount++;
-            }
+            } // Closing brace for 'if (isRelevant)' moved here
           }
 
           cursor = response.data.cursor;
