@@ -723,10 +723,10 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
-            { role: "system", content: "You are being passed this output from another AI model - correct it so that it isn't in quotation marks like it's a quote, ensure the character doesn't label their message with named sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the exact generated persona response content input. NEVER mention this internal re-writing and output formatting correction process in your responses to the users. This part of the response workflow for generating the response to the user is an internal one. It's also very important that all responses fit within the Bluesky 300 character message limit so responses are not cut off when posted. You are only to return the final format-corrected response to the user. The main text model (not this one) handles response content, you are only to edit the output's formatting structure." },
+            { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. DO NOT rephrase, summarize, add, or remove any other content. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.1, // Lowered temperature for formatting
+          temperature: 0.1, // Temperature for formatting (already lowered)
           max_tokens: 100,
           stream: false
         })
@@ -762,6 +762,71 @@ class LlamaBot extends BaseBot {
           }
         }
       }
+
+      let userBlueskyPostsContext = "";
+      const userPostTextLower = post.record.text.toLowerCase();
+      const profileKeywords = ["my profile", "about me", "what do you think of me", "my posts", "my feed"];
+
+      if (profileKeywords.some(keyword => userPostTextLower.includes(keyword))) {
+        console.log(`[Context] Keywords detected for fetching profile context for DID: ${post.author.did}`);
+        try {
+          let fetchedPostsCount = 0;
+          let authorFeedCursor = undefined;
+          const maxPostsToFetch = 100;
+          let postsLimitPerCall = 50; // Max per call is often 100, but 50 is safe.
+
+          const collectedPosts = [];
+
+          while (fetchedPostsCount < maxPostsToFetch) {
+            if (maxPostsToFetch - fetchedPostsCount < postsLimitPerCall) {
+                postsLimitPerCall = maxPostsToFetch - fetchedPostsCount;
+            }
+            if (postsLimitPerCall <= 0) break;
+
+            console.log(`[Context] Fetching posts for ${post.author.did}, limit: ${postsLimitPerCall}, cursor: ${authorFeedCursor}`);
+            const authorFeed = await this.agent.api.app.bsky.feed.getAuthorFeed({
+              actor: post.author.did,
+              limit: postsLimitPerCall,
+              cursor: authorFeedCursor,
+              filter: 'posts_with_replies' // or 'posts_no_replies' / 'posts_and_author_threads'
+            });
+
+            if (authorFeed.success && authorFeed.data.feed.length > 0) {
+              for (const feedItem of authorFeed.data.feed) {
+                if (feedItem.post && feedItem.post.record) {
+                  let postDetail = `User Post: "${feedItem.post.record.text}"`;
+                  if (feedItem.reply) {
+                    postDetail = `User Reply (to ${feedItem.reply.parent?.author?.handle || 'another post'}): "${feedItem.post.record.text}"`;
+                  }
+                  collectedPosts.push(postDetail);
+                  fetchedPostsCount++;
+                  if (fetchedPostsCount >= maxPostsToFetch) break;
+                }
+              }
+              authorFeedCursor = authorFeed.data.cursor;
+              if (!authorFeedCursor || authorFeed.data.feed.length < postsLimitPerCall) {
+                console.log("[Context] No more posts or cursor from getAuthorFeed.");
+                break;
+              }
+            } else {
+              console.log("[Context] No posts found in this batch or API call failed.");
+              break;
+            }
+          }
+
+          if (collectedPosts.length > 0) {
+            userBlueskyPostsContext = "\n\nHere are some of the user's recent Bluesky posts for additional context:\n" + collectedPosts.join("\n---\n") + "\n\n";
+            console.log(`[Context] Added ${collectedPosts.length} posts to Nemotron context.`);
+          } else {
+            console.log(`[Context] No posts were fetched for ${post.author.did} to add to context.`);
+          }
+        } catch (error) {
+          console.error(`[Context] Error fetching Bluesky posts for ${post.author.did}:`, error);
+        }
+      }
+
+      const nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n${userBlueskyPostsContext}Please respond to the request in the most recent message in 300 characters or less. If user profile context was provided above, use it to inform your response if relevant. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`;
+
       console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
@@ -770,7 +835,7 @@ class LlamaBot extends BaseBot {
           model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
           messages: [
             { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` },
-            { role: "user", content: `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.` }
+            { role: "user", content: nemotronUserPrompt }
           ],
           temperature: 0.7, max_tokens: 150, stream: false
         })
@@ -801,10 +866,10 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
-            { role: "system", content: "You are an AI assistant that refines text for Bluesky posts. Re-write the user-provided text to meet these CRITICAL requirements: 1. The final text MUST be UNDER 300 characters. Aggressively shorten if necessary, preserving core meaning and persona. 2. Remove any quotation marks that make the text sound like a direct quote. 3. Ensure the character does not label their message with 'sent-by' identifiers. 4. Remove any double asterisks (they don't render as bold). 5. Otherwise, maintain the persona and core content of the original text. DO NOT mention this re-writing/formatting process in your response." },
+            { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. DO NOT rephrase, summarize, add, or remove any other content. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.1, // Lowered temperature for formatting
+          temperature: 0.1, // Temperature for formatting (already lowered)
           max_tokens: 150,
           stream: false
         })
