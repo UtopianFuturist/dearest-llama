@@ -393,7 +393,7 @@ class BaseBot {
                   } else {
                     // Flux failed after a safe prompt
                     console.log(`Flux failed to generate image for safe prompt: "${scoutResult.image_prompt}". Generating failure message with Scout.`);
-                    const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
+                    const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this, keeping the message under 150 characters. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
 
                     // Using generateResponse (which uses Nemotron + Scout filter) to craft this message.
                     // We pass a minimal context, as this is a system-initiated message.
@@ -932,7 +932,7 @@ Admin Instructions: "${trimmedAdminInstructions}"
           messages: [
             {
               role: "system",
-              content: "Re-write this output so that it doesn't include quotation marks like it's a quote, ensure the character doesn't label their message with sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the generated response content"
+              content: "You are an AI assistant that refines text for Bluesky posts. Re-write the user-provided text to meet these CRITICAL requirements: 1. The final text MUST be UNDER 300 characters. Aggressively shorten if necessary, preserving core meaning and persona. 2. Remove any quotation marks that make the text sound like a direct quote. 3. Ensure the character does not label their message with 'sent-by' identifiers. 4. Remove any double asterisks (they don't render as bold). 5. Otherwise, maintain the persona and core content of the original text. DO NOT mention this re-writing/formatting process in your response."
             },
             {
               role: "user",
