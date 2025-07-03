@@ -884,11 +884,13 @@ class LlamaBot extends BaseBot {
       }
 
       let userBlueskyPostsContext = "";
-      const userPostTextLower = post.record.text.toLowerCase();
-      const profileKeywords = ["my profile", "about me", "what do you think of me", "my posts", "my feed"];
+      // const userPostTextLower = post.record.text.toLowerCase(); // No longer needed for keywords
+      // const profileKeywords = ["my profile", "about me", "what do you think of me", "my posts", "my feed"]; // Remove keywords
 
-      if (profileKeywords.some(keyword => userPostTextLower.includes(keyword))) {
-        console.log(`[Context] Keywords detected for fetching profile context for DID: ${post.author.did}`);
+      const fetchContextDecision = await this.shouldFetchProfileContext(post.record.text);
+
+      if (fetchContextDecision) {
+        console.log(`[Context] Scout determined profile context should be fetched for DID: ${post.author.did}. Query: "${post.record.text}"`);
         try {
           let fetchedPostsCount = 0;
           let authorFeedCursor = undefined;
@@ -1096,6 +1098,52 @@ ${baseInstruction}`;
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  async shouldFetchProfileContext(userQueryText) {
+    if (!userQueryText || userQueryText.trim() === "") {
+      return false;
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = "Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about themselves, their posts, their online personality, their Bluesky account, or their life, in a way that their recent Bluesky activity could provide relevant context. Respond with only the word YES or the word NO.";
+    const userPrompt = `User query: '${userQueryText}'`;
+
+    console.log(`[IntentClassifier] Calling Scout to check if profile context is needed for query: "${userQueryText}"`);
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 5, // Enough for "YES" or "NO"
+          stream: false
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification. Query: "${userQueryText}". Error: ${errorText}`);
+        return false; // Default to not fetching context on error
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        console.log(`[IntentClassifier] Scout decision for query "${userQueryText}": "${decision}"`);
+        return decision === 'YES';
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout for intent classification. Query: "${userQueryText}". Data:`, JSON.stringify(data));
+      return false; // Default to not fetching context on unexpected format
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout for intent classification. Query: "${userQueryText}":`, error);
+      return false; // Default to not fetching context on error
+    }
   }
 
   async generateImage(prompt) {
