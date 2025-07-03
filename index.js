@@ -1035,23 +1035,28 @@ class LlamaBot extends BaseBot {
 
         let nemotronSearchPrompt = "";
         if (matches.length > 0) {
-          const topMatches = matches.slice(0, 3); // Take top 3
-          const resultsText = topMatches.map((match, idx) =>
-            `Match ${idx + 1}:\nAuthor: @${match.authorHandle}\nText: "${(match.text || "").substring(0, 150)}${ (match.text || "").length > 150 ? "..." : "" }"\nURL: https://bsky.app/profile/${match.authorHandle}/post/${match.uri.split('/').pop()}`
-          ).join("\n\n");
+          const topMatches = matches.slice(0, 1); // Focus on the single best match for now to simplify prompting for direct URL.
 
-          nemotronSearchPrompt = `I searched our conversation history based on your query: "${userQueryText}". I found the following matching post(s):\n\n${resultsText}\n\nIs this what you were looking for? If you want to refine the search, please provide more details.`;
-          if (topMatches.length < matches.length) {
-            nemotronSearchPrompt += `\n(I found ${matches.length} total matches, showing the top ${topMatches.length}.)`;
+          const matchDetailsForPrompt = topMatches.map(match => {
+            const postUrl = `https://bsky.app/profile/${match.authorHandle}/post/${match.uri.split('/').pop()}`;
+            const snippet = (match.text || "").substring(0, 100).replace(/\n/g, ' '); // Shorter snippet, no newlines
+            return `Post URL: ${postUrl}\nAuthor: @${match.authorHandle}\nSnippet: "${snippet}${ (match.text || "").length > 100 ? "..." : "" }"`;
+          }).join("\n\n");
+
+          nemotronSearchPrompt = `The user asked: "${userQueryText}".\n\nI found the following potentially relevant post from our conversation history:\n${matchDetailsForPrompt}\n\nPlease formulate a response to the user. State that you found a post that might match their request. CRITICALLY IMPORTANT: You MUST include the exact "Post URL" provided above in your response. Also, briefly mention the author and a snippet of the text. Ask the user if this is the post they were looking for.`;
+
+          if (matches.length > 1) { // If there were more matches than we're detailing
+            nemotronSearchPrompt += `\n(Note: I found ${matches.length} total relevant posts, but I'm showing you the most recent one. If this isn't it, try being more specific or asking about other matches.)`;
           }
+
         } else {
-          nemotronSearchPrompt = `I searched our conversation history based on your query: "${userQueryText}", but I couldn't find any posts that specifically matched your description. Perhaps you could try different keywords or describe it another way?`;
+          nemotronSearchPrompt = `The user asked: "${userQueryText}".\n\nI searched our conversation history but couldn't find any posts that specifically matched your description. Perhaps you could try different keywords or describe it another way? Please formulate a polite response to the user stating this.`;
         }
 
-        console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,200)}..."`);
+        console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
 
-        // Simplified NIM call for search history response
-        const searchSystemPrompt = "You are a helpful assistant. The user asked you to find something in your conversation history. Present the findings clearly and concisely based on the user's original query and the search results provided in the user message. If results were found, ask if it's what they were looking for. If not, politely state that.";
+        // System prompt for Nemotron when handling search results
+        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's query and the search results (either a found post with its URL and snippet, or a message that nothing was found). Your task is to formulate a natural, helpful, and concise reply to the user based on this information. If a post was found, YOU MUST include the provided Post URL directly in your response to the user. Also mention the author and a snippet of the text. Ask if it's the correct post. If nothing was found, state that clearly and politely.";
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
           method: 'POST',
