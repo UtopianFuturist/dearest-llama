@@ -187,28 +187,131 @@ class BaseBot {
       if (!context || context.length === 0) {
         console.warn(`Admin command: Context for post ${post.uri} is empty or could not be fetched.`);
         // Optionally, reply to the admin post with an error or status
-        return;
+        // For !post commands, context might not always be relevant if direct instructions are given.
+        // We'll let generateStandalonePostFromContext handle empty context if adminInstructions are present.
+        // return; // Removed this return to allow !post without deep context.
       }
 
-      const newPostText = await this.generateStandalonePostFromContext(context, adminInstructions);
+      let textGenerationInstructions = adminInstructions; // Default to full instructions
+      let imageGenPromptPart = ""; // Initialize image prompt part
+
+      if (adminInstructions && adminInstructions.includes('+image')) {
+        const parts = adminInstructions.split('+image');
+        textGenerationInstructions = parts[0].trim();
+        imageGenPromptPart = parts.length > 1 ? parts[1].trim() : "";
+      }
+
+      // Pass the potentially modified instructions for text generation
+      const newPostText = await this.generateStandalonePostFromContext(context, textGenerationInstructions);
 
       if (newPostText) {
         console.log(`Admin command: Generated new post text: "${newPostText}"`);
-        const postSuccess = await this.postToOwnFeed(newPostText);
+
+        // if (postSuccess) { // Will be handled after image logic
+        //   const confirmationMessage = `Admin command executed. I've posted the following to my feed: "${utils.truncateResponse(newPostText, 100)}"`;
+        //   await this.postReply(post, confirmationMessage);
+        //   console.log(`Sent confirmation reply to admin for post URI: ${post.uri}`);
+        // } else {
+        //   console.warn(`Admin command: postToOwnFeed failed for post URI: ${post.uri}. No confirmation reply sent.`);
+        // }
+      } else {
+        console.warn(`Admin command: generateStandalonePostFromContext returned no text for post ${post.uri}.`);
+        // If text generation fails, we might not want to proceed with image generation or posting.
+        // However, the plan implies trying to post image even if text is minimal.
+        // For now, let's assume if newPostText is null/empty, we might still proceed if an image is requested.
+      }
+
+      // ===== IMAGE GENERATION LOGIC FOR ADMIN COMMAND =====
+      let imageBase64 = null;
+      let imageAltText = "Generated image"; // Default alt text
+      let imageGenError = null;
+      let finalPostText = newPostText; // Initialize with potentially generated text
+
+      if (adminInstructions && adminInstructions.includes('+image')) {
+        const parts = adminInstructions.split('+image');
+        const textPromptPart = parts[0].trim(); // This was already passed to generateStandalonePostFromContext
+        const imageGenPromptPart = parts.length > 1 ? parts[1].trim() : "";
+
+        if (!finalPostText && !imageGenPromptPart) {
+          console.warn(`Admin command: !post+image used but both text and image prompts are effectively empty. Post URI: ${post.uri}`);
+          await this.postReply(post, "Admin command '!post+image' requires either text before '+image' or an image prompt after it.");
+          return;
+        }
+
+        if (imageGenPromptPart) {
+          console.log(`Admin command: Image requested. Prompt: "${imageGenPromptPart}"`);
+          const scoutResult = await this.processImagePromptWithScout(imageGenPromptPart);
+
+          if (!scoutResult.safe) {
+            imageGenError = scoutResult.reply_text || "Image prompt deemed unsafe.";
+            console.warn(`Admin command: Image prompt "${imageGenPromptPart}" deemed unsafe. Reason: ${imageGenError}`);
+          } else {
+            console.log(`Admin command: Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
+            imageBase64 = await this.generateImage(scoutResult.image_prompt);
+
+            if (imageBase64) {
+              console.log(`Admin command: Image generated successfully.`);
+              const describedAltText = await this.describeImageWithScout(imageBase64);
+              if (describedAltText) {
+                imageAltText = describedAltText;
+                console.log(`Admin command: Image described by Scout: "${imageAltText}"`);
+              } else {
+                console.warn(`Admin command: Scout failed to describe the image. Using default alt text.`);
+                // imageAltText remains "Generated image"
+              }
+              // If the original text prompt was empty, and we have an image, use alt text as post text.
+              if (!textPromptPart && !finalPostText && imageAltText !== "Generated image") {
+                  finalPostText = imageAltText;
+              } else if (!textPromptPart && !finalPostText) {
+                  finalPostText = "Here's the image you requested:";
+              }
+
+            } else {
+              imageGenError = "Failed to generate image.";
+              console.warn(`Admin command: Image generation failed for prompt: "${scoutResult.image_prompt}"`);
+            }
+          }
+        } else {
+          // '+image' was present but no actual prompt followed it.
+          console.log(`Admin command: '+image' specified, but no image prompt was provided. Will post text only if available.`);
+          // No imageGenError here, just proceed without an image.
+        }
+      }
+
+      // ===== POSTING LOGIC =====
+      if (finalPostText || imageBase64) { // Only post if there's something to post (text or image)
+        const postSuccess = await this.postToOwnFeed(finalPostText, imageBase64, imageAltText);
 
         if (postSuccess) {
-          const confirmationMessage = `Admin command executed. I've posted the following to my feed: "${utils.truncateResponse(newPostText, 100)}"`;
+          let confirmationMessage = `Admin command executed. I've posted to my feed.`;
+          if (finalPostText) {
+            confirmationMessage = `Admin command executed. I've posted the following to my feed: "${utils.truncateResponse(finalPostText, 100)}"`;
+          }
+          if (imageBase64 && imageGenError) { // Image was requested, but failed
+            confirmationMessage += ` (Note: Image generation failed: ${imageGenError})`;
+          } else if (imageBase64) {
+            confirmationMessage += ` (with an image)`;
+          } else if (adminInstructions.includes('+image') && imageGenError) { // Image requested, no image produced, and error exists
+             confirmationMessage += ` (Note: Image generation failed: ${imageGenError})`;
+          }
+
+
           await this.postReply(post, confirmationMessage);
           console.log(`Sent confirmation reply to admin for post URI: ${post.uri}`);
         } else {
           console.warn(`Admin command: postToOwnFeed failed for post URI: ${post.uri}. No confirmation reply sent.`);
-          // Optionally, send a different reply indicating failure to post to own feed
+          await this.postReply(post, "Admin command failed: Could not post to my own feed.");
         }
-        // this.repliedPosts.add(post.uri); // Removed from here
-      } else {
-        console.warn(`Admin command: generateStandalonePostFromContext returned no text for post ${post.uri}.`);
-        // Optionally, reply to the admin post with an error or status
+      } else if (imageGenError) { // No text, and image generation failed
+         console.warn(`Admin command: No text generated and image generation failed for post URI: ${post.uri}. Error: ${imageGenError}`);
+         await this.postReply(post, `Admin command failed: No text was generated and image generation failed: ${imageGenError}`);
+      } else if (!finalPostText && !adminInstructions.includes('+image')) {
+         // This case means original newPostText was null/empty and no image was requested.
+         // This is already logged by "generateStandalonePostFromContext returned no text"
+         await this.postReply(post, "Admin command failed: Could not generate any content for the post.");
       }
+      // this.repliedPosts.add(post.uri); // Already added at the start of the function
+
     } catch (error) {
       console.error(`Error handling admin command for post ${post.uri}:`, error);
       // Optionally, try to reply to the admin post with an error message
@@ -221,25 +324,82 @@ class BaseBot {
     return 'Placeholder post text generated from context by BaseBot.';
   }
 
-  async postToOwnFeed(text) {
-    console.log(`Attempting to post to own feed: "${text}"`); // This existing log is good.
+  async postToOwnFeed(text, imageBase64 = null, altText = "Generated image") { // Added imageBase64 and altText
+    // Ensure text is a string, even if null or undefined initially.
+    // If text is null/undefined and an image is present, we might use a default text or the altText.
+    // For now, truncateResponse will handle null by returning it, which is fine if an image exists.
+    const postText = text ? utils.truncateResponse(text) : (imageBase64 ? "" : null); // Ensure text is empty string if image exists but no text, or null if neither
+
+    if (postText === null && !imageBase64) {
+      console.warn(`[postToOwnFeed] Attempted to post with no text and no image. Aborting.`);
+      return false;
+    }
+
+    console.log(`Attempting to post to own feed. Text: "${postText}"`, imageBase64 ? `Image included (Alt: "${altText}")` : "No image.");
+
     try {
       RateLimit.check();
 
       const postObject = {
-        text: utils.truncateResponse(text),
-        // Optionally, specify language e.g., langs: ['en']
+        // text: utils.truncateResponse(text), // Handled by postText
         // createdAt: new Date().toISOString() // Usually handled by the server
       };
 
-      console.log(`[POST_TO_OWN_FEED_INVOKED] Timestamp: ${new Date().toISOString()}, Text: "${text}", Truncated Text: "${postObject.text}", PostObject: ${JSON.stringify(postObject)}`);
+      if (postText !== null) { // Only add text if it's not null
+        postObject.text = postText;
+      }
+
+
+      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+        console.log(`[postToOwnFeed] imageBase64 received, length: ${imageBase64.length}. Attempting to upload.`);
+        try {
+          const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+          console.log(`[postToOwnFeed] Converted base64 to Uint8Array, size: ${imageBytes.length} bytes.`);
+
+          if (imageBytes.length === 0) {
+            console.error('[postToOwnFeed] Image byte array is empty after conversion. Skipping image upload for this attempt.');
+          } else {
+            const uploadedImage = await this.agent.uploadBlob(imageBytes, {
+              encoding: 'image/png' // Assuming PNG
+            });
+            console.log('[postToOwnFeed] Successfully uploaded image to Bluesky:', JSON.stringify(uploadedImage));
+
+            if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+              postObject.embed = {
+                $type: 'app.bsky.embed.images',
+                images: [{
+                  image: uploadedImage.data.blob,
+                  alt: altText
+                }]
+              };
+              console.log(`[postToOwnFeed] Image embed object created with alt text: "${altText}"`);
+            } else {
+              console.error('[postToOwnFeed] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
+            }
+          }
+        } catch (uploadError) {
+          console.error('[postToOwnFeed] Error during image upload or embed creation:', uploadError);
+          // Decide if we should still attempt to post text-only or fail the whole post
+          // For now, if image upload fails, we'll let it try to post text-only if text exists.
+          // If text doesn't exist and image fails, it will be caught by the initial check.
+        }
+      } else if (imageBase64) {
+        console.warn(`[postToOwnFeed] imageBase64 was present but invalid. Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
+      }
+
+      // Final check: if after everything, postObject is empty (e.g. text was null, image failed to prepare embed), don't post.
+      if (!postObject.text && !postObject.embed) {
+          console.warn('[postToOwnFeed] Post object is empty (no text and no image embed). Aborting post.');
+          return false;
+      }
+
+      console.log(`[POST_TO_OWN_FEED_INVOKED] Timestamp: ${new Date().toISOString()}, PostObject: ${JSON.stringify(postObject)}`);
       const result = await this.agent.post(postObject);
-      console.log(`Successfully posted to own feed. New post URI: ${result.uri}`); // This existing log is good.
-      console.log(`[POST_TO_OWN_FEED_SUCCESS] Timestamp: ${new Date().toISOString()}, URI: ${result.uri}, Text: "${text}"`);
+      console.log(`Successfully posted to own feed. New post URI: ${result.uri}`);
+      console.log(`[POST_TO_OWN_FEED_SUCCESS] Timestamp: ${new Date().toISOString()}, URI: ${result.uri}, Content: ${JSON.stringify(postObject)}`);
       return true;
     } catch (error) {
       console.error('Error posting to own feed:', error);
-      // Do not add to repliedPosts here, as it's not a reply context
       return false;
     }
   }
