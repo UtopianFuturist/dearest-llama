@@ -170,33 +170,25 @@ class BaseBot {
       console.log(`[HANDLE_ADMIN_POST_COMMAND_PROCESSED_URI] Timestamp: ${new Date().toISOString()}, Added to repliedPosts: ${post.uri}`);
 
       const context = await this.getReplyContext(post);
-      // Not logging full context to reduce noise.
-      // if (!context || context.length === 0) {
-      //   console.warn(`Admin command: Context for post ${post.uri} is empty or could not be fetched (this might be fine for !post).`);
-      // }
 
       let textForLLM = commandContent;
       let imgPrompt = "";
 
       if (isImageCommand) {
         console.log(`[DEBUG_IMG_FLOW] isImageCommand is true. Initial commandContent for splitting: "${commandContent}"`);
-        // If isImageCommand is true, commandContent is the full string *after* "!post+image "
-        // This content might be "text part +image image part" or just "image part"
         const parts = commandContent.split('+image');
-        if (parts.length > 1 && commandContent.includes('+image')) { // Check if '+image' was indeed a separator in the content
+        if (parts.length > 1 && commandContent.includes('+image')) {
             textForLLM = parts[0].trim();
             imgPrompt = parts[1].trim();
-        } else { // Assumed that the entire commandContent is the image prompt if no internal '+image' separator
+        } else {
             textForLLM = "";
             imgPrompt = commandContent.trim();
         }
         console.log(`[DEBUG_IMG_FLOW] Determined for Image Command: textForLLM: "${textForLLM}", imgPrompt: "${imgPrompt}"`);
       } else {
-        // Not an image command, so textForLLM is just commandContent, imgPrompt remains empty.
         console.log(`[DEBUG_IMG_FLOW] isImageCommand is false. textForLLM set to commandContent: "${textForLLM}"`);
       }
 
-      // Initial check for completely empty prompts if an image was intended
       if (isImageCommand && !textForLLM && !imgPrompt) {
           console.warn(`Admin command: !post+image used but both text and image prompts are effectively empty after parsing. Post URI: ${post.uri}`);
           await this.postReply(post, "Admin command '!post+image' requires a valid image prompt or text for the post.");
@@ -216,7 +208,7 @@ class BaseBot {
       let imageAltText = "Generated image";
       let imageGenError = null;
 
-      if (isImageCommand) { // Use the boolean passed from monitor
+      if (isImageCommand) {
         console.log(`[DEBUG_IMG_BLOCK] Image processing initiated. Actual image prompt to use: "${imgPrompt}"`);
         if (imgPrompt && imgPrompt.length > 0) {
           console.log(`Admin command: Image requested. Passing to Scout. Prompt: "${imgPrompt}"`);
@@ -241,13 +233,12 @@ class BaseBot {
                 console.warn(`Admin command: Scout failed to describe the image. Using default alt text: "${imageAltText}"`);
               }
 
-              // If textForLLM was empty (e.g. from "!post+image just_image_prompt") AND LLM returned no text (finalPostText is null/empty)
               if (!textForLLM && (!finalPostText || finalPostText.trim() === "")) {
                 if (imageAltText !== "Generated image" && imageAltText.length > 0) {
                     finalPostText = imageAltText;
                     console.log(`[DEBUG_IMG_BLOCK] Used image alt text as finalPostText because textForLLM and newPostText were empty.`);
                 } else {
-                    finalPostText = "Here's an image I generated:"; // Fallback text
+                    finalPostText = "Here's an image I generated:";
                     console.log(`[DEBUG_IMG_BLOCK] Used generic message as finalPostText because textForLLM, newPostText were empty and alt text was default/empty.`);
                 }
               }
@@ -390,29 +381,25 @@ class BaseBot {
         try {
           const posts = await this.getRecentPosts();
           if (!posts.length) {
-            // console.log('No posts found'); // Reduce noise
             await utils.sleep(this.config.CHECK_INTERVAL);
             continue;
           }
           const latestPost = posts[0];
           if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
-            // console.log('Already processed this post, skipping...'); // Reduce noise
             await utils.sleep(this.config.CHECK_INTERVAL);
             continue;
           }
           lastCheckedPost = latestPost.uri;
 
-          let isAdminCmd = false;
+          let isAdminCmdHandled = false;
+
           if (latestPost.post &&
               latestPost.post.author &&
               latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
               latestPost.post.record &&
               latestPost.post.record.text &&
               latestPost.post.record.text.includes('!post')) {
-            isAdminCmd = true;
-          }
 
-          if (isAdminCmd) {
             const commandText = latestPost.post.record.text;
             let commandContent = "";
             let isImageCommand = false;
@@ -434,18 +421,17 @@ class BaseBot {
                 commandContent = commandSearchText.substring("!post ".length).trim();
                 console.log(`[DEBUG_MONITOR] Detected !post. Content to pass: "${commandContent}"`);
             } else {
-                // This means '!post' was in the text but not as a recognized prefix after potential mention.
-                // It will fall through to regular reply logic.
                 console.log(`[MONITOR] Admin post included '!post' but not as a recognized command prefix: "${commandSearchText}". Treating as regular mention.`);
-                isAdminCmd = false; // Force it to non-admin path
+                // isAdminCmdHandled remains false, will fall through to regular reply logic
             }
 
-            if (isAdminCmd) { // Check again in case it was invalidated
+            if (commandSearchText.startsWith("!post+image ") || commandSearchText.startsWith("!post ")) {
               await this.handleAdminPostCommand(latestPost.post, commandContent, isImageCommand);
+              isAdminCmdHandled = true;
             }
           }
 
-          if (!isAdminCmd) { // Regular reply logic if not an admin command or if admin command was malformed
+          if (!isAdminCmdHandled) {
             const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
             if (!alreadyReplied) {
               const imageRequestKeywords = [
@@ -1033,5 +1019,3 @@ async function startBots() {
 }
 
 startBots().catch(console.error);
-
-[end of index.js]
