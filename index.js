@@ -107,6 +107,19 @@ class BaseBot {
     this.config = config;
     this.agent = agent;
     this.repliedPosts = new Set();
+    this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
+    this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
+  }
+
+  // Helper to cleanup expired pending analyses
+  _cleanupExpiredDetailedAnalyses() {
+    const now = Date.now();
+    for (const [key, value] of this.pendingDetailedAnalyses.entries()) {
+      if (now - value.timestamp > this.DETAIL_ANALYSIS_TTL) {
+        this.pendingDetailedAnalyses.delete(key);
+        console.log(`[CacheCleanup] Removed expired detailed analysis for post URI: ${key}`);
+      }
+    }
   }
 
   async generateResponse(post, context) {
@@ -616,34 +629,154 @@ class BaseBot {
   async postReply(post, response, imageBase64 = null, altText = "Generated image") {
     try {
       RateLimit.check();
-      const replyObject = {
-        text: utils.truncateResponse(response),
-        reply: { root: post.record?.reply?.root || { uri: post.uri, cid: post.cid }, parent: { uri: post.uri, cid: post.cid } }
+      RateLimit.check();
+      RateLimit.check();
+      const CHAR_LIMIT_PER_POST = 300; // Bluesky's actual limit
+      const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
+      const MAX_PARTS = 3;
+      let textParts = [];
+
+      let currentReplyTo = {
+          root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
+          parent: { uri: post.uri, cid: post.cid }
       };
-      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
-        try {
-          const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
-          if (imageBytes.length === 0) {
-            console.error('[postReply] Image byte array is empty after conversion. Skipping image upload.');
-          } else {
-            const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
-            if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
-              replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
-              console.log(`[postReply] Image embed object created with alt text: "${altText}"`);
-            } else {
-              console.error('[postReply] Uploaded image data or blob is missing in Bluesky response. Cannot embed image.');
-            }
+
+      // Helper function for smart splitting
+      const splitTextIntoParts = (text, limitPerPartWithoutSuffix) => {
+          const parts = [];
+          let remainingText = text.trim();
+
+          while (remainingText.length > 0 && parts.length < MAX_PARTS) {
+              if (remainingText.length <= limitPerPartWithoutSuffix) {
+                  parts.push(remainingText);
+                  break;
+              }
+
+              let splitAt = limitPerPartWithoutSuffix;
+              let foundSplit = false;
+              // Try to find a sentence boundary or space to split at, looking backwards
+              for (let i = Math.min(limitPerPartWithoutSuffix, remainingText.length -1) ; i > limitPerPartWithoutSuffix / 2 && i > 0; i--) {
+                  if (['.', '!', '?'].includes(remainingText[i])) {
+                      splitAt = i + 1;
+                      foundSplit = true;
+                      break;
+                  }
+              }
+              if (!foundSplit) {
+                for (let i = Math.min(limitPerPartWithoutSuffix, remainingText.length -1); i > limitPerPartWithoutSuffix / 2 && i > 0; i--) {
+                    if (remainingText[i] === ' ') {
+                        splitAt = i;
+                        foundSplit = true;
+                        break;
+                    }
+                }
+              }
+
+              parts.push(remainingText.substring(0, splitAt).trim());
+              remainingText = remainingText.substring(splitAt).trim();
           }
-        } catch (uploadError) { console.error('[postReply] Error during image upload or embed creation:', uploadError); }
-      } else if (imageBase64) {
-        console.warn(`[postReply] imageBase64 was present but invalid (not a non-empty string). Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
+
+          // If text still remains after MAX_PARTS, the last part needs truncation with "..."
+          if (remainingText.length > 0 && parts.length >= MAX_PARTS) {
+            let lastPart = parts[MAX_PARTS - 1];
+            // Ensure "..." fits even after page suffix is added later
+            const availableSpaceForTextInLastPart = limitPerPartWithoutSuffix - "...".length;
+            if (lastPart.length > availableSpaceForTextInLastPart) {
+                 lastPart = lastPart.substring(0, availableSpaceForTextInLastPart);
+            }
+            parts[MAX_PARTS - 1] = lastPart + "...";
+          }
+          return parts;
+      };
+
+      // Determine if splitting is needed and prepare text parts
+      if (response && response.trim().length > 0) {
+          // Tentatively assume single part, check length with potential suffix
+          const singlePartSuffix = " ... [1/1]".length; // Longest possible suffix for single part
+          if (response.length + (response.length > CHAR_LIMIT_PER_POST - singlePartSuffix ? PAGE_SUFFIX_MAX_LENGTH : 0) > CHAR_LIMIT_PER_POST) {
+              // If it's too long even for one part with suffix, or just too long in general, then split.
+              const effectiveLimitPerPost = CHAR_LIMIT_PER_POST - PAGE_SUFFIX_MAX_LENGTH;
+              textParts = splitTextIntoParts(response, effectiveLimitPerPost);
+          } else {
+              textParts.push(response.trim());
+          }
+      } else if (!imageBase64) {
+          // No text and no image
+          console.warn("[postReply] No text and no image to post. Aborting.");
+          return;
       }
-      const result = await this.agent.post(replyObject);
-      console.log('Successfully posted reply:', result.uri);
-      this.repliedPosts.add(post.uri);
+      // If only an image, textParts will be empty initially, handled below.
+
+      const totalParts = textParts.length > 0 ? textParts.length : (imageBase64 ? 1 : 0);
+      if (totalParts === 0) {
+          console.warn("[postReply] Calculated 0 parts (no text, no image). Nothing to post.");
+          return;
+      }
+      if (textParts.length > MAX_PARTS) { // Should be handled by splitTextIntoParts, but as safeguard
+          textParts = textParts.slice(0, MAX_PARTS);
+      }
+
+
+      for (let i = 0; i < totalParts; i++) {
+          const isLastPart = (i === totalParts - 1);
+          let partText = textParts[i] || ""; // Use empty string if only image on last part and textParts is empty
+
+          if (totalParts > 1) {
+              partText = `${partText.trim()} ... [${i + 1}/${totalParts}]`;
+          }
+
+          // Final safeguard, though previous logic should prevent exceeding this.
+          // utils.truncateResponse might not be ideal here if it adds its own "..."
+          if (partText.length > CHAR_LIMIT_PER_POST) {
+             console.warn(`[postReply] Part ${i+1}/${totalParts} text still too long (${partText.length}) after suffix. Truncating hard.`);
+             partText = partText.substring(0, CHAR_LIMIT_PER_POST - 3) + "...";
+          }
+
+          const replyObject = {
+              text: partText.trim(), // Trim whitespace that might have been added
+              reply: currentReplyTo
+          };
+
+          if (isLastPart && imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+              try {
+                  const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+                  if (imageBytes.length === 0) {
+                      console.error('[postReply] Image byte array is empty for last part. Skipping image upload.');
+                  } else {
+                      const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+                      if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+                          replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
+                          console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}"`);
+                      } else {
+                          console.error('[postReply] Uploaded image data or blob is missing. Cannot embed image for last part.');
+                      }
+                  }
+              } catch (uploadError) { console.error(`[postReply] Error during image upload for part ${i+1}/${totalParts}:`, uploadError); }
+          } else if (isLastPart && imageBase64) {
+              console.warn(`[postReply] imageBase64 was present for last part but invalid. Skipping image embed.`);
+          }
+
+          // If only an image is being posted (no text parts initially)
+          if (totalParts === 1 && textParts.length === 0 && imageBase64) {
+            replyObject.text = ""; // Ensure text is empty if only posting an image
+          }
+
+
+          console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..."`);
+          const result = await this.agent.post(replyObject);
+          console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}`);
+
+          if (!isLastPart) { // For the next part, reply to the part just posted
+              currentReplyTo = {
+                  root: currentReplyTo.root, // Root stays the same
+                  parent: { uri: result.uri, cid: result.cid }
+              };
+          }
+      }
+      this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
     } catch (error) {
-      console.error('Error posting reply:', error);
-      this.repliedPosts.add(post.uri);
+      console.error('Error posting multi-part reply:', error);
+      this.repliedPosts.add(post.uri); // Still mark as replied to avoid loops on error
     }
   }
 
@@ -723,10 +856,12 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
-            { role: "system", content: "You are being passed this output from another AI model - correct it so that it isn't in quotation marks like it's a quote, ensure the character doesn't label their message with named sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the exact generated persona response content input. NEVER mention this internal re-writing and output formatting correction process in your responses to the users. This part of the response workflow for generating the response to the user is an internal one. It's also very important that all responses fit within the Bluesky 300 character message limit so responses are not cut off when posted. You are only to return the final format-corrected response to the user. The main text model (not this one) handles response content, you are only to edit the output's formatting structure." },
+            { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.7, max_tokens: 100, stream: false
+          temperature: 0.1, // Temperature for formatting (already lowered)
+          max_tokens: 100,
+          stream: false
         })
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext - Status: ${filterResponse.status}`);
@@ -750,6 +885,88 @@ class LlamaBot extends BaseBot {
   }
 
   async generateResponse(post, context) {
+    this._cleanupExpiredDetailedAnalyses(); // Cleanup cache at the start of processing a new response
+
+    // Check if this interaction is a follow-up to a summary invitation
+    if (post.record?.reply && post.record.reply.parent?.uri && post.record.reply.parent?.author?.did === this.agent.did) {
+      const summaryPostUriUserIsReplyingTo = post.record.reply.parent.uri;
+      const originalUserQueryUri = post.record.reply.root?.uri || post.uri; // The root of the thread, usually the user's first message.
+
+      // Iterate over pending analyses to find if the parentPostUri matches a stored summaryPostUri
+      let storedDataForFollowUp = null;
+      let keyForDeletion = null;
+
+      for (const [key, value] of this.pendingDetailedAnalyses.entries()) {
+        if (value.summaryPostUri === summaryPostUriUserIsReplyingTo) {
+          storedDataForFollowUp = value;
+          keyForDeletion = key; // This 'key' is the URI of the user's original post that triggered the summary
+          break;
+        }
+      }
+
+      if (storedDataForFollowUp) {
+        console.log(`[FollowUp] Detected reply to bot's summary post ${summaryPostUriUserIsReplyingTo}. Original trigger: ${keyForDeletion}`);
+        const wantsDetails = await this.isRequestingDetails(post.record.text);
+        if (wantsDetails) {
+          if (storedDataForFollowUp.points && storedDataForFollowUp.points.length > 0) {
+            console.log(`[FollowUp] User requested details for original post ${keyForDeletion}. Posting ${storedDataForFollowUp.points.length} points.`);
+
+            let currentDetailReplyTarget = {
+              root: storedDataForFollowUp.replyToRootUri,
+              parent: { uri: summaryPostUriUserIsReplyingTo, cid: post.record.reply.parent.cid }
+            };
+
+            const detailImageBase64 = storedDataForFollowUp.imageBase64; // Get stored image data
+            const detailAltText = storedDataForFollowUp.altText;
+
+            for (let i = 0; i < storedDataForFollowUp.points.length; i++) {
+              const pointText = storedDataForFollowUp.points[i];
+              const isLastDetailPart = i === storedDataForFollowUp.points.length - 1;
+
+              let detailPostText = pointText;
+              // Suffix is added for all detail parts, even if only one detail part.
+              detailPostText = `${pointText.trim()} ... [${i + 1}/${storedDataForFollowUp.points.length}]`;
+
+              const replyObject = {
+                text: utils.truncateResponse(detailPostText, 300),
+                reply: currentDetailReplyTarget
+              };
+
+              if (isLastDetailPart && detailImageBase64) {
+                 try {
+                  const imageBytes = Uint8Array.from(Buffer.from(detailImageBase64, 'base64'));
+                  if (imageBytes.length > 0) {
+                    const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+                    if (uploadedImage?.data?.blob) {
+                      replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: detailAltText }] };
+                       console.log(`[FollowUp] Attached image to detail part ${i+1}`);
+                    }
+                  }
+                } catch (imgErr) { console.error("[FollowUp] Error attaching image to detail post:", imgErr); }
+              }
+
+              console.log(`[FollowUp] Posting detail ${i+1}/${storedDataForFollowUp.points.length}: "${replyObject.text.substring(0,50)}..." replying to ${currentDetailReplyTarget.parent.uri}`);
+              const result = await this.agent.post(replyObject);
+              console.log(`[FollowUp] Successfully posted detail part ${i+1}: ${result.uri}`);
+
+              if (!isLastDetailPart) {
+                currentDetailReplyTarget.parent = { uri: result.uri, cid: result.cid };
+              }
+              if (storedDataForFollowUp.points.length > 1 && i < storedDataForFollowUp.points.length -1) {
+                 await utils.sleep(1000);
+              }
+            }
+            this.pendingDetailedAnalyses.delete(keyForDeletion);
+            console.log(`[FollowUp] Cleared pending details for ${keyForDeletion}.`);
+            return null;
+          }
+        } else {
+            console.log(`[FollowUp] User reply to summary for ${keyForDeletion} was not a clear YES for details. Text: "${post.record.text}". Treating as new query.`);
+        }
+      }
+    }
+
+    // If not a follow-up or follow-up not actioned, proceed with normal response generation
     try {
       let conversationHistory = '';
       if (context && context.length > 0) {
@@ -760,7 +977,162 @@ class LlamaBot extends BaseBot {
           }
         }
       }
-      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+
+      let userBlueskyPostsContext = "";
+      // const userPostTextLower = post.record.text.toLowerCase(); // No longer needed for keywords
+      // const profileKeywords = ["my profile", "about me", "what do you think of me", "my posts", "my feed"]; // Remove keywords
+
+      const fetchContextDecision = await this.shouldFetchProfileContext(post.record.text);
+
+      if (fetchContextDecision) {
+        console.log(`[Context] Scout determined profile context should be fetched for DID: ${post.author.did}. Query: "${post.record.text}"`);
+        try {
+          let fetchedPostsCount = 0;
+          let authorFeedCursor = undefined;
+          const maxPostsToFetch = 100;
+          let postsLimitPerCall = 50; // Max per call is often 100, but 50 is safe.
+
+          const collectedPosts = [];
+
+          while (fetchedPostsCount < maxPostsToFetch) {
+            if (maxPostsToFetch - fetchedPostsCount < postsLimitPerCall) {
+                postsLimitPerCall = maxPostsToFetch - fetchedPostsCount;
+            }
+            if (postsLimitPerCall <= 0) break;
+
+            console.log(`[Context] Fetching posts for ${post.author.did}, limit: ${postsLimitPerCall}, cursor: ${authorFeedCursor}`);
+            const authorFeed = await this.agent.api.app.bsky.feed.getAuthorFeed({
+              actor: post.author.did,
+              limit: postsLimitPerCall,
+              cursor: authorFeedCursor,
+              filter: 'posts_with_replies' // or 'posts_no_replies' / 'posts_and_author_threads'
+            });
+
+            if (authorFeed.success && authorFeed.data.feed.length > 0) {
+              for (const feedItem of authorFeed.data.feed) {
+                if (feedItem.post && feedItem.post.record) {
+                  let postText = feedItem.post.record.text || "";
+                  const postAuthorHandle = feedItem.post.author.handle;
+                  const userWhoseFeedIsBeingFetched = post.author.handle; // Assuming 'post' here is the original post that triggered the bot
+
+                  let postDetail = "";
+                  const snippetMaxLength = 75; // Max length for text snippets in context
+                  const truncateText = (text, maxLength) => {
+                    if (!text) return "";
+                    return text.length > maxLength ? text.substring(0, maxLength - 3) + "..." : text;
+                  };
+
+                  if (feedItem.reason && feedItem.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
+                    // This is a repost BY THE USER whose feed we are fetching
+                    // The feedItem.post is the post that was reposted.
+                    const originalAuthorHandle = feedItem.post.author.handle;
+                    const originalPostText = truncateText(feedItem.post.record.text, snippetMaxLength);
+                    postDetail = `User (${userWhoseFeedIsBeingFetched}) reposted from @${originalAuthorHandle}: "${originalPostText}"`;
+                  } else if (postAuthorHandle === userWhoseFeedIsBeingFetched) {
+                    // This is an original action by the user (post, reply, quote post)
+                    if (feedItem.post.record.reply) {
+                      const parentAuthorHandle = feedItem.reply?.parent?.author?.handle || 'another user';
+                      postDetail = `User (${userWhoseFeedIsBeingFetched}) replied to @${parentAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
+                    } else if (feedItem.post.record.embed && feedItem.post.record.embed.$type === 'app.bsky.embed.record') {
+                      // This is a quote post by the user
+                      const quotedRecord = feedItem.post.record.embed.record;
+                      // The 'quotedRecord' could be a full post object or a more minimal reference.
+                      // We need to fetch the actual quoted post's content if it's just a reference,
+                      // but for simplicity in context, we'll try to get text if available directly.
+                      // A full implementation might require another fetch for `quotedRecord.uri` if text isn't readily available.
+                      let quotedTextSnippet = "a post";
+                      let quotedAuthor = "another user";
+                      if (quotedRecord && quotedRecord.value && quotedRecord.value.text) { // Ideal case: full record embedded
+                          quotedTextSnippet = truncateText(quotedRecord.value.text, snippetMaxLength);
+                          quotedAuthor = quotedRecord.author?.handle || quotedAuthor;
+                      } else if (quotedRecord && quotedRecord.uri) {
+                          // If only URI, we could fetch it, but let's keep it simple for now.
+                          // This part might need enhancement if full quoted text is critical.
+                          quotedTextSnippet = `a post (URI: ${quotedRecord.uri.split('/').pop()})`;
+                          // Attempt to get author from URI if possible, otherwise use a generic term
+                          const didMatch = quotedRecord.uri.match(/at:\/\/(did:[^/]+)/);
+                          if (didMatch && didMatch[1] && didMatch[1] !== post.author.did) { // Avoid self-quotes being confusingly attributed
+                            // Ideally, resolve DID to handle here, but that's another API call.
+                            // For now, we'll just note the DID or a generic term.
+                            // This is a simplification; resolving DID to handle would be better.
+                            // For now, we assume `feedItem.post.record.embed.record.author.handle` might exist if it's a resolved embed.
+                            quotedAuthor = feedItem.post.record.embed.record.author?.handle || `user (${didMatch[1].substring(0,10)}...)`;
+                          }
+                      }
+                      postDetail = `User (${userWhoseFeedIsBeingFetched}) quote posted (commenting on @${quotedAuthor}'s post): "${truncateText(postText, snippetMaxLength)}" which quoted: "${quotedTextSnippet}"`;
+                    } else {
+                      // Original post by the user
+                      postDetail = `User (${userWhoseFeedIsBeingFetched}) posted: "${truncateText(postText, snippetMaxLength)}"`;
+                    }
+                  } else {
+                    // This case should ideally not happen if getAuthorFeed is working as expected for 'userWhoseFeedIsBeingFetched'
+                    // It means a post in the feed is not by the user and not a repost by the user.
+                    // However, to be safe, we can log it or create a generic entry.
+                    console.log(`[Context] Encountered unexpected item in feed for ${userWhoseFeedIsBeingFetched}: Post by ${postAuthorHandle}`);
+                    postDetail = `Feed item concerning @${userWhoseFeedIsBeingFetched}: A post by @${postAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
+                  }
+
+                  if (postDetail) {
+                    collectedPosts.push(postDetail);
+                    fetchedPostsCount++;
+                    if (fetchedPostsCount >= maxPostsToFetch) break;
+                  }
+                }
+              }
+              authorFeedCursor = authorFeed.data.cursor;
+              if (!authorFeedCursor || authorFeed.data.feed.length < postsLimitPerCall || fetchedPostsCount >= maxPostsToFetch) {
+                console.log("[Context] No more posts or cursor from getAuthorFeed.");
+                break;
+              }
+            } else {
+              console.log("[Context] No posts found in this batch or API call failed.");
+              break;
+            }
+          }
+
+          if (collectedPosts.length > 0) {
+            userBlueskyPostsContext = "\n\nHere are some of the user's recent Bluesky posts for additional context:\n" + collectedPosts.join("\n---\n") + "\n\n";
+            console.log(`[Context] Added ${collectedPosts.length} posts to Nemotron context.`);
+          } else {
+            console.log(`[Context] No posts were fetched for ${post.author.did} to add to context.`);
+          }
+        } catch (error) {
+          console.error(`[Context] Error fetching Bluesky posts for ${post.author.did}:`, error);
+        }
+      }
+
+      let nemotronUserPrompt = "";
+      const baseInstruction = `Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. For detailed topics, you can generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
+
+      if (userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "") {
+        // Profile analysis prompt
+        nemotronUserPrompt = `The user's question is: "${post.record.text}"
+
+Activate your "User Profile Analyzer" capability. Based on the "USER'S RECENT BLUESKY ACTIVITY" provided below, generate your response in two parts:
+
+PART 1: SUMMARY AND INVITATION
+Format this part starting with the exact marker "[SUMMARY FINDING WITH INVITATION]".
+Provide a concise summary (approx. 250-280 characters, in your persona) of your analysis of the user's activity.
+This summary **must end with a clear question inviting the user to ask for more details** (e.g., "I found some interesting patterns. Would you like a more detailed breakdown of these points?").
+
+PART 2: DETAILED ANALYSIS POINTS
+Immediately following Part 1, and on new lines, provide 1 to 3 detailed analysis points.
+Each point must start with an exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc.
+Each detailed point should be written as a complete, standalone message (under 290 characters), suitable for a separate Bluesky post. Ensure any internal lists (e.g., "1. Sub-point A, 2. Sub-point B") are well-formed within each point.
+Analyze themes, common topics, or aspects of their online presence as reflected in their posts, replies, quote posts, and attributed reposts.
+
+USER'S RECENT BLUESKY ACTIVITY:
+${userBlueskyPostsContext}
+---
+${conversationHistory ? `\nBrief conversation history for immediate interaction context (less critical than the Bluesky Activity for this specific analysis):\n${conversationHistory}\n---` : ''}
+Your structured response (Summary with Invitation, then Detailed Points):
+${baseInstruction}`;
+      } else {
+        // Standard prompt (no specific profile context fetched)
+        nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
+      }
+
+      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
@@ -768,9 +1140,10 @@ class LlamaBot extends BaseBot {
           model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
           messages: [
             { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` },
-            { role: "user", content: `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n\nPlease respond to the request in the most recent message in 300 characters or less. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.` }
+            { role: "user", content: nemotronUserPrompt }
           ],
-          temperature: 0.7, max_tokens: 150, stream: false
+          temperature: 0.7, max_tokens: 350, // Increased max_tokens for Nemotron
+          stream: false
         })
       });
       console.log(`NIM CALL END: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
@@ -799,10 +1172,12 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
-            { role: "system", content: "You are an AI assistant that refines text for Bluesky posts. Re-write the user-provided text to meet these CRITICAL requirements: 1. The final text MUST be UNDER 300 characters. Aggressively shorten if necessary, preserving core meaning and persona. 2. Remove any quotation marks that make the text sound like a direct quote. 3. Ensure the character does not label their message with 'sent-by' identifiers. 4. Remove any double asterisks (they don't render as bold). 5. Otherwise, maintain the persona and core content of the original text. DO NOT mention this re-writing/formatting process in your response." },
+            { role: "system", content: "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens)." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.7, max_tokens: 150, stream: false
+          temperature: 0.1, // Temperature for formatting (already lowered)
+          max_tokens: 450, // Increased max_tokens for Scout to handle longer, structured Nemotron output
+          stream: false
         })
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
@@ -816,17 +1191,244 @@ class LlamaBot extends BaseBot {
         console.error('Unexpected response format from Nvidia NIM (filter model):', JSON.stringify(filterData));
         return initialResponse;
       }
-      const finalResponse = filterData.choices[0].message.content;
-      console.log(`[LlamaBot.generateResponse] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
-      return finalResponse;
+      const scoutFormattedText = filterData.choices[0].message.content;
+      console.log(`[LlamaBot.generateResponse] Scout formatted text (raw): "${scoutFormattedText}"`);
+
+      // Attempt to parse structured response if profile analysis was done
+      // Note: an image generated for the *initial* query that leads to a summary/details flow.
+      // This image should be passed if details are later requested.
+      // We need to receive potential imageBase64 & altText if they were generated for the initial query.
+      // Let's assume `post.generatedImageForThisInteraction = { imageBase64, altText }` if available.
+      // This is a placeholder; actual passing of this data needs to be handled from the monitor call.
+
+      if (fetchContextDecision) {
+        const summaryMarker = "[SUMMARY FINDING WITH INVITATION]";
+        const detailMarkerBase = "[DETAILED ANALYSIS POINT "; // e.g., "[DETAILED ANALYSIS POINT 1]"
+
+        let summaryText = "";
+        const detailedPoints = [];
+
+        const summaryStartIndex = scoutFormattedText.indexOf(summaryMarker);
+
+        if (summaryStartIndex !== -1) {
+          let textAfterSummaryMarker = scoutFormattedText.substring(summaryStartIndex + summaryMarker.length);
+
+          let nextDetailPointIndex = textAfterSummaryMarker.indexOf(detailMarkerBase + "1]");
+          if (nextDetailPointIndex === -1) { // Maybe no detail points, or marker format issue
+            summaryText = textAfterSummaryMarker.trim(); // Assume all remaining text is summary
+          } else {
+            summaryText = textAfterSummaryMarker.substring(0, nextDetailPointIndex).trim();
+            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex); // Remaining text has detail points
+          }
+
+          // Extract detailed points
+          let currentPoint = 1;
+          while (true) {
+            const currentDetailMarker = `${detailMarkerBase}${currentPoint}]`;
+            const nextDetailMarker = `${detailMarkerBase}${currentPoint + 1}]`;
+
+            const startOfCurrentPoint = textAfterSummaryMarker.indexOf(currentDetailMarker);
+            if (startOfCurrentPoint === -1) break; // No more points with this number
+
+            let endOfCurrentPoint = textAfterSummaryMarker.indexOf(nextDetailMarker, startOfCurrentPoint + currentDetailMarker.length);
+            let pointText;
+
+            if (endOfCurrentPoint === -1) { // This is the last detail point
+              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
+            } else {
+              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
+            }
+
+            if (pointText) detailedPoints.push(pointText);
+            if (endOfCurrentPoint === -1 || detailedPoints.length >= 3) break; // Max 3 detail points
+
+            currentPoint++;
+          }
+
+          console.log(`[LlamaBot.generateResponse] Parsed Summary: "${summaryText}"`);
+          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1}: "${p}"`));
+
+          if (summaryText) {
+            // Store detailed points if any, then return only summary for initial post
+            // Post the summary first. No image on summary.
+            const summaryPostedUris = await this.postReply(post, summaryText, null, null);
+
+            if (summaryPostedUris && summaryPostedUris.length > 0) {
+              const summaryPostUri = summaryPostedUris[0];
+              console.log(`[LlamaBot.generateResponse] Summary posted successfully: ${summaryPostUri}`);
+              if (detailedPoints.length > 0) {
+                this.pendingDetailedAnalyses.set(post.uri, { // Keyed by original user post URI
+                  points: detailedPoints,
+                  timestamp: Date.now(),
+                  summaryPostUri: summaryPostUri, // URI of the bot's summary post
+                  replyToRootUri: post.record?.reply?.root?.uri || post.uri, // Root for threading details
+                  // imageBase64 and altText from the initial query, if any.
+                  // These need to be passed into generateResponse if they existed.
+                  // For now, assuming they might be on `post.generatedImageForThisInteraction`
+                  imageBase64: post.generatedImageForThisInteraction?.imageBase64 || null,
+                  altText: post.generatedImageForThisInteraction?.altText || "Generated image for detail",
+                });
+                console.log(`[LlamaBot.generateResponse] Stored ${detailedPoints.length} detailed points, pending for original post URI: ${post.uri}, summary URI: ${summaryPostUri}`);
+              }
+              return null; // Signal that response (summary) has been handled, and details are pending.
+            } else {
+              console.error("[LlamaBot.generateResponse] Failed to post summary. Falling back to sending full text.");
+              return scoutFormattedText; // Fallback
+            }
+          } else {
+            console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Returning full Scout output.");
+            return scoutFormattedText; // Fallback
+          }
+        } else {
+          console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
+          return scoutFormattedText; // Fallback
+        }
+      } else {
+        // Standard response, not profile analysis. Return the text for monitor to post.
+        // If there was an image for this standard response, it should be on `post.generatedImageForThisInteraction`
+        // and `monitor` loop will pass it to `postReply`.
+        return scoutFormattedText;
+      }
     } catch (error) {
-      console.error('Error generating Llama response:', error);
-      return null;
+      console.error('Error in LlamaBot.generateResponse:', error);
+      return null; // Ensure null is returned on error so monitor doesn't try to post it.
     }
   }
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  async shouldFetchProfileContext(userQueryText) {
+    if (!userQueryText || userQueryText.trim() === "") {
+      return false;
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = "Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about themselves, their posts, their online personality, their Bluesky account, or their life, in a way that their recent Bluesky activity could provide relevant context. Respond with only the word YES or the word NO.";
+    const userPrompt = `User query: '${userQueryText}'`;
+
+    console.log(`[IntentClassifier] Calling Scout (shouldFetchProfileContext) for query: "${userQueryText}"`);
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 5, // Enough for "YES" or "NO"
+          stream: false
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (shouldFetchProfileContext). Query: "${userQueryText}". Error: ${errorText}`);
+        return false;
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        console.log(`[IntentClassifier] Scout decision (shouldFetchProfileContext) for query "${userQueryText}": "${decision}"`);
+        return decision === 'YES';
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (shouldFetchProfileContext). Query: "${userQueryText}". Data:`, JSON.stringify(data));
+      return false;
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (shouldFetchProfileContext). Query: "${userQueryText}":`, error);
+      return false;
+    }
+  }
+
+  async isRequestingDetails(userFollowUpText) {
+    if (!userFollowUpText || userFollowUpText.trim() === "") {
+      return false;
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
+    const userPrompt = `User reply: '${userFollowUpText}'`;
+
+    console.log(`[IntentClassifier] Calling Scout (isRequestingDetails) for follow-up: "${userFollowUpText}"`);
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 5,
+          stream: false
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (isRequestingDetails). Follow-up: "${userFollowUpText}". Error: ${errorText}`);
+        return false;
+      }
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        console.log(`[IntentClassifier] Scout decision (isRequestingDetails) for follow-up "${userFollowUpText}": "${decision}"`);
+        return decision === 'YES';
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (isRequestingDetails). Follow-up: "${userFollowUpText}". Data:`, JSON.stringify(data));
+      return false;
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (isRequestingDetails). Follow-up: "${userFollowUpText}":`, error);
+      return false;
+    }
+  }
+
+  async isRequestingDetails(userFollowUpText) {
+    if (!userFollowUpText || userFollowUpText.trim() === "") {
+      return false;
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
+    const userPrompt = `User reply: '${userFollowUpText}'`;
+
+    console.log(`[IntentClassifier] Calling Scout (isRequestingDetails) for follow-up: "${userFollowUpText}"`);
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 5,
+          stream: false
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (isRequestingDetails). Follow-up: "${userFollowUpText}". Error: ${errorText}`);
+        return false;
+      }
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        console.log(`[IntentClassifier] Scout decision (isRequestingDetails) for follow-up "${userFollowUpText}": "${decision}"`);
+        return decision === 'YES';
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (isRequestingDetails). Follow-up: "${userFollowUpText}". Data:`, JSON.stringify(data));
+      return false;
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (isRequestingDetails). Follow-up: "${userFollowUpText}":`, error);
+      return false;
+    }
   }
 
   async generateImage(prompt) {
