@@ -1654,7 +1654,7 @@ ${baseInstruction}`;
               };
 
               // Temporarily commenting out complex embed processing to isolate syntax error
-              /*
+              // Removed /*
               if (item.post.embed) {
                 const embed = item.post.embed;
                 if (embed.$type === 'app.bsky.embed.images#view' || embed.$type === 'app.bsky.embed.images') {
@@ -1726,7 +1726,7 @@ ${baseInstruction}`;
                   }
                 }
               }
-              */
+              // Removed */
               actorPosts.push(postToAdd);
               fetchedCount++;
             } // Ensures if(isRelevant) is properly closed here
