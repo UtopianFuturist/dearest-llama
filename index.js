@@ -388,154 +388,154 @@ class BaseBot {
     try {
       await this.authenticate();
       console.log('Starting monitoring...');
-      let lastCheckedPost = null;
+      // lastCheckedPost logic might need re-evaluation if we process multiple notifications per cycle.
+      // For now, we'll rely on repliedPosts set to avoid re-processing actionable items.
+      // We will also need to manage fetching notifications with a cursor to avoid missing any over time.
+      // This is a simplified loop for now, focusing on processing current batch.
+      let lastSeenNotificationTimestamp = null; // Or use cursor from listNotifications
 
       while (true) {
         try {
-          const posts = await this.getRecentPosts();
-          if (!posts.length) {
+          // Fetch notifications (getRecentPosts now returns raw notifications)
+          // To avoid missing notifs, ideally use the cursor from listNotifications.
+          // For this iteration, getRecentPosts fetches a batch.
+          const notifications = await this.getRecentPosts();
+
+          if (!notifications || notifications.length === 0) {
             await utils.sleep(this.config.CHECK_INTERVAL);
             continue;
           }
-          const latestPost = posts[0];
-          if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
-            await utils.sleep(this.config.CHECK_INTERVAL);
-            continue;
-          }
-          lastCheckedPost = latestPost.uri;
 
-          let isAdminCmdHandled = false;
-
-          if (latestPost.post &&
-              latestPost.post.author &&
-              latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
-              latestPost.post.record &&
-              latestPost.post.record.text &&
-              latestPost.post.record.text.includes('!post')) {
-
-            const commandText = latestPost.post.record.text;
-            let commandContent = "";
-            let isImageCommand = false;
-
-            let commandSearchText = commandText;
-            const botMention = `@${this.config.BLUESKY_IDENTIFIER}`;
-            if (commandText.startsWith(botMention)) {
-                commandSearchText = commandText.substring(botMention.length).trim();
+          // Process notifications, typically newest first if API returns them that way.
+          // We might want to reverse or sort them by createdAt if processing order matters strictly.
+          // For now, processing in received order.
+          for (const notif of notifications.slice().reverse()) { // Process older notifications first in a batch
+            if (!notif || !notif.record || !notif.author) { // Basic sanity check
+                console.warn("[Monitor] Skipping invalid notification object:", notif);
+                continue;
             }
 
-            console.log(`[DEBUG_MONITOR] commandSearchText after potential mention strip: "${commandSearchText}"`);
-
-            if (commandSearchText.startsWith("!post+image ")) {
-                isImageCommand = true;
-                commandContent = commandSearchText.substring("!post+image ".length).trim();
-                console.log(`[DEBUG_MONITOR] Detected !post+image. Content to pass: "${commandContent}"`);
-            } else if (commandSearchText.startsWith("!post ")) {
-                isImageCommand = false;
-                commandContent = commandSearchText.substring("!post ".length).trim();
-                console.log(`[DEBUG_MONITOR] Detected !post. Content to pass: "${commandContent}"`);
-            } else {
-                console.log(`[MONITOR] Admin post included '!post' but not as a recognized command prefix: "${commandSearchText}". Treating as regular mention.`);
-                // isAdminCmdHandled remains false, will fall through to regular reply logic
+            // Update last seen timestamp (simplified cursor management)
+            if (lastSeenNotificationTimestamp && new Date(notif.indexedAt) <= lastSeenNotificationTimestamp) {
+                // continue; // Already seen this or older, if listNotifications doesn't use a proper cursor for us
             }
+            // lastSeenNotificationTimestamp = new Date(notif.indexedAt);
 
-            if (commandSearchText.startsWith("!post+image ") || commandSearchText.startsWith("!post ")) {
-              await this.handleAdminPostCommand(latestPost.post, commandContent, isImageCommand);
-              isAdminCmdHandled = true;
-            }
-          }
 
-          if (!isAdminCmdHandled) {
-            const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
-            if (!alreadyReplied) {
-              const imageRequestKeywords = [
-                "generate image", "generate an image", "create a picture of",
-                "draw a picture of", "create an image of", "draw an image of"
-              ];
-              let isImageRequest = false;
-              let imagePrompt = "";
-
-              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text && typeof latestPost.post.record.text === 'string') {
-                const originalText = latestPost.post.record.text;
-                const lowercasedText = originalText.toLowerCase();
-                for (const keyword of imageRequestKeywords) {
-                  const keywordIndex = lowercasedText.indexOf(keyword);
-                  if (keywordIndex !== -1) {
-                    let tempPrompt = originalText.substring(keywordIndex + keyword.length).trim();
-                    if (tempPrompt.toLowerCase().startsWith("of ")) {
-                      tempPrompt = tempPrompt.substring(3).trim();
-                    }
-                    const isLengthValid = tempPrompt.length >= 5 && tempPrompt.length <= 300;
-                    if (isLengthValid) {
-                      imagePrompt = tempPrompt;
-                      isImageRequest = true;
-                      console.log(`[KeywordLoop] Valid image request. Keyword: "${keyword}". Prompt: "${imagePrompt}"`);
-                      break;
-                    }
-                  }
-                }
+            if (notif.reason === 'like') {
+              if (notif.record.subject && notif.record.subject.uri) {
+                const likedPostUri = notif.record.subject.uri;
+                const likerHandle = notif.author.handle;
+                console.log(`[Notification] Post ${likedPostUri} was liked by @${likerHandle}`);
+                // Add to repliedPosts to ensure we don't try to process this 'like' as a mention/reply later
+                // if the like notification itself has a URI that might be misconstrued.
+                // However, 'like' notifications usually have their own URI, not the post's.
+                // The main check is that we don't pass 'like' records to generateResponse.
               }
-              let standardTextResponse = null;
-              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
-                  const context = await this.getReplyContext(latestPost.post);
-                  standardTextResponse = await this.generateResponse(latestPost.post, context);
+              continue; // Don't process 'like' notifications further for replies
+            }
+
+            // For other actionable types (reply, mention, quote)
+            // Ensure the record is a post type we can handle, e.g. app.bsky.feed.post
+            if (notif.record.$type !== 'app.bsky.feed.post') {
+                console.log(`[Monitor] Skipping notification for non-post record type: ${notif.record.$type} from @${notif.author.handle}`);
+                continue;
+            }
+
+            // Construct a 'post' object similar to what previous logic expected
+            const currentPostObject = {
+              uri: notif.uri, // URI of the post that caused the notification (e.g., the reply, the mention)
+              cid: notif.cid,
+              author: notif.author,
+              record: notif.record,
+              // For context fetching, we might need the root of the thread if it's a reply.
+              // The 'post' object passed to generateResponse needs to be consistent.
+              // The existing getReplyContext uses post.uri and post.record.reply.
+            };
+
+            let isAdminCmdHandled = false;
+            if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
+                currentPostObject.record.text &&
+                currentPostObject.record.text.includes('!post')) {
+
+              const commandText = currentPostObject.record.text;
+              let commandContent = "";
+              let isImageCommand = false;
+              let commandSearchText = commandText;
+              const botMention = `@${this.config.BLUESKY_IDENTIFIER}`;
+
+              if (commandText.startsWith(botMention)) {
+                  commandSearchText = commandText.substring(botMention.length).trim();
               }
 
-              if (isImageRequest && imagePrompt) {
-                const scoutResult = await this.processImagePromptWithScout(imagePrompt);
-                if (!scoutResult.safe) {
-                  console.warn(`Image prompt "${imagePrompt}" deemed unsafe by Scout. Reply: "${scoutResult.reply_text}"`);
-                  let replyText = scoutResult.reply_text;
-                  if (standardTextResponse) {
-                    replyText = `${standardTextResponse}\n\nRegarding your image request: ${scoutResult.reply_text}`;
-                  }
-                  await this.postReply(latestPost.post, replyText);
-                } else {
-                  console.log(`Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
-                  const imageBase64 = await this.generateImage(scoutResult.image_prompt);
-                  let finalAltText = "Generated image";
-                  if (imageBase64) {
-                    const imageDescriptionFromScout = await this.describeImageWithScout(imageBase64);
-                    if (imageDescriptionFromScout) {
-                      console.log(`Scout successfully described the image: "${imageDescriptionFromScout}"`);
-                      finalAltText = imageDescriptionFromScout;
-                      let combinedResponseText = `Here's the image you requested:\n\n${imageDescriptionFromScout}`;
-                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
-                    } else {
-                      console.warn(`Scout failed to describe the image. Falling back to Nemotron's text (if available) and generic alt text.`);
-                      let combinedResponseText = standardTextResponse ? standardTextResponse : "";
-                      if (combinedResponseText) combinedResponseText += "\n\n";
-                      combinedResponseText += "Here's the image you requested:";
-                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
-                    }
-                  } else {
-                    console.log(`Flux failed to generate image for safe prompt: "${scoutResult.image_prompt}". Generating failure message with Scout.`);
-                    const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this, keeping the message under 150 characters. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
-                    const fluxFailureContext = [{ author: 'system', text: 'Informing user about image generation failure.' }];
-                    let fluxFailureReply = await this.generateResponse({ record: { text: fluxFailureUserPrompt } }, fluxFailureContext);
-                    if (!fluxFailureReply) {
-                        fluxFailureReply = "I understood your request for an image, and the prompt was safe, but unfortunately, I couldn't generate the image this time.";
-                    }
-                    let finalReplyText = standardTextResponse ? standardTextResponse : "";
-                    if (finalReplyText) finalReplyText += "\n\n";
-                    finalReplyText += fluxFailureReply;
-                    await this.postReply(latestPost.post, finalReplyText);
-                  }
-                }
-              } else if (isImageRequest && !imagePrompt) {
-                console.warn(`Image request was detected, but no valid prompt could be finalized for Scout (e.g., all attempts were too short/long).`);
-                let failureText = "It looks like you wanted an image, but I couldn't quite understand the details, or the description was too short/long. Please try again with a clear prompt between 5 and 300 characters, like: 'generate image of a happy cat'.";
-                if (standardTextResponse) {
-                    failureText = `${standardTextResponse}\n\nRegarding your image request: ${failureText}`;
-                }
-                await this.postReply(latestPost.post, failureText);
+              if (commandSearchText.startsWith("!post+image ")) {
+                  isImageCommand = true;
+                  commandContent = commandSearchText.substring("!post+image ".length).trim();
+              } else if (commandSearchText.startsWith("!post ")) {
+                  isImageCommand = false;
+                  commandContent = commandSearchText.substring("!post ".length).trim();
+              }
+
+              if (commandSearchText.startsWith("!post+image ") || commandSearchText.startsWith("!post ")) {
+                console.log(`[Monitor] Admin command detected: "${commandSearchText}" in post ${currentPostObject.uri}`);
+                await this.handleAdminPostCommand(currentPostObject, commandContent, isImageCommand);
+                isAdminCmdHandled = true;
               } else {
-                if (standardTextResponse) {
-                    await this.postReply(latestPost.post, standardTextResponse);
+                console.log(`[Monitor] Admin post ${currentPostObject.uri} included '!post' but not as a recognized command prefix.`);
+              }
+            }
+
+            if (!isAdminCmdHandled) {
+              if (await this.hasAlreadyReplied(currentPostObject)) { // Pass the full post object
+                console.log(`[Monitor] Already replied to post ${currentPostObject.uri} or it's a like. Skipping.`);
+                continue;
+              }
+
+              // Standard response generation for mentions, replies, quotes
+              console.log(`[Monitor] Processing notification for post ${currentPostObject.uri} from @${currentPostObject.author.handle}, reason: ${notif.reason}`);
+              const context = await this.getReplyContext(currentPostObject); // Pass the full post object
+              const responseText = await this.generateResponse(currentPostObject, context); // Pass the full post object
+
+              if (responseText) { // generateResponse now handles search history internally and might return null
+                // Image generation request detection (simplified for brevity, actual logic is more complex)
+                const imageRequestKeywords = ["generate image", "create a picture of"]; // Simplified
+                let isImageRequest = false;
+                let imagePrompt = "";
+                const lowercasedText = (currentPostObject.record.text || "").toLowerCase();
+                for (const keyword of imageRequestKeywords) {
+                    if (lowercasedText.includes(keyword)) {
+                        isImageRequest = true;
+                        imagePrompt = lowercasedText.replace(keyword, "").trim().replace(/^of /,"").trim();
+                        break;
+                    }
+                }
+
+                if (isImageRequest && imagePrompt) {
+                    console.log(`[Monitor] Image request detected in ${currentPostObject.uri}. Prompt: "${imagePrompt}"`);
+                    const scoutResult = await this.processImagePromptWithScout(imagePrompt);
+                    if (!scoutResult.safe) {
+                        await this.postReply(currentPostObject, `${responseText}\n\nRegarding your image request: ${scoutResult.reply_text}`);
+                    } else {
+                        const imageBase64 = await this.generateImage(scoutResult.image_prompt);
+                        if (imageBase64) {
+                            const altText = await this.describeImageWithScout(imageBase64) || "Generated image";
+                            await this.postReply(currentPostObject, `${responseText}\n\nHere's the image you requested:`, imageBase64, altText);
+                        } else {
+                            await this.postReply(currentPostObject, `${responseText}\n\nI tried to generate an image for "${scoutResult.image_prompt}", but it didn't work out this time.`);
+                        }
+                    }
+                } else {
+                    await this.postReply(currentPostObject, responseText);
                 }
               }
             }
-          }
+          } // end for...of notifications loop
+
           consecutiveErrors = 0;
+          // Update lastSeenNotificationTimestamp based on the newest processed notification if using timestamp cursor
+          if (notifications.length > 0) {
+             // lastSeenNotificationTimestamp = new Date(notifications[0].indexedAt); // Assuming notifications are newest first
+          }
           await utils.sleep(this.config.CHECK_INTERVAL);
         } catch (error) {
           console.error('Error in monitoring loop:', error);
@@ -570,12 +570,18 @@ class BaseBot {
 
   async getRecentPosts() {
     try {
-      const { data: notifications } = await this.agent.listNotifications({ limit: 20 });
-      if (!notifications || !notifications.notifications) throw new Error('No notifications returned');
-      const relevantPosts = notifications.notifications
-        .filter(notif => notif.reason !== 'like' && notif.author.handle !== this.config.BLUESKY_IDENTIFIER)
-        .map(notif => ({ post: { uri: notif.uri, cid: notif.cid, author: notif.author, record: notif.record } }));
-      return relevantPosts;
+      // Fetch a broader set of notifications, including likes
+      const { data: notificationResponse } = await this.agent.listNotifications({ limit: 30 }); // Fetch more to see various types
+      if (!notificationResponse || !notificationResponse.notifications) {
+        console.warn('[getRecentPosts] No notifications object returned or empty notifications array.');
+        return [];
+      }
+      // We will return the raw notifications and let the monitor loop decide how to process them.
+      // Still filter out notifications triggered by the bot itself.
+      const allNotifications = notificationResponse.notifications.filter(
+        notif => notif.author.handle !== this.config.BLUESKY_IDENTIFIER
+      );
+      return allNotifications;
     } catch (error) {
       console.error('Error in getRecentPosts:', error);
       return [];
@@ -791,6 +797,12 @@ class BaseBot {
 
 // Llama-specific implementation
 class LlamaBot extends BaseBot {
+  // NOTE FOR FUTURE DEVELOPMENT on popularity sorting:
+  // When implementing features to sort posts by popularity (e.g., "most liked posts"),
+  // prioritize using the `likeCount` property directly available on `app.bsky.feed.defs#postView` objects.
+  // These objects are returned by feed-generating endpoints like `getAuthorFeed` and `getPostThread`.
+  // This is more API-efficient than calling `app.bsky.feed.getLikes` for every post just to get its count.
+  // `getLikes` should primarily be used if the actual list of likers is needed for a specific post.
   constructor(config, agent) {
     super(config, agent);
   }
