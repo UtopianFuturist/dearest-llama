@@ -31,7 +31,7 @@ const config = {
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
-    "You are part of a bot designed to respond to a conversation on Bluesky. You will write a reply, and another part of the bot will post it. Keep your responses under 300 characters.",
+    "You are part of a multi-capability bot designed to respond to conversations on Bluesky. Your primary role is to provide helpful text responses. Other parts of the bot may handle other types of requests, like image generation, if a user asks for it. You will write a text reply, and another part of the bot will post it. Keep your text responses under 300 characters and relevant to the user's query. If the user is asking for an image, you can acknowledge the request briefly before other systems handle the image generation itself.",
   
   IMAGE_PROMPT_SYSTEM_PROMPT: process.env.IMAGE_PROMPT_SYSTEM_PROMPT || 
     "Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.",

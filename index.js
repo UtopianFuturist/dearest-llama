@@ -1020,12 +1020,32 @@ Admin Instructions: "${trimmedAdminInstructions}"
 
       const data = JSON.parse(responseText); // Parse JSON now that we know it's likely okay
 
-      if (!data.data || !Array.isArray(data.data) || data.data.length === 0 || !data.data[0].b64_json) {
-        console.error(`Unexpected response format from Together AI for generateImage (prompt: "${prompt}"):`, JSON.stringify(data));
-        return null;
+      if (data.data && Array.isArray(data.data) && data.data.length > 0) {
+        const firstImageData = data.data[0];
+        if (firstImageData.b64_json) {
+          console.log(`Successfully received b64_json image data from Together AI for prompt "${prompt}".`);
+          return firstImageData.b64_json;
+        } else if (firstImageData.url) {
+          console.log(`Received image URL from Together AI: ${firstImageData.url}. Attempting to download and convert to base64 for prompt "${prompt}".`);
+          try {
+            const base64Image = await utils.imageUrlToBase64(firstImageData.url);
+            if (base64Image) {
+              console.log(`Successfully downloaded and converted image from URL to base64 for prompt "${prompt}".`);
+              return base64Image;
+            } else {
+              console.error(`Failed to convert image from URL to base64 for prompt "${prompt}". URL: ${firstImageData.url}`);
+              return null;
+            }
+          } catch (urlConversionError) {
+            console.error(`Error downloading or converting image from URL (${firstImageData.url}) for prompt "${prompt}":`, urlConversionError);
+            return null;
+          }
+        }
       }
-      console.log(`Successfully received image data from Together AI for prompt "${prompt}".`);
-      return data.data[0].b64_json;
+
+      // If neither b64_json nor URL path yielded an image
+      console.error(`Unexpected response format or missing image data from Together AI for generateImage (prompt: "${prompt}"):`, JSON.stringify(data));
+      return null;
 
     } catch (error) {
       console.error(`Error in LlamaBot.generateImage (prompt: "${prompt}"):`, error);
