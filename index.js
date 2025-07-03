@@ -445,9 +445,29 @@ class BaseBot {
               latestPost.post.record.text.includes('!post')) {
 
             const commandText = latestPost.post.record.text;
-            const instructionMatch = commandText.match(/!post\s+(.+)/s);
-            const adminInstructions = instructionMatch ? instructionMatch[1].trim() : '';
+            let adminInstructions = '';
+
+            // Find the start of "!post" or "!post+image"
+            const postCommandIndex = commandText.indexOf('!post');
+
+            if (postCommandIndex !== -1) {
+              // Extract text after "!post" or "!post+image"
+              const instructionPart = commandText.substring(postCommandIndex);
+              // Use a regex to get the content *after* "!post" or "!post+image "
+              const instructionMatch = instructionPart.match(/^!post(?:\+image)?\s+(.+)/s);
+              if (instructionMatch && instructionMatch[1]) {
+                adminInstructions = instructionMatch[1].trim();
+              } else {
+                // This handles cases like "!post" or "!post+image" with no following text.
+                // For admin commands, this usually means "post about the context" or "post image of context"
+                // The handleAdminPostCommand can decide what to do with empty instructions.
+                adminInstructions = ""; // Explicitly set to empty if no text follows command keyword
+              }
+            }
+            // If postCommandIndex is -1, adminInstructions remains '', so it won't be treated as an admin command by this logic block's subsequent call.
+            // However, the outer `if` already checks for `text.includes('!post')`, so `postCommandIndex` should not be -1 here.
             
+            console.log(`[DEBUG] Extracted adminInstructions: "${adminInstructions}" from commandText: "${commandText}"`);
             await this.handleAdminPostCommand(latestPost.post, adminInstructions);
 
           } else { // Regular reply logic (image or text)
