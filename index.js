@@ -972,6 +972,143 @@ class LlamaBot extends BaseBot {
 
     // If not a follow-up or follow-up not actioned, proceed with normal response generation
     try {
+      const userQueryText = post.record.text; // The current user's message text
+
+      // 1. Check for search history intent first
+      const searchIntent = await this.getSearchHistoryIntent(userQueryText);
+
+      if (searchIntent.intent === "search_history") {
+        console.log(`[SearchHistory] Intent detected. Criteria:`, searchIntent);
+        const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
+        let matches = [];
+
+        if (conversationHistoryItems && conversationHistoryItems.length > 0) {
+          matches = conversationHistoryItems.filter(item => {
+            let authorMatch = false;
+            if (searchIntent.author_filter === "user" && item.authorDid === post.author.did) authorMatch = true;
+            else if (searchIntent.author_filter === "bot" && item.authorDid === this.agent.did) authorMatch = true;
+            else if (searchIntent.author_filter === "any") authorMatch = true;
+            if (!authorMatch) return false;
+
+            let typeMatch = false;
+            if (searchIntent.target_type === "image") {
+              if ((item.embedDetails?.type === 'images' && item.embedDetails.images?.length > 0) ||
+                  (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'images' && item.embedDetails.media.images?.length > 0)) {
+                typeMatch = true;
+              }
+            } else if (searchIntent.target_type === "link") {
+              if ((item.embedDetails?.type === 'external') ||
+                  (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'external')) {
+                typeMatch = true;
+              }
+            } else if (searchIntent.target_type === "post" || searchIntent.target_type === "message" || searchIntent.target_type === "unknown") {
+              typeMatch = true; // General match, keywords will do the main filtering
+            }
+            if (!typeMatch) return false;
+
+            if (searchIntent.keywords && searchIntent.keywords.length > 0) {
+              const itemTextLower = (item.text || "").toLowerCase();
+              // Also check embed text for keywords
+              let embedTextLower = "";
+              if (item.embedDetails?.type === 'images' && item.embedDetails.images) {
+                embedTextLower += item.embedDetails.images.map(img => img.alt || "").join(" ").toLowerCase();
+              } else if (item.embedDetails?.type === 'external' && item.embedDetails.external) {
+                embedTextLower += (item.embedDetails.external.title || "").toLowerCase() + " " + (item.embedDetails.external.description || "").toLowerCase();
+              } else if (item.embedDetails?.type === 'record' && item.embedDetails.record) {
+                embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase();
+              } else if (item.embedDetails?.type === 'recordWithMedia') {
+                if (item.embedDetails.record) embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase() + " ";
+                if (item.embedDetails.media?.type === 'images' && item.embedDetails.media.images) {
+                   embedTextLower += item.embedDetails.media.images.map(img => img.alt || "").join(" ").toLowerCase();
+                } else if (item.embedDetails.media?.type === 'external' && item.embedDetails.media.external) {
+                   embedTextLower += (item.embedDetails.media.external.title || "").toLowerCase() + " " + (item.embedDetails.media.external.description || "").toLowerCase();
+                }
+              }
+              const combinedTextForKeywordSearch = itemTextLower + " " + embedTextLower;
+              if (!searchIntent.keywords.every(kw => combinedTextForKeywordSearch.includes(kw.toLowerCase()))) {
+                return false;
+              }
+            }
+            return true; // All checks passed
+          });
+        }
+
+        let nemotronSearchPrompt = "";
+        if (matches.length > 0) {
+          const topMatches = matches.slice(0, 3); // Take top 3
+          const resultsText = topMatches.map((match, idx) =>
+            `Match ${idx + 1}:\nAuthor: @${match.authorHandle}\nText: "${(match.text || "").substring(0, 150)}${ (match.text || "").length > 150 ? "..." : "" }"\nURL: https://bsky.app/profile/${match.authorHandle}/post/${match.uri.split('/').pop()}`
+          ).join("\n\n");
+
+          nemotronSearchPrompt = `I searched our conversation history based on your query: "${userQueryText}". I found the following matching post(s):\n\n${resultsText}\n\nIs this what you were looking for? If you want to refine the search, please provide more details.`;
+          if (topMatches.length < matches.length) {
+            nemotronSearchPrompt += `\n(I found ${matches.length} total matches, showing the top ${topMatches.length}.)`;
+          }
+        } else {
+          nemotronSearchPrompt = `I searched our conversation history based on your query: "${userQueryText}", but I couldn't find any posts that specifically matched your description. Perhaps you could try different keywords or describe it another way?`;
+        }
+
+        console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,200)}..."`);
+
+        // Simplified NIM call for search history response
+        const searchSystemPrompt = "You are a helpful assistant. The user asked you to find something in your conversation history. Present the findings clearly and concisely based on the user's original query and the search results provided in the user message. If results were found, ask if it's what they were looking for. If not, politely state that.";
+        console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+        const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${searchSystemPrompt}` },
+              { role: "user", content: nemotronSearchPrompt } // nemotronSearchPrompt already contains user's original query and results
+            ],
+            temperature: 0.5, // Slightly lower temp for factual presentation
+            max_tokens: 200,
+            stream: false
+          })
+        });
+        console.log(`NIM CALL END: Search History Response - Status: ${nimSearchResponse.status}`);
+
+        if (nimSearchResponse.ok) {
+          const nimSearchData = await nimSearchResponse.json();
+          if (nimSearchData.choices && nimSearchData.choices.length > 0 && nimSearchData.choices[0].message && nimSearchData.choices[0].message.content) {
+            const finalSearchResponseText = nimSearchData.choices[0].message.content.trim();
+            // Minimal formatting by Scout, similar to other responses
+            const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: finalSearchResponseText }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                })
+            });
+            if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                     await this.postReply(post, finalSearchResponseText); // Fallback to unfiltered if Scout formatting fails
+                }
+            } else {
+               await this.postReply(post, finalSearchResponseText); // Fallback to unfiltered if Scout call fails
+            }
+          } else {
+            console.error('[SearchHistory] Nvidia NIM API response for search was ok, but no content found:', JSON.stringify(nimSearchData));
+            await this.postReply(post, "I found some information, but had a slight hiccup displaying it. You might want to try asking again!");
+          }
+        } else {
+          const errorText = await nimSearchResponse.text();
+          console.error(`[SearchHistory] Nvidia NIM API error for search response (${nimSearchResponse.status}) - Text: ${errorText}`);
+          await this.postReply(post, "I had a little trouble formulating a response for your search query. Please try again!");
+        }
+        return null; // End processing for this interaction
+      }
+
+      // If not a search history intent, proceed with existing logic
       let conversationHistory = '';
       if (context && context.length > 0) {
         for (const msg of context) {
@@ -983,13 +1120,10 @@ class LlamaBot extends BaseBot {
       }
 
       let userBlueskyPostsContext = "";
-      // const userPostTextLower = post.record.text.toLowerCase(); // No longer needed for keywords
-      // const profileKeywords = ["my profile", "about me", "what do you think of me", "my posts", "my feed"]; // Remove keywords
-
-      const fetchContextDecision = await this.shouldFetchProfileContext(post.record.text);
+      const fetchContextDecision = await this.shouldFetchProfileContext(userQueryText);
 
       if (fetchContextDecision) {
-        console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${post.record.text}"`);
+        console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${userQueryText}"`);
         try {
           const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
           if (conversationHistoryItems.length > 0) {
@@ -1327,7 +1461,87 @@ ${baseInstruction}`;
                 authorDid: postAuthorDid,
                 authorHandle: postAuthorHandle,
                 createdAt: createdAt,
-              });
+                embedDetails: null, // Initialize embedDetails
+              };
+
+              // Extract embed details
+              if (item.post.embed) {
+                const embed = item.post.embed;
+                if (embed.$type === 'app.bsky.embed.images#view' || embed.$type === 'app.bsky.embed.images') {
+                  currentPost.embedDetails = {
+                    type: 'images',
+                    images: embed.images?.map(img => ({
+                      alt: img.alt || '',
+                      // Attempt to get CID or a link; structure varies based on full record vs view
+                      cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+                      thumb: img.thumb || null,
+                      fullsize: img.fullsize || null
+                    })) || []
+                  };
+                } else if (embed.$type === 'app.bsky.embed.external#view' || embed.$type === 'app.bsky.embed.external') {
+                  currentPost.embedDetails = {
+                    type: 'external',
+                    external: {
+                      uri: embed.external?.uri || embed.uri || '',
+                      title: embed.external?.title || embed.title || '',
+                      description: embed.external?.description || embed.description || ''
+                    }
+                  };
+                } else if (embed.$type === 'app.bsky.embed.record#view' || embed.$type === 'app.bsky.embed.record') {
+                  // Ensure we are accessing the record data correctly, it might be nested under 'record'
+                  const embeddedRec = embed.record;
+                  if (embeddedRec) {
+                     currentPost.embedDetails = {
+                        type: 'record',
+                        record: {
+                          uri: embeddedRec.uri || '',
+                          cid: embeddedRec.cid || '',
+                          authorHandle: embeddedRec.author?.handle || '',
+                          textSnippet: embeddedRec.value?.text?.substring(0, 100) || // For full record
+                                       embeddedRec.value?.substring?.(0,100) || // If value is just text
+                                       (typeof embeddedRec.value === 'object' && embeddedRec.value.text ? String(embeddedRec.value.text).substring(0,100) : '') // common case for app.bsky.feed.post
+                        }
+                     };
+                  }
+                } else if (embed.$type === 'app.bsky.embed.recordWithMedia#view' || embed.$type === 'app.bsky.embed.recordWithMedia') {
+                  currentPost.embedDetails = { type: 'recordWithMedia', record: null, media: null };
+                  if (embed.record && (embed.record.$type === 'app.bsky.embed.record#view' || embed.record.$type === 'app.bsky.embed.record')) {
+                     const embeddedRec = embed.record.record; // Note the double .record here for recordWithMedia views
+                     if (embeddedRec) {
+                        currentPost.embedDetails.record = {
+                           uri: embeddedRec.uri || '',
+                           cid: embeddedRec.cid || '',
+                           authorHandle: embeddedRec.author?.handle || '',
+                           textSnippet: embeddedRec.value?.text?.substring(0, 100) ||
+                                        (typeof embeddedRec.value === 'object' && embeddedRec.value.text ? String(embeddedRec.value.text).substring(0,100) : '')
+                        };
+                     }
+                  }
+                  if (embed.media) {
+                    if (embed.media.$type === 'app.bsky.embed.images#view' || embed.media.$type === 'app.bsky.embed.images') {
+                      currentPost.embedDetails.media = {
+                        type: 'images',
+                        images: embed.media.images?.map(img => ({
+                          alt: img.alt || '',
+                          cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+                          thumb: img.thumb || null,
+                          fullsize: img.fullsize || null
+                        })) || []
+                      };
+                    } else if (embed.media.$type === 'app.bsky.embed.external#view' || embed.media.$type === 'app.bsky.embed.external') {
+                      currentPost.embedDetails.media = {
+                        type: 'external',
+                        external: {
+                          uri: embed.media.external?.uri || embed.media.uri || '',
+                          title: embed.media.external?.title || embed.media.title || '',
+                          description: embed.media.external?.description || embed.media.description || ''
+                        }
+                      };
+                    }
+                  }
+                }
+              }
+              actorPosts.push(currentPost);
               fetchedCount++;
             }
           }
@@ -1394,6 +1608,120 @@ ${baseInstruction}`;
 
     console.log(`[ConvHistory] Found ${uniquePosts.length} unique relevant posts. Returning ${finalHistory.length} for history.`);
     return finalHistory;
+  }
+
+  async getSearchHistoryIntent(userQueryText) {
+    if (!userQueryText || userQueryText.trim() === "") {
+      return { intent: "none" };
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = `Your task is to analyze the user's query to determine if they are asking to find a specific item (image, link, post, or message) from their past conversation history with you (the bot).
+
+If the query is a request to find something from the history, respond with a JSON object with the following structure:
+{
+  "intent": "search_history",
+  "target_type": "image" | "link" | "post" | "message" | "unknown", // What kind of item are they looking for?
+  "author_filter": "user" | "bot" | "any", // Who are they implying posted it? 'user' for user, 'bot' for you, 'any' if unclear.
+  "keywords": ["keyword1", "keyword2", ...], // Keywords from the query that describe the content. Max 5 keywords.
+  "recency_cue": "textual cue for recency" | null // e.g., "yesterday", "last week", "a few days ago". Null if not specified.
+}
+
+Examples:
+- User query: "find the image you generated for me of a cat"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": null}
+- User query: "show me the link i sent about dogs"
+  Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs", "link"], "recency_cue": null}
+- User query: "what was that thing we talked about yesterday regarding the meeting"
+  Response: {"intent": "search_history", "target_type": "message", "author_filter": "any", "keywords": ["meeting"], "recency_cue": "yesterday"}
+- User query: "can you make a new picture of a sunset"
+  Response: {"intent": "none"}
+- User query: "what's the weather like"
+  Response: {"intent": "none"}
+
+If the query is NOT a request to find something from the conversation history, respond with ONLY the JSON object: {"intent": "none"}.
+Focus on specific requests for past items. General requests for new information or actions are not history searches.
+Be conservative: if unsure, classify as {"intent": "none"}.
+Ensure the entire output is ONLY the JSON object.`;
+
+    const userPrompt = `User query: '${userQueryText}'`;
+    console.log(`[IntentClassifier] Calling Scout (getSearchHistoryIntent) for query: "${userQueryText}"`);
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.2, // Low temperature for classification/extraction
+          max_tokens: 150, // Enough for the JSON structure
+          stream: false
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (getSearchHistoryIntent). Query: "${userQueryText}". Error: ${errorText}`);
+        return { intent: "none", error: `API error ${response.status}` };
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        let rawContent = data.choices[0].message.content.trim();
+        console.log(`[IntentClassifier] Scout raw response (getSearchHistoryIntent) for query "${userQueryText}": "${rawContent}"`);
+
+        // Attempt to extract JSON from potential markdown code blocks or directly
+        const jsonRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/;
+        const match = rawContent.match(jsonRegex);
+        let jsonString = "";
+        if (match && match[1]) {
+          jsonString = match[1];
+        } else if (rawContent.startsWith("{") && rawContent.endsWith("}")) {
+          jsonString = rawContent;
+        } else {
+          // Fallback if JSON is not clearly demarcated - find first '{' and last '}'
+          const firstBrace = rawContent.indexOf('{');
+          const lastBrace = rawContent.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace > firstBrace) {
+            jsonString = rawContent.substring(firstBrace, lastBrace + 1);
+          }
+        }
+
+        if (jsonString) {
+          try {
+            const parsedJson = JSON.parse(jsonString);
+            // Basic validation of the parsed structure
+            if (parsedJson.intent === "search_history") {
+              if (!["image", "link", "post", "message", "unknown"].includes(parsedJson.target_type) ||
+                  !["user", "bot", "any"].includes(parsedJson.author_filter) ||
+                  !Array.isArray(parsedJson.keywords)) {
+                console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has intent 'search_history' but malformed structure: ${jsonString}`);
+                return { intent: "none", error: "Malformed search_history structure from Scout." };
+              }
+            } else if (parsedJson.intent !== "none") {
+               console.warn(`[IntentClassifier] Scout response for getSearchHistoryIntent has unknown intent: ${jsonString}`);
+               return { intent: "none", error: "Unknown intent from Scout."};
+            }
+            console.log(`[IntentClassifier] Scout parsed intent (getSearchHistoryIntent) for query "${userQueryText}":`, parsedJson);
+            return parsedJson;
+          } catch (e) {
+            console.error(`[IntentClassifier] Error parsing JSON from Scout (getSearchHistoryIntent) for query "${userQueryText}". JSON string: "${jsonString}". Error:`, e);
+            return { intent: "none", error: "JSON parsing error." };
+          }
+        } else {
+            console.error(`[IntentClassifier] Could not extract JSON from Scout response (getSearchHistoryIntent) for query "${userQueryText}". Raw: "${rawContent}"`);
+            return { intent: "none", error: "Could not extract JSON from Scout response." };
+        }
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (getSearchHistoryIntent). Query: "${userQueryText}". Data:`, JSON.stringify(data));
+      return { intent: "none", error: "Unexpected response format." };
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (getSearchHistoryIntent). Query: "${userQueryText}":`, error);
+      return { intent: "none", error: "Exception during API call." };
+    }
   }
 
   async shouldFetchProfileContext(userQueryText) {
