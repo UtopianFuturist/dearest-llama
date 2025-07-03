@@ -617,29 +617,32 @@ class BaseBot {
     try {
       RateLimit.check();
       RateLimit.check();
-      const CHAR_LIMIT_PER_POST = 290; // Leave room for (N/M) prefix
+      RateLimit.check();
+      const CHAR_LIMIT_PER_POST = 300; // Bluesky's actual limit
+      const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
       const MAX_PARTS = 3;
       let textParts = [];
-      let currentReplyTo = { // Initial reply target is the original post
+
+      let currentReplyTo = {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
           parent: { uri: post.uri, cid: post.cid }
       };
-      let lastPostedPartUri = null;
-      let lastPostedPartCid = null;
 
       // Helper function for smart splitting
-      const splitTextIntoParts = (text, limit) => {
+      const splitTextIntoParts = (text, limitPerPartWithoutSuffix) => {
           const parts = [];
           let remainingText = text.trim();
+
           while (remainingText.length > 0 && parts.length < MAX_PARTS) {
-              if (remainingText.length <= limit) {
+              if (remainingText.length <= limitPerPartWithoutSuffix) {
                   parts.push(remainingText);
                   break;
               }
-              let splitAt = limit;
-              // Try to find a sentence boundary or space to split at
+
+              let splitAt = limitPerPartWithoutSuffix;
               let foundSplit = false;
-              for (let i = limit; i > limit / 2; i--) { // Look back halfway
+              // Try to find a sentence boundary or space to split at, looking backwards
+              for (let i = Math.min(limitPerPartWithoutSuffix, remainingText.length -1) ; i > limitPerPartWithoutSuffix / 2 && i > 0; i--) {
                   if (['.', '!', '?'].includes(remainingText[i])) {
                       splitAt = i + 1;
                       foundSplit = true;
@@ -647,7 +650,7 @@ class BaseBot {
                   }
               }
               if (!foundSplit) {
-                for (let i = limit; i > limit / 2; i--) {
+                for (let i = Math.min(limitPerPartWithoutSuffix, remainingText.length -1); i > limitPerPartWithoutSuffix / 2 && i > 0; i--) {
                     if (remainingText[i] === ' ') {
                         splitAt = i;
                         foundSplit = true;
@@ -655,64 +658,69 @@ class BaseBot {
                     }
                 }
               }
-              // If no good split point, just split at the limit
+
               parts.push(remainingText.substring(0, splitAt).trim());
               remainingText = remainingText.substring(splitAt).trim();
           }
-          if (remainingText.length > 0 && parts.length >= MAX_PARTS) { // If text remains after max parts
-            parts[MAX_PARTS - 1] = parts[MAX_PARTS - 1].substring(0, limit - 3) + "..."; // Truncate last part
+
+          // If text still remains after MAX_PARTS, the last part needs truncation with "..."
+          if (remainingText.length > 0 && parts.length >= MAX_PARTS) {
+            let lastPart = parts[MAX_PARTS - 1];
+            // Ensure "..." fits even after page suffix is added later
+            const availableSpaceForTextInLastPart = limitPerPartWithoutSuffix - "...".length;
+            if (lastPart.length > availableSpaceForTextInLastPart) {
+                 lastPart = lastPart.substring(0, availableSpaceForTextInLastPart);
+            }
+            parts[MAX_PARTS - 1] = lastPart + "...";
           }
           return parts;
       };
 
-      if (response && response.length > CHAR_LIMIT_PER_POST) {
-          const effectiveLimitPerPost = CHAR_LIMIT_PER_POST - "(X/Y) ".length;
-          textParts = splitTextIntoParts(response, effectiveLimitPerPost);
-          if (textParts.length > MAX_PARTS) {
-              textParts = textParts.slice(0, MAX_PARTS);
-              // Ensure the last part indicates truncation if it was originally longer
-              if (response.length > textParts.join("").length) { // Heuristic
-                  const lastPart = textParts[MAX_PARTS-1];
-                  if (lastPart.length > effectiveLimitPerPost - 3) {
-                     textParts[MAX_PARTS-1] = lastPart.substring(0, effectiveLimitPerPost - 6) + "...";
-                  } else {
-                     textParts[MAX_PARTS-1] += "...";
-                  }
-              }
+      // Determine if splitting is needed and prepare text parts
+      if (response && response.trim().length > 0) {
+          // Tentatively assume single part, check length with potential suffix
+          const singlePartSuffix = " ... [1/1]".length; // Longest possible suffix for single part
+          if (response.length + (response.length > CHAR_LIMIT_PER_POST - singlePartSuffix ? PAGE_SUFFIX_MAX_LENGTH : 0) > CHAR_LIMIT_PER_POST) {
+              // If it's too long even for one part with suffix, or just too long in general, then split.
+              const effectiveLimitPerPost = CHAR_LIMIT_PER_POST - PAGE_SUFFIX_MAX_LENGTH;
+              textParts = splitTextIntoParts(response, effectiveLimitPerPost);
+          } else {
+              textParts.push(response.trim());
           }
-      } else if (response) {
-          textParts.push(response);
-      } else {
-          // No text response, but maybe an image?
-          if (!imageBase64) {
-            console.warn("[postReply] No text and no image to post. Aborting.");
-            return;
-          }
-          // If only image, textParts will be empty, image handled below
-      }
-
-      const totalParts = textParts.length > 0 ? textParts.length : (imageBase64 ? 1 : 0) ;
-      if (totalParts === 0) {
-          console.warn("[postReply] Calculated 0 parts. Nothing to post.");
+      } else if (!imageBase64) {
+          // No text and no image
+          console.warn("[postReply] No text and no image to post. Aborting.");
           return;
+      }
+      // If only an image, textParts will be empty initially, handled below.
+
+      const totalParts = textParts.length > 0 ? textParts.length : (imageBase64 ? 1 : 0);
+      if (totalParts === 0) {
+          console.warn("[postReply] Calculated 0 parts (no text, no image). Nothing to post.");
+          return;
+      }
+      if (textParts.length > MAX_PARTS) { // Should be handled by splitTextIntoParts, but as safeguard
+          textParts = textParts.slice(0, MAX_PARTS);
       }
 
 
       for (let i = 0; i < totalParts; i++) {
           const isLastPart = (i === totalParts - 1);
-          let partText = textParts[i] || ""; // Use empty string if only image on last part
+          let partText = textParts[i] || ""; // Use empty string if only image on last part and textParts is empty
 
           if (totalParts > 1) {
-              partText = `(${i + 1}/${totalParts}) ${partText}`;
+              partText = `${partText.trim()} ... [${i + 1}/${totalParts}]`;
           }
 
-          // Ensure even the prefixed part doesn't exceed Bluesky's hard limit (approx 300)
-          // This is a safeguard; CHAR_LIMIT_PER_POST should mostly handle it.
-          partText = utils.truncateResponse(partText, 300);
-
+          // Final safeguard, though previous logic should prevent exceeding this.
+          // utils.truncateResponse might not be ideal here if it adds its own "..."
+          if (partText.length > CHAR_LIMIT_PER_POST) {
+             console.warn(`[postReply] Part ${i+1}/${totalParts} text still too long (${partText.length}) after suffix. Truncating hard.`);
+             partText = partText.substring(0, CHAR_LIMIT_PER_POST - 3) + "...";
+          }
 
           const replyObject = {
-              text: partText,
+              text: partText.trim(), // Trim whitespace that might have been added
               reply: currentReplyTo
           };
 
@@ -996,9 +1004,29 @@ class LlamaBot extends BaseBot {
         }
       }
 
-      const nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n${userBlueskyPostsContext}Please respond to the request in the most recent message. The user profile context above may contain the user's own posts, replies, quote posts, and items they've reposted (with original authors noted). Use this information to inform your response if relevant, paying attention to the nature of each activity. For detailed topics like profile analysis, you can generate a response up to about 870 characters; it will be split into multiple posts if needed. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`;
+      let nemotronUserPrompt = "";
+      const baseInstruction = `Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. For detailed topics, you can generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
 
-      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+      if (userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "") {
+        // Profile analysis prompt
+        nemotronUserPrompt = `The user's current question is: "${post.record.text}"
+
+You have been provided with a selection of the user's recent Bluesky activity below under "USER'S RECENT BLUESKY ACTIVITY".
+Based PRIMARILY on the provided "USER'S RECENT BLUESKY ACTIVITY", please analyze their posts and formulate a comprehensive answer to their question. Identify themes, common topics, or aspects of their online presence as reflected in their posts, replies, quote posts, and reposts (paying attention to the original authors of reposted content).
+
+USER'S RECENT BLUESKY ACTIVITY:
+${userBlueskyPostsContext}
+---
+Your analysis and response (incorporating the conversation history below if it adds crucial context to the user's immediate question):
+${conversationHistory}
+---
+${baseInstruction}`;
+      } else {
+        // Standard prompt (no specific profile context fetched)
+        nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
+      }
+
+      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
