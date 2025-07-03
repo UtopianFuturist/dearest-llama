@@ -1119,24 +1119,39 @@ Ensure your entire response is ONLY the JSON object.`;
         return { safe: false, reply_text: "Sorry, I encountered an issue processing your image request. Please try again later." };
       }
 
-      const responseText = await response.text();
-      console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - Raw Text: ${responseText}`);
+      const apiResponseText = await response.text();
+      console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - API Raw Text: ${apiResponseText}`);
 
       try {
-        const data = JSON.parse(responseText);
-        // Basic validation of the expected structure
-        if (typeof data.safe === 'boolean') {
-          if (data.safe === false && typeof data.reply_text === 'string') {
-            return data;
-          } else if (data.safe === true && typeof data.image_prompt === 'string') {
-            return data;
+        const apiData = JSON.parse(apiResponseText);
+
+        if (apiData.choices && apiData.choices.length > 0 && apiData.choices[0].message && apiData.choices[0].message.content) {
+          const nestedJsonString = apiData.choices[0].message.content;
+          console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Nested JSON String: ${nestedJsonString}`);
+
+          try {
+            const scoutDecision = JSON.parse(nestedJsonString);
+            // Basic validation of the expected structure from Scout's JSON content
+            if (typeof scoutDecision.safe === 'boolean') {
+              if (scoutDecision.safe === false && typeof scoutDecision.reply_text === 'string') {
+                return scoutDecision;
+              } else if (scoutDecision.safe === true && typeof scoutDecision.image_prompt === 'string') {
+                return scoutDecision;
+              }
+            }
+            console.error(`Unexpected JSON structure within Scout's message content: ${nestedJsonString}`);
+            return { safe: false, reply_text: "Sorry, I received an unexpected structured response while processing your image request." };
+          } catch (nestedJsonError) {
+            console.error(`Error parsing nested JSON from Scout's message content: ${nestedJsonError}. Nested JSON string: ${nestedJsonString}`);
+            return { safe: false, reply_text: "Sorry, I had trouble understanding the structured response for your image request." };
           }
+        } else {
+          console.error(`Unexpected API structure from Nvidia NIM for processImagePromptWithScout (missing choices/message/content): ${apiResponseText}`);
+          return { safe: false, reply_text: "Sorry, I received an incomplete response while processing your image request." };
         }
-        console.error(`Unexpected JSON structure from Nvidia NIM for processImagePromptWithScout: ${responseText}`);
-        return { safe: false, reply_text: "Sorry, I received an unexpected response while processing your image request." };
-      } catch (jsonError) {
-        console.error(`Error parsing JSON from Nvidia NIM for processImagePromptWithScout: ${jsonError}. Raw response: ${responseText}`);
-        return { safe: false, reply_text: "Sorry, I had trouble understanding the response for your image request." };
+      } catch (apiJsonError) {
+        console.error(`Error parsing main API JSON from Nvidia NIM for processImagePromptWithScout: ${apiJsonError}. Raw API response: ${apiResponseText}`);
+        return { safe: false, reply_text: "Sorry, I had trouble understanding the API response for your image request." };
       }
 
     } catch (error) {
