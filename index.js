@@ -388,154 +388,154 @@ class BaseBot {
     try {
       await this.authenticate();
       console.log('Starting monitoring...');
-      let lastCheckedPost = null;
+      // lastCheckedPost logic might need re-evaluation if we process multiple notifications per cycle.
+      // For now, we'll rely on repliedPosts set to avoid re-processing actionable items.
+      // We will also need to manage fetching notifications with a cursor to avoid missing any over time.
+      // This is a simplified loop for now, focusing on processing current batch.
+      let lastSeenNotificationTimestamp = null; // Or use cursor from listNotifications
 
       while (true) {
         try {
-          const posts = await this.getRecentPosts();
-          if (!posts.length) {
+          // Fetch notifications (getRecentPosts now returns raw notifications)
+          // To avoid missing notifs, ideally use the cursor from listNotifications.
+          // For this iteration, getRecentPosts fetches a batch.
+          const notifications = await this.getRecentPosts();
+
+          if (!notifications || notifications.length === 0) {
             await utils.sleep(this.config.CHECK_INTERVAL);
             continue;
           }
-          const latestPost = posts[0];
-          if (lastCheckedPost && latestPost.uri === lastCheckedPost) {
-            await utils.sleep(this.config.CHECK_INTERVAL);
-            continue;
-          }
-          lastCheckedPost = latestPost.uri;
 
-          let isAdminCmdHandled = false;
-
-          if (latestPost.post &&
-              latestPost.post.author &&
-              latestPost.post.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
-              latestPost.post.record &&
-              latestPost.post.record.text &&
-              latestPost.post.record.text.includes('!post')) {
-
-            const commandText = latestPost.post.record.text;
-            let commandContent = "";
-            let isImageCommand = false;
-
-            let commandSearchText = commandText;
-            const botMention = `@${this.config.BLUESKY_IDENTIFIER}`;
-            if (commandText.startsWith(botMention)) {
-                commandSearchText = commandText.substring(botMention.length).trim();
+          // Process notifications, typically newest first if API returns them that way.
+          // We might want to reverse or sort them by createdAt if processing order matters strictly.
+          // For now, processing in received order.
+          for (const notif of notifications.slice().reverse()) { // Process older notifications first in a batch
+            if (!notif || !notif.record || !notif.author) { // Basic sanity check
+                console.warn("[Monitor] Skipping invalid notification object:", notif);
+                continue;
             }
 
-            console.log(`[DEBUG_MONITOR] commandSearchText after potential mention strip: "${commandSearchText}"`);
-
-            if (commandSearchText.startsWith("!post+image ")) {
-                isImageCommand = true;
-                commandContent = commandSearchText.substring("!post+image ".length).trim();
-                console.log(`[DEBUG_MONITOR] Detected !post+image. Content to pass: "${commandContent}"`);
-            } else if (commandSearchText.startsWith("!post ")) {
-                isImageCommand = false;
-                commandContent = commandSearchText.substring("!post ".length).trim();
-                console.log(`[DEBUG_MONITOR] Detected !post. Content to pass: "${commandContent}"`);
-            } else {
-                console.log(`[MONITOR] Admin post included '!post' but not as a recognized command prefix: "${commandSearchText}". Treating as regular mention.`);
-                // isAdminCmdHandled remains false, will fall through to regular reply logic
+            // Update last seen timestamp (simplified cursor management)
+            if (lastSeenNotificationTimestamp && new Date(notif.indexedAt) <= lastSeenNotificationTimestamp) {
+                // continue; // Already seen this or older, if listNotifications doesn't use a proper cursor for us
             }
+            // lastSeenNotificationTimestamp = new Date(notif.indexedAt);
 
-            if (commandSearchText.startsWith("!post+image ") || commandSearchText.startsWith("!post ")) {
-              await this.handleAdminPostCommand(latestPost.post, commandContent, isImageCommand);
-              isAdminCmdHandled = true;
-            }
-          }
 
-          if (!isAdminCmdHandled) {
-            const alreadyReplied = await this.hasAlreadyReplied(latestPost.post);
-            if (!alreadyReplied) {
-              const imageRequestKeywords = [
-                "generate image", "generate an image", "create a picture of",
-                "draw a picture of", "create an image of", "draw an image of"
-              ];
-              let isImageRequest = false;
-              let imagePrompt = "";
-
-              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text && typeof latestPost.post.record.text === 'string') {
-                const originalText = latestPost.post.record.text;
-                const lowercasedText = originalText.toLowerCase();
-                for (const keyword of imageRequestKeywords) {
-                  const keywordIndex = lowercasedText.indexOf(keyword);
-                  if (keywordIndex !== -1) {
-                    let tempPrompt = originalText.substring(keywordIndex + keyword.length).trim();
-                    if (tempPrompt.toLowerCase().startsWith("of ")) {
-                      tempPrompt = tempPrompt.substring(3).trim();
-                    }
-                    const isLengthValid = tempPrompt.length >= 5 && tempPrompt.length <= 300;
-                    if (isLengthValid) {
-                      imagePrompt = tempPrompt;
-                      isImageRequest = true;
-                      console.log(`[KeywordLoop] Valid image request. Keyword: "${keyword}". Prompt: "${imagePrompt}"`);
-                      break;
-                    }
-                  }
-                }
+            if (notif.reason === 'like') {
+              if (notif.record.subject && notif.record.subject.uri) {
+                const likedPostUri = notif.record.subject.uri;
+                const likerHandle = notif.author.handle;
+                console.log(`[Notification] Post ${likedPostUri} was liked by @${likerHandle}`);
+                // Add to repliedPosts to ensure we don't try to process this 'like' as a mention/reply later
+                // if the like notification itself has a URI that might be misconstrued.
+                // However, 'like' notifications usually have their own URI, not the post's.
+                // The main check is that we don't pass 'like' records to generateResponse.
               }
-              let standardTextResponse = null;
-              if (latestPost && latestPost.post && latestPost.post.record && latestPost.post.record.text) {
-                  const context = await this.getReplyContext(latestPost.post);
-                  standardTextResponse = await this.generateResponse(latestPost.post, context);
+              continue; // Don't process 'like' notifications further for replies
+            }
+
+            // For other actionable types (reply, mention, quote)
+            // Ensure the record is a post type we can handle, e.g. app.bsky.feed.post
+            if (notif.record.$type !== 'app.bsky.feed.post') {
+                console.log(`[Monitor] Skipping notification for non-post record type: ${notif.record.$type} from @${notif.author.handle}`);
+                continue;
+            }
+
+            // Construct a 'post' object similar to what previous logic expected
+            const currentPostObject = {
+              uri: notif.uri, // URI of the post that caused the notification (e.g., the reply, the mention)
+              cid: notif.cid,
+              author: notif.author,
+              record: notif.record,
+              // For context fetching, we might need the root of the thread if it's a reply.
+              // The 'post' object passed to generateResponse needs to be consistent.
+              // The existing getReplyContext uses post.uri and post.record.reply.
+            };
+
+            let isAdminCmdHandled = false;
+            if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
+                currentPostObject.record.text &&
+                currentPostObject.record.text.includes('!post')) {
+
+              const commandText = currentPostObject.record.text;
+              let commandContent = "";
+              let isImageCommand = false;
+              let commandSearchText = commandText;
+              const botMention = `@${this.config.BLUESKY_IDENTIFIER}`;
+
+              if (commandText.startsWith(botMention)) {
+                  commandSearchText = commandText.substring(botMention.length).trim();
               }
 
-              if (isImageRequest && imagePrompt) {
-                const scoutResult = await this.processImagePromptWithScout(imagePrompt);
-                if (!scoutResult.safe) {
-                  console.warn(`Image prompt "${imagePrompt}" deemed unsafe by Scout. Reply: "${scoutResult.reply_text}"`);
-                  let replyText = scoutResult.reply_text;
-                  if (standardTextResponse) {
-                    replyText = `${standardTextResponse}\n\nRegarding your image request: ${scoutResult.reply_text}`;
-                  }
-                  await this.postReply(latestPost.post, replyText);
-                } else {
-                  console.log(`Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
-                  const imageBase64 = await this.generateImage(scoutResult.image_prompt);
-                  let finalAltText = "Generated image";
-                  if (imageBase64) {
-                    const imageDescriptionFromScout = await this.describeImageWithScout(imageBase64);
-                    if (imageDescriptionFromScout) {
-                      console.log(`Scout successfully described the image: "${imageDescriptionFromScout}"`);
-                      finalAltText = imageDescriptionFromScout;
-                      let combinedResponseText = `Here's the image you requested:\n\n${imageDescriptionFromScout}`;
-                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
-                    } else {
-                      console.warn(`Scout failed to describe the image. Falling back to Nemotron's text (if available) and generic alt text.`);
-                      let combinedResponseText = standardTextResponse ? standardTextResponse : "";
-                      if (combinedResponseText) combinedResponseText += "\n\n";
-                      combinedResponseText += "Here's the image you requested:";
-                      await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
-                    }
-                  } else {
-                    console.log(`Flux failed to generate image for safe prompt: "${scoutResult.image_prompt}". Generating failure message with Scout.`);
-                    const fluxFailureUserPrompt = `The user asked for an image with a prompt that was deemed safe ("${scoutResult.image_prompt}"). However, the image generation model (Flux) failed to produce an image. Please craft a brief, empathetic message to the user explaining this, keeping the message under 150 characters. Do not offer to try again unless specifically part of your persona. Acknowledge their request was fine but the final step didn't work.`;
-                    const fluxFailureContext = [{ author: 'system', text: 'Informing user about image generation failure.' }];
-                    let fluxFailureReply = await this.generateResponse({ record: { text: fluxFailureUserPrompt } }, fluxFailureContext);
-                    if (!fluxFailureReply) {
-                        fluxFailureReply = "I understood your request for an image, and the prompt was safe, but unfortunately, I couldn't generate the image this time.";
-                    }
-                    let finalReplyText = standardTextResponse ? standardTextResponse : "";
-                    if (finalReplyText) finalReplyText += "\n\n";
-                    finalReplyText += fluxFailureReply;
-                    await this.postReply(latestPost.post, finalReplyText);
-                  }
-                }
-              } else if (isImageRequest && !imagePrompt) {
-                console.warn(`Image request was detected, but no valid prompt could be finalized for Scout (e.g., all attempts were too short/long).`);
-                let failureText = "It looks like you wanted an image, but I couldn't quite understand the details, or the description was too short/long. Please try again with a clear prompt between 5 and 300 characters, like: 'generate image of a happy cat'.";
-                if (standardTextResponse) {
-                    failureText = `${standardTextResponse}\n\nRegarding your image request: ${failureText}`;
-                }
-                await this.postReply(latestPost.post, failureText);
+              if (commandSearchText.startsWith("!post+image ")) {
+                  isImageCommand = true;
+                  commandContent = commandSearchText.substring("!post+image ".length).trim();
+              } else if (commandSearchText.startsWith("!post ")) {
+                  isImageCommand = false;
+                  commandContent = commandSearchText.substring("!post ".length).trim();
+              }
+
+              if (commandSearchText.startsWith("!post+image ") || commandSearchText.startsWith("!post ")) {
+                console.log(`[Monitor] Admin command detected: "${commandSearchText}" in post ${currentPostObject.uri}`);
+                await this.handleAdminPostCommand(currentPostObject, commandContent, isImageCommand);
+                isAdminCmdHandled = true;
               } else {
-                if (standardTextResponse) {
-                    await this.postReply(latestPost.post, standardTextResponse);
+                console.log(`[Monitor] Admin post ${currentPostObject.uri} included '!post' but not as a recognized command prefix.`);
+              }
+            }
+
+            if (!isAdminCmdHandled) {
+              if (await this.hasAlreadyReplied(currentPostObject)) { // Pass the full post object
+                console.log(`[Monitor] Already replied to post ${currentPostObject.uri} or it's a like. Skipping.`);
+                continue;
+              }
+
+              // Standard response generation for mentions, replies, quotes
+              console.log(`[Monitor] Processing notification for post ${currentPostObject.uri} from @${currentPostObject.author.handle}, reason: ${notif.reason}`);
+              const context = await this.getReplyContext(currentPostObject); // Pass the full post object
+              const responseText = await this.generateResponse(currentPostObject, context); // Pass the full post object
+
+              if (responseText) { // generateResponse now handles search history internally and might return null
+                // Image generation request detection (simplified for brevity, actual logic is more complex)
+                const imageRequestKeywords = ["generate image", "create a picture of"]; // Simplified
+                let isImageRequest = false;
+                let imagePrompt = "";
+                const lowercasedText = (currentPostObject.record.text || "").toLowerCase();
+                for (const keyword of imageRequestKeywords) {
+                    if (lowercasedText.includes(keyword)) {
+                        isImageRequest = true;
+                        imagePrompt = lowercasedText.replace(keyword, "").trim().replace(/^of /,"").trim();
+                        break;
+                    }
+                }
+
+                if (isImageRequest && imagePrompt) {
+                    console.log(`[Monitor] Image request detected in ${currentPostObject.uri}. Prompt: "${imagePrompt}"`);
+                    const scoutResult = await this.processImagePromptWithScout(imagePrompt);
+                    if (!scoutResult.safe) {
+                        await this.postReply(currentPostObject, `${responseText}\n\nRegarding your image request: ${scoutResult.reply_text}`);
+                    } else {
+                        const imageBase64 = await this.generateImage(scoutResult.image_prompt);
+                        if (imageBase64) {
+                            const altText = await this.describeImageWithScout(imageBase64) || "Generated image";
+                            await this.postReply(currentPostObject, `${responseText}\n\nHere's the image you requested:`, imageBase64, altText);
+                        } else {
+                            await this.postReply(currentPostObject, `${responseText}\n\nI tried to generate an image for "${scoutResult.image_prompt}", but it didn't work out this time.`);
+                        }
+                    }
+                } else {
+                    await this.postReply(currentPostObject, responseText);
                 }
               }
             }
-          }
+          } // end for...of notifications loop
+
           consecutiveErrors = 0;
+          // Update lastSeenNotificationTimestamp based on the newest processed notification if using timestamp cursor
+          if (notifications.length > 0) {
+             // lastSeenNotificationTimestamp = new Date(notifications[0].indexedAt); // Assuming notifications are newest first
+          }
           await utils.sleep(this.config.CHECK_INTERVAL);
         } catch (error) {
           console.error('Error in monitoring loop:', error);
@@ -570,12 +570,18 @@ class BaseBot {
 
   async getRecentPosts() {
     try {
-      const { data: notifications } = await this.agent.listNotifications({ limit: 20 });
-      if (!notifications || !notifications.notifications) throw new Error('No notifications returned');
-      const relevantPosts = notifications.notifications
-        .filter(notif => notif.reason !== 'like' && notif.author.handle !== this.config.BLUESKY_IDENTIFIER)
-        .map(notif => ({ post: { uri: notif.uri, cid: notif.cid, author: notif.author, record: notif.record } }));
-      return relevantPosts;
+      // Fetch a broader set of notifications, including likes
+      const { data: notificationResponse } = await this.agent.listNotifications({ limit: 30 }); // Fetch more to see various types
+      if (!notificationResponse || !notificationResponse.notifications) {
+        console.warn('[getRecentPosts] No notifications object returned or empty notifications array.');
+        return [];
+      }
+      // We will return the raw notifications and let the monitor loop decide how to process them.
+      // Still filter out notifications triggered by the bot itself.
+      const allNotifications = notificationResponse.notifications.filter(
+        notif => notif.author.handle !== this.config.BLUESKY_IDENTIFIER
+      );
+      return allNotifications;
     } catch (error) {
       console.error('Error in getRecentPosts:', error);
       return [];
@@ -635,6 +641,7 @@ class BaseBot {
       const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
       const MAX_PARTS = 3;
       let textParts = [];
+      const postedPartUris = []; // Initialize array to store URIs of posted parts
 
       let currentReplyTo = {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
@@ -765,6 +772,7 @@ class BaseBot {
           console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..."`);
           const result = await this.agent.post(replyObject);
           console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}`);
+          postedPartUris.push(result.uri); // Add successfully posted URI
 
           if (!isLastPart) { // For the next part, reply to the part just posted
               currentReplyTo = {
@@ -774,9 +782,11 @@ class BaseBot {
           }
       }
       this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
+      return postedPartUris; // Return the array of URIs
     } catch (error) {
       console.error('Error posting multi-part reply:', error);
       this.repliedPosts.add(post.uri); // Still mark as replied to avoid loops on error
+      return postedPartUris; // Return any URIs that were successfully posted before the error
     }
   }
 
@@ -787,6 +797,12 @@ class BaseBot {
 
 // Llama-specific implementation
 class LlamaBot extends BaseBot {
+  // NOTE FOR FUTURE DEVELOPMENT on popularity sorting:
+  // When implementing features to sort posts by popularity (e.g., "most liked posts"),
+  // prioritize using the `likeCount` property directly available on `app.bsky.feed.defs#postView` objects.
+  // These objects are returned by feed-generating endpoints like `getAuthorFeed` and `getPostThread`.
+  // This is more API-efficient than calling `app.bsky.feed.getLikes` for every post just to get its count.
+  // `getLikes` should primarily be used if the actual list of likers is needed for a specific post.
   constructor(config, agent) {
     super(config, agent);
   }
@@ -916,44 +932,80 @@ class LlamaBot extends BaseBot {
               parent: { uri: summaryPostUriUserIsReplyingTo, cid: post.record.reply.parent.cid }
             };
 
-            const detailImageBase64 = storedDataForFollowUp.imageBase64; // Get stored image data
+            const detailImageBase64 = storedDataForFollowUp.imageBase64;
             const detailAltText = storedDataForFollowUp.altText;
 
+            // The 'post' object here is the user's message like "yes, tell me more".
+            // We need to reply to the bot's summary message, which is storedDataForFollowUp.summaryPostUri
+            // And the root of the thread is storedDataForFollowUp.replyToRootUri
+
+            let replyTargetForThisSequence = { // This is what each detailed point will reply to initially.
+                root: { uri: storedDataForFollowUp.replyToRootUri, cid: null }, // CID of root is not critical here, URI is.
+                parent: { uri: storedDataForFollowUp.summaryPostUri, cid: null } // Replying to the bot's summary post.
+            };
+            // The `post` object that `this.postReply` needs should be a mock or minimal representation
+            // of the post we are replying to, for constructing the replyRef.
+            // Let's construct a minimal 'parentPostForReply' object.
+             const parentPostForReply = {
+                uri: storedDataForFollowUp.summaryPostUri, // The summary post by the bot
+                cid: null, // CID might not be readily available here, but URI is key for reply parent ref
+                author: { did: this.agent.did, handle: this.config.BLUESKY_IDENTIFIER }, // Bot's identity
+                record: {
+                    // text: "summary text placeholder", // Not strictly needed for reply ref
+                    reply: { // The summary post itself was a reply to the original user query
+                        root: { uri: storedDataForFollowUp.replyToRootUri },
+                        parent: { uri: storedDataForFollowUp.replyToRootUri } // Simplified, could be more complex
+                    }
+                }
+            };
+
+
             for (let i = 0; i < storedDataForFollowUp.points.length; i++) {
-              const pointText = storedDataForFollowUp.points[i];
-              const isLastDetailPart = i === storedDataForFollowUp.points.length - 1;
+              const pointText = storedDataForFollowUp.points[i]; // Already cleaned
+              const isLastConceptualPoint = i === storedDataForFollowUp.points.length - 1;
 
-              let detailPostText = pointText;
-              // Suffix is added for all detail parts, even if only one detail part.
-              detailPostText = `${pointText.trim()} ... [${i + 1}/${storedDataForFollowUp.points.length}]`;
+              console.log(`[FollowUp] Preparing to post conceptual detail point ${i+1}/${storedDataForFollowUp.points.length}`);
 
-              const replyObject = {
-                text: utils.truncateResponse(detailPostText, 300),
-                reply: currentDetailReplyTarget
+              // Each `pointText` will be posted. If it's long, `this.postReply` will split it.
+              // The image is only attached to the very last segment of the very last conceptual point.
+              const imageToSendWithThisPoint = isLastConceptualPoint ? detailImageBase64 : null;
+              const altTextForThisPoint = isLastConceptualPoint ? detailAltText : "Generated image";
+
+              // We need to pass a 'post' object to this.postReply that represents the post we are replying to.
+              // For the first detailed point, it's parentPostForReply (the summary).
+              // For subsequent points, it's the last part of the previous point.
+              const currentParentPostForReply = {
+                uri: replyTargetForThisSequence.parent.uri,
+                cid: replyTargetForThisSequence.parent.cid, // May be null if not easily available
+                author: { did: this.agent.did }, // Assuming replying to bot's own chain
+                record: { reply: { root: replyTargetForThisSequence.root }} // Ensure root is threaded correctly
               };
 
-              if (isLastDetailPart && detailImageBase64) {
-                 try {
-                  const imageBytes = Uint8Array.from(Buffer.from(detailImageBase64, 'base64'));
-                  if (imageBytes.length > 0) {
-                    const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
-                    if (uploadedImage?.data?.blob) {
-                      replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: detailAltText }] };
-                       console.log(`[FollowUp] Attached image to detail part ${i+1}`);
-                    }
-                  }
-                } catch (imgErr) { console.error("[FollowUp] Error attaching image to detail post:", imgErr); }
+              const postedPartsUris = await this.postReply(
+                currentParentPostForReply, // The post this point is replying to
+                pointText,
+                imageToSendWithThisPoint,
+                altTextForThisPoint
+              );
+
+              if (postedPartsUris && postedPartsUris.length > 0) {
+                // Update replyTargetForThisSequence for the *next* conceptual point
+                // It should reply to the *last part* of the current conceptual point.
+                replyTargetForThisSequence.parent = {
+                    uri: postedPartsUris[postedPartsUris.length - 1],
+                    // We don't easily get the CID back from postReply's agent.post,
+                    // but URI is the critical part for the reply parent reference.
+                    // The @atproto/api might handle CID resolution internally or it might be optional for reply refs.
+                    cid: null // Placeholder, as postReply doesn't return CIDs of new posts.
+                };
+                console.log(`[FollowUp] Conceptual point ${i+1} posted. Next reply parent URI: ${replyTargetForThisSequence.parent.uri}`);
+              } else {
+                console.error(`[FollowUp] Failed to post conceptual detail point ${i+1}. Aborting further details.`);
+                break;
               }
 
-              console.log(`[FollowUp] Posting detail ${i+1}/${storedDataForFollowUp.points.length}: "${replyObject.text.substring(0,50)}..." replying to ${currentDetailReplyTarget.parent.uri}`);
-              const result = await this.agent.post(replyObject);
-              console.log(`[FollowUp] Successfully posted detail part ${i+1}: ${result.uri}`);
-
-              if (!isLastDetailPart) {
-                currentDetailReplyTarget.parent = { uri: result.uri, cid: result.cid };
-              }
-              if (storedDataForFollowUp.points.length > 1 && i < storedDataForFollowUp.points.length -1) {
-                 await utils.sleep(1000);
+              if (storedDataForFollowUp.points.length > 1 && !isLastConceptualPoint) {
+                 await utils.sleep(1500); // Slightly longer delay between conceptual points
               }
             }
             this.pendingDetailedAnalyses.delete(keyForDeletion);
@@ -968,136 +1020,303 @@ class LlamaBot extends BaseBot {
 
     // If not a follow-up or follow-up not actioned, proceed with normal response generation
     try {
-      let conversationHistory = '';
-      if (context && context.length > 0) {
-        for (const msg of context) {
-          conversationHistory += `${msg.author}: ${msg.text}\n`;
-          if (msg.images && msg.images.length > 0) {
-            msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
-          }
+      const userQueryText = post.record.text; // The current user's message text
+
+      // 1. Check for search history intent first
+      const searchIntent = await this.getSearchHistoryIntent(userQueryText);
+
+      if (searchIntent.intent === "search_history") {
+        console.log(`[SearchHistory] Intent detected. Criteria:`, searchIntent);
+        let matches = [];
+        let searchPerformed = ""; // To describe which search was done
+
+        // Priority 1: Bot gallery search for images by the bot
+        if (searchIntent.target_type === "image" && searchIntent.author_filter === "bot" && searchIntent.search_scope === "bot_gallery") {
+          console.log("[SearchHistory] Performing bot media gallery search.");
+          matches = await this.searchBotMediaGallery(searchIntent.keywords, 1); // Get top 1
+          searchPerformed = "in my own image gallery";
         }
-      }
 
-      let userBlueskyPostsContext = "";
-      // const userPostTextLower = post.record.text.toLowerCase(); // No longer needed for keywords
-      // const profileKeywords = ["my profile", "about me", "what do you think of me", "my posts", "my feed"]; // Remove keywords
+        // Priority 2 (or fallback): Conversation history search
+        // This will run if it's not a bot_gallery search, or if bot_gallery search yielded no results (and we decide to fallback)
+        if (matches.length === 0 && searchIntent.search_scope !== "bot_gallery_only") { // Added a hypothetical scope to prevent fallback if desired, default is to fallback
+          console.log("[SearchHistory] Performing conversation history search.");
+          const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
+          searchPerformed = "in our recent conversation history";
+          if (conversationHistoryItems && conversationHistoryItems.length > 0) {
+            matches = conversationHistoryItems.filter(item => {
+              let authorMatch = false;
+              if (searchIntent.author_filter === "user" && item.authorDid === post.author.did) authorMatch = true;
+              else if (searchIntent.author_filter === "bot" && item.authorDid === this.agent.did) authorMatch = true;
+              else if (searchIntent.author_filter === "any") authorMatch = true;
+              if (!authorMatch) return false;
 
-      const fetchContextDecision = await this.shouldFetchProfileContext(post.record.text);
+              let typeMatch = false;
+              if (searchIntent.target_type === "image") {
+                if ((item.embedDetails?.type === 'images' && item.embedDetails.images?.length > 0) ||
+                    (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'images' && item.embedDetails.media.images?.length > 0)) {
+                  typeMatch = true;
+                }
+              } else if (searchIntent.target_type === "link") {
+                if ((item.embedDetails?.type === 'external') ||
+                    (item.embedDetails?.type === 'recordWithMedia' && item.embedDetails.media?.type === 'external')) {
+                  typeMatch = true;
+                }
+              } else if (searchIntent.target_type === "post" || searchIntent.target_type === "message" || searchIntent.target_type === "unknown") {
+                typeMatch = true;
+              }
+              if (!typeMatch) return false;
 
-      if (fetchContextDecision) {
-        console.log(`[Context] Scout determined profile context should be fetched for DID: ${post.author.did}. Query: "${post.record.text}"`);
-        try {
-          let fetchedPostsCount = 0;
-          let authorFeedCursor = undefined;
-          const maxPostsToFetch = 100;
-          let postsLimitPerCall = 50; // Max per call is often 100, but 50 is safe.
-
-          const collectedPosts = [];
-
-          while (fetchedPostsCount < maxPostsToFetch) {
-            if (maxPostsToFetch - fetchedPostsCount < postsLimitPerCall) {
-                postsLimitPerCall = maxPostsToFetch - fetchedPostsCount;
-            }
-            if (postsLimitPerCall <= 0) break;
-
-            console.log(`[Context] Fetching posts for ${post.author.did}, limit: ${postsLimitPerCall}, cursor: ${authorFeedCursor}`);
-            const authorFeed = await this.agent.api.app.bsky.feed.getAuthorFeed({
-              actor: post.author.did,
-              limit: postsLimitPerCall,
-              cursor: authorFeedCursor,
-              filter: 'posts_with_replies' // or 'posts_no_replies' / 'posts_and_author_threads'
-            });
-
-            if (authorFeed.success && authorFeed.data.feed.length > 0) {
-              for (const feedItem of authorFeed.data.feed) {
-                if (feedItem.post && feedItem.post.record) {
-                  let postText = feedItem.post.record.text || "";
-                  const postAuthorHandle = feedItem.post.author.handle;
-                  const userWhoseFeedIsBeingFetched = post.author.handle; // Assuming 'post' here is the original post that triggered the bot
-
-                  let postDetail = "";
-                  const snippetMaxLength = 75; // Max length for text snippets in context
-                  const truncateText = (text, maxLength) => {
-                    if (!text) return "";
-                    return text.length > maxLength ? text.substring(0, maxLength - 3) + "..." : text;
-                  };
-
-                  if (feedItem.reason && feedItem.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
-                    // This is a repost BY THE USER whose feed we are fetching
-                    // The feedItem.post is the post that was reposted.
-                    const originalAuthorHandle = feedItem.post.author.handle;
-                    const originalPostText = truncateText(feedItem.post.record.text, snippetMaxLength);
-                    postDetail = `User (${userWhoseFeedIsBeingFetched}) reposted from @${originalAuthorHandle}: "${originalPostText}"`;
-                  } else if (postAuthorHandle === userWhoseFeedIsBeingFetched) {
-                    // This is an original action by the user (post, reply, quote post)
-                    if (feedItem.post.record.reply) {
-                      const parentAuthorHandle = feedItem.reply?.parent?.author?.handle || 'another user';
-                      postDetail = `User (${userWhoseFeedIsBeingFetched}) replied to @${parentAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
-                    } else if (feedItem.post.record.embed && feedItem.post.record.embed.$type === 'app.bsky.embed.record') {
-                      // This is a quote post by the user
-                      const quotedRecord = feedItem.post.record.embed.record;
-                      // The 'quotedRecord' could be a full post object or a more minimal reference.
-                      // We need to fetch the actual quoted post's content if it's just a reference,
-                      // but for simplicity in context, we'll try to get text if available directly.
-                      // A full implementation might require another fetch for `quotedRecord.uri` if text isn't readily available.
-                      let quotedTextSnippet = "a post";
-                      let quotedAuthor = "another user";
-                      if (quotedRecord && quotedRecord.value && quotedRecord.value.text) { // Ideal case: full record embedded
-                          quotedTextSnippet = truncateText(quotedRecord.value.text, snippetMaxLength);
-                          quotedAuthor = quotedRecord.author?.handle || quotedAuthor;
-                      } else if (quotedRecord && quotedRecord.uri) {
-                          // If only URI, we could fetch it, but let's keep it simple for now.
-                          // This part might need enhancement if full quoted text is critical.
-                          quotedTextSnippet = `a post (URI: ${quotedRecord.uri.split('/').pop()})`;
-                          // Attempt to get author from URI if possible, otherwise use a generic term
-                          const didMatch = quotedRecord.uri.match(/at:\/\/(did:[^/]+)/);
-                          if (didMatch && didMatch[1] && didMatch[1] !== post.author.did) { // Avoid self-quotes being confusingly attributed
-                            // Ideally, resolve DID to handle here, but that's another API call.
-                            // For now, we'll just note the DID or a generic term.
-                            // This is a simplification; resolving DID to handle would be better.
-                            // For now, we assume `feedItem.post.record.embed.record.author.handle` might exist if it's a resolved embed.
-                            quotedAuthor = feedItem.post.record.embed.record.author?.handle || `user (${didMatch[1].substring(0,10)}...)`;
-                          }
-                      }
-                      postDetail = `User (${userWhoseFeedIsBeingFetched}) quote posted (commenting on @${quotedAuthor}'s post): "${truncateText(postText, snippetMaxLength)}" which quoted: "${quotedTextSnippet}"`;
-                    } else {
-                      // Original post by the user
-                      postDetail = `User (${userWhoseFeedIsBeingFetched}) posted: "${truncateText(postText, snippetMaxLength)}"`;
-                    }
-                  } else {
-                    // This case should ideally not happen if getAuthorFeed is working as expected for 'userWhoseFeedIsBeingFetched'
-                    // It means a post in the feed is not by the user and not a repost by the user.
-                    // However, to be safe, we can log it or create a generic entry.
-                    console.log(`[Context] Encountered unexpected item in feed for ${userWhoseFeedIsBeingFetched}: Post by ${postAuthorHandle}`);
-                    postDetail = `Feed item concerning @${userWhoseFeedIsBeingFetched}: A post by @${postAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
-                  }
-
-                  if (postDetail) {
-                    collectedPosts.push(postDetail);
-                    fetchedPostsCount++;
-                    if (fetchedPostsCount >= maxPostsToFetch) break;
+              if (searchIntent.keywords && searchIntent.keywords.length > 0) {
+                const itemTextLower = (item.text || "").toLowerCase();
+                let embedTextLower = "";
+                if (item.embedDetails?.type === 'images' && item.embedDetails.images) {
+                  embedTextLower += item.embedDetails.images.map(img => img.alt || "").join(" ").toLowerCase();
+                } else if (item.embedDetails?.type === 'external' && item.embedDetails.external) {
+                  embedTextLower += (item.embedDetails.external.title || "").toLowerCase() + " " + (item.embedDetails.external.description || "").toLowerCase();
+                } else if (item.embedDetails?.type === 'record' && item.embedDetails.record) {
+                  embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase();
+                } else if (item.embedDetails?.type === 'recordWithMedia') {
+                  if (item.embedDetails.record) embedTextLower += (item.embedDetails.record.textSnippet || "").toLowerCase() + " ";
+                  if (item.embedDetails.media?.type === 'images' && item.embedDetails.media.images) {
+                     embedTextLower += item.embedDetails.media.images.map(img => img.alt || "").join(" ").toLowerCase();
+                  } else if (item.embedDetails.media?.type === 'external' && item.embedDetails.media.external) {
+                     embedTextLower += (item.embedDetails.media.external.title || "").toLowerCase() + " " + (item.embedDetails.media.external.description || "").toLowerCase();
                   }
                 }
+                const combinedTextForKeywordSearch = itemTextLower + " " + embedTextLower;
+                if (!searchIntent.keywords.every(kw => combinedTextForKeywordSearch.includes(kw.toLowerCase()))) {
+                  return false;
+                }
               }
-              authorFeedCursor = authorFeed.data.cursor;
-              if (!authorFeedCursor || authorFeed.data.feed.length < postsLimitPerCall || fetchedPostsCount >= maxPostsToFetch) {
-                console.log("[Context] No more posts or cursor from getAuthorFeed.");
-                break;
-              }
-            } else {
-              console.log("[Context] No posts found in this batch or API call failed.");
-              break;
-            }
+              return true;
+            });
+          }
+        }
+
+        let nemotronSearchPrompt = "";
+        if (matches.length > 0) {
+          const topMatch = matches[0]; // Get the single best match
+          const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
+
+          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          if (searchIntent.recency_cue) {
+            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+          }
+          // Add where it was found:
+          userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
+
+
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}" or "This might be what you're looking for from ${searchIntent.recency_cue || 'recently'} ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+
+          if (matches.length > 1 && searchPerformed === "in our recent conversation history") { // Only show multi-match note if it was from conversation history for now
+            nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches from our conversation, but I'm giving you the URL for the most relevant one based on recency and keywords. The user's recency cue was "${searchIntent.recency_cue}". Focus the user response on the single URL provided.)`;
+          } else if (matches.length > 1 && searchPerformed === "in my own image gallery"){
+             nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches in my gallery. Showing the most relevant. The user's recency cue was "${searchIntent.recency_cue}".)`;
           }
 
-          if (collectedPosts.length > 0) {
-            userBlueskyPostsContext = "\n\nHere are some of the user's recent Bluesky posts for additional context:\n" + collectedPosts.join("\n---\n") + "\n\n";
-            console.log(`[Context] Added ${collectedPosts.length} posts to Nemotron context.`);
+
+        } else {
+          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          if (searchIntent.recency_cue) {
+            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+          }
+          // Add where it was searched, even for no results
+          userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
+
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched ${searchPerformed} but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description ${searchPerformed} from ${searchIntent.recency_cue || 'recently'} but couldn't find it. Could you try different keywords?"`;
+        }
+
+        console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
+
+        // System prompt for Nemotron when handling search results - updated for conciseness
+        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's original query (including any recency cue they gave like 'yesterday') and the search result (either a direct Post URL if found, or a message that nothing was found along with the keywords used for the search and where the search was performed). If a Post URL is provided, your response to the user MUST consist of a brief confirmation phrase (which can acknowledge their recency cue and where it was found, e.g. 'in my gallery' or 'in our conversation') and then the Post URL itself. Do not add extra descriptions, author details, or text snippets unless they are part of the brief confirmation phrase. If nothing was found, state that clearly and politely, you can mention the keywords used for the search and where you looked if it seems helpful for the user to refine their query.";
+        console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+        const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${searchSystemPrompt}` },
+              { role: "user", content: nemotronSearchPrompt } // nemotronSearchPrompt already contains user's original query and results
+            ],
+            temperature: 0.5, // Slightly lower temp for factual presentation
+            max_tokens: 200,
+            stream: false
+          })
+        });
+        console.log(`NIM CALL END: Search History Response - Status: ${nimSearchResponse.status}`);
+
+        if (nimSearchResponse.ok) {
+          const nimSearchData = await nimSearchResponse.json();
+          if (nimSearchData.choices && nimSearchData.choices.length > 0 && nimSearchData.choices[0].message && nimSearchData.choices[0].message.content) {
+            const finalSearchResponseText = nimSearchData.choices[0].message.content.trim();
+            // Minimal formatting by Scout, similar to other responses
+            const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: finalSearchResponseText }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                })
+            });
+            if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                     await this.postReply(post, finalSearchResponseText); // Fallback to unfiltered if Scout formatting fails
+                }
+            } else {
+               await this.postReply(post, finalSearchResponseText); // Fallback to unfiltered if Scout call fails
+            }
           } else {
-            console.log(`[Context] No posts were fetched for ${post.author.did} to add to context.`);
+            console.error('[SearchHistory] Nvidia NIM API response for search was ok, but no content found:', JSON.stringify(nimSearchData));
+            await this.postReply(post, "I found some information, but had a slight hiccup displaying it. You might want to try asking again!");
+          }
+        } else {
+          const errorText = await nimSearchResponse.text();
+          console.error(`[SearchHistory] Nvidia NIM API error for search response (${nimSearchResponse.status}) - Text: ${errorText}`);
+          await this.postReply(post, "I had a little trouble formulating a response for your search query. Please try again!");
+        }
+        return null, // End processing for this interaction
+      }
+
+      } else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
+        console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
+
+        const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
+        if (!isQuerySafe) {
+          console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
+          const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
+          // No LLM call needed for this fixed response, but Scout formatting is good practice
+           const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: unsafeQueryResponse }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                })
+            });
+             if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                     await this.postReply(post, unsafeQueryResponse);
+                }
+            } else {
+               await this.postReply(post, unsafeQueryResponse);
+            }
+          return null;
+        }
+
+        const searchResults = await this.performWebSearch(searchIntent.search_query);
+        let nemotronWebServicePrompt = "";
+        const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}".
+Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
+Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
+If the search results do not provide a clear answer, state that you couldn't find specific information from the web for their query.
+Do not make up information not present in the search results. Keep the response suitable for a social media post.`;
+
+        if (searchResults && searchResults.length > 0) {
+          const resultsText = searchResults.map((res, idx) =>
+            `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`
+          ).join("\n\n---\n");
+          nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nWeb Search Results:\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
+        } else {
+          nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nNo clear results were found from the web search. Please inform the user politely that you couldn't find information for their query via web search and suggest they rephrase or try a search engine directly.`;
+        }
+
+        console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
+        const nimWebResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or another suitable model for synthesis
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${webSearchSystemPrompt}` },
+              { role: "user", content: nemotronWebServicePrompt }
+            ],
+            temperature: 0.6,
+            max_tokens: 250, // Allow for a slightly longer synthesized answer
+            stream: false
+          })
+        });
+
+        if (nimWebResponse.ok) {
+          const nimWebData = await nimWebResponse.json();
+          if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
+            const synthesizedResponse = nimWebData.choices[0].message.content.trim();
+            // Scout formatting
+            const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: synthesizedResponse }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                })
+            });
+            if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                    await this.postReply(post, synthesizedResponse);
+                }
+            } else {
+               await this.postReply(post, synthesizedResponse);
+            }
+          } else {
+            await this.postReply(post, "I searched the web but had a little trouble putting together an answer. You could try rephrasing your question!");
+          }
+        } else {
+          const errorText = await nimWebResponse.text();
+          console.error(`[WebSearchFlow] Nvidia NIM API error for web synthesis (${nimWebResponse.status}) - Text: ${errorText}`);
+          await this.postReply(post, "I encountered an issue while trying to process information from the web. Please try again later.");
+        }
+        return null; // End processing for this interaction
+      } else { // Neither search_history nor web_search: proceed with original logic (profile analysis / standard reply)
+        let conversationHistory = '';
+        if (context && context.length > 0) {
+          for (const msg of context) {
+            conversationHistory += `${msg.author}: ${msg.text}\n`;
+            if (msg.images && msg.images.length > 0) {
+              msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
+            }
+          }
+        }
+
+        let userBlueskyPostsContext = "";
+        const fetchContextDecision = await this.shouldFetchProfileContext(userQueryText);
+
+        if (fetchContextDecision) {
+          console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${userQueryText}"`);
+        try {
+          const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
+          if (conversationHistoryItems.length > 0) {
+            userBlueskyPostsContext = "\n\nRecent conversation history between you and the user (" + post.author.handle + "):\n" + conversationHistoryItems.map(item => `${item.authorHandle}: ${item.text}`).join("\n---\n") + "\n\n";
+            console.log(`[Context] Added ${conversationHistoryItems.length} conversation messages to Nemotron context.`);
+          } else {
+            console.log(`[Context] No direct conversation history found between user ${post.author.did} and bot ${this.agent.did}.`);
+            // Optionally, you could fall back to the old general user feed fetching here, or decide that no context is better.
+            // For now, we'll proceed without this specific context if it's empty.
           }
         } catch (error) {
-          console.error(`[Context] Error fetching Bluesky posts for ${post.author.did}:`, error);
+          console.error(`[Context] Error fetching conversation history between user ${post.author.did} and bot ${this.agent.did}:`, error);
         }
       }
 
@@ -1117,14 +1336,16 @@ This summary **must end with a clear question inviting the user to ask for more 
 
 PART 2: DETAILED ANALYSIS POINTS
 Immediately following Part 1, and on new lines, provide 1 to 3 detailed analysis points.
-Each point must start with an exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc.
-Each detailed point should be written as a complete, standalone message (under 290 characters), suitable for a separate Bluesky post. Ensure any internal lists (e.g., "1. Sub-point A, 2. Sub-point B") are well-formed within each point.
-Analyze themes, common topics, or aspects of their online presence as reflected in their posts, replies, quote posts, and attributed reposts.
+Each point MUST start with the exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc. NO OTHER TEXT BEFORE THE MARKER ON THAT LINE.
+For each point, write a short paragraph (around 2-4 sentences, keeping total under 290 characters for a Bluesky post) that flows naturally as if you are explaining your insights one by one.
+Your tone should be insightful, friendly, and engaging, reflecting your persona: "${this.config.TEXT_SYSTEM_PROMPT}".
+Avoid starting the *content* of a point with "1.", "a)", or other list markers unless it's a very natural way to present a list *within* your flowing explanation. Focus on conversational delivery of each distinct insight.
+Analyze themes, common topics, or aspects of their interaction as reflected in the provided context (conversation history or user's general activity).
 
-USER'S RECENT BLUESKY ACTIVITY:
+USER'S RECENT BLUESKY ACTIVITY (or CONVERSATION HISTORY):
 ${userBlueskyPostsContext}
 ---
-${conversationHistory ? `\nBrief conversation history for immediate interaction context (less critical than the Bluesky Activity for this specific analysis):\n${conversationHistory}\n---` : ''}
+${conversationHistory ? `\nBrief current thread context (less critical than the main context above for this specific analysis):\n${conversationHistory}\n---` : ''}
 Your structured response (Summary with Invitation, then Detailed Points):
 ${baseInstruction}`;
       } else {
@@ -1214,48 +1435,54 @@ ${baseInstruction}`;
           let textAfterSummaryMarker = scoutFormattedText.substring(summaryStartIndex + summaryMarker.length);
 
           let nextDetailPointIndex = textAfterSummaryMarker.indexOf(detailMarkerBase + "1]");
-          if (nextDetailPointIndex === -1) { // Maybe no detail points, or marker format issue
-            summaryText = textAfterSummaryMarker.trim(); // Assume all remaining text is summary
+          if (nextDetailPointIndex === -1) {
+            summaryText = textAfterSummaryMarker.trim();
           } else {
             summaryText = textAfterSummaryMarker.substring(0, nextDetailPointIndex).trim();
-            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex); // Remaining text has detail points
+            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex);
           }
 
           // Extract detailed points
-          let currentPoint = 1;
-          while (true) {
-            const currentDetailMarker = `${detailMarkerBase}${currentPoint}]`;
-            const nextDetailMarker = `${detailMarkerBase}${currentPoint + 1}]`;
+          let currentPointNum = 1;
+          while (detailedPoints.length < 3) { // Max 3 detailed points
+            const currentDetailMarker = `${detailMarkerBase}${currentPointNum}]`;
+            const nextDetailMarker = `${detailMarkerBase}${currentPointNum + 1}]`;
 
             const startOfCurrentPoint = textAfterSummaryMarker.indexOf(currentDetailMarker);
-            if (startOfCurrentPoint === -1) break; // No more points with this number
+            if (startOfCurrentPoint === -1) break;
 
             let endOfCurrentPoint = textAfterSummaryMarker.indexOf(nextDetailMarker, startOfCurrentPoint + currentDetailMarker.length);
-            let pointText;
+            let pointTextContent;
 
-            if (endOfCurrentPoint === -1) { // This is the last detail point
-              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
+            if (endOfCurrentPoint === -1) {
+              pointTextContent = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
             } else {
-              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
+              pointTextContent = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
             }
 
-            if (pointText) detailedPoints.push(pointText);
-            if (endOfCurrentPoint === -1 || detailedPoints.length >= 3) break; // Max 3 detail points
+            // Clean any leading list-like markers from Nemotron/Scout
+            pointTextContent = pointTextContent.replace(/^(\s*(\d+\.|\d+\)|\*|-)\s*)+/, '').trim();
 
-            currentPoint++;
+            if (pointTextContent) {
+                detailedPoints.push(pointTextContent);
+            }
+
+            if (endOfCurrentPoint === -1) break; // Last point processed
+            textAfterSummaryMarker = textAfterSummaryMarker.substring(endOfCurrentPoint); // Move to the start of the next potential marker
+            currentPointNum++;
           }
 
           console.log(`[LlamaBot.generateResponse] Parsed Summary: "${summaryText}"`);
-          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1}: "${p}"`));
+          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1} (cleaned): "${p.substring(0,100)}..."`));
 
           if (summaryText) {
             // Store detailed points if any, then return only summary for initial post
             // Post the summary first. No image on summary.
-            const summaryPostedUris = await this.postReply(post, summaryText, null, null);
+            const summaryPostUrisArray = await this.postReply(post, summaryText, null, null);
 
-            if (summaryPostedUris && summaryPostedUris.length > 0) {
-              const summaryPostUri = summaryPostedUris[0];
-              console.log(`[LlamaBot.generateResponse] Summary posted successfully: ${summaryPostUri}`);
+            if (summaryPostUrisArray && summaryPostUrisArray.length > 0) {
+              const summaryPostUri = summaryPostUrisArray[summaryPostUrisArray.length - 1]; // Get the last part's URI
+              console.log(`[LlamaBot.generateResponse] Summary posted successfully. Last part URI: ${summaryPostUri}. Total parts: ${summaryPostUrisArray.length}`);
               if (detailedPoints.length > 0) {
                 this.pendingDetailedAnalyses.set(post.uri, { // Keyed by original user post URI
                   points: detailedPoints,
@@ -1297,6 +1524,592 @@ ${baseInstruction}`;
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  /**
+   * Fetches and constructs a chronological conversation history between a specific user and the bot.
+   *
+   * Test Cases for getBotUserConversationHistory:
+   * 1.  Empty Feeds: Both user and bot feeds return no posts. Expected: Empty history.
+   * 2.  Only User Posts, No Interaction: User has posts, but none are replies to or mentions of the bot. Bot has no relevant posts. Expected: Empty history.
+   * 3.  Only Bot Posts, No Interaction: Bot has posts, but none are replies to or mentions of the user. User has no relevant posts. Expected: Empty history.
+   * 4.  User Replies to Bot: User's feed contains replies to the bot. Bot's feed is empty/irrelevant. Expected: History contains user's replies.
+   * 5.  Bot Replies to User: Bot's feed contains replies to the user. User's feed is empty/irrelevant. Expected: History contains bot's replies.
+   * 6.  User Mentions Bot: User's feed contains posts mentioning the bot (via DID in facet). Expected: History contains user's mentions.
+   * 7.  Bot Mentions User: Bot's feed contains posts mentioning the user (via DID in facet). Expected: History contains bot's mentions.
+   * 8.  Mixed Interaction: Both user and bot have replies and mentions involving each other. Expected: Combined, sorted history.
+   * 9.  Pagination and Limit: Interaction history is longer than `fetchLimitPerActor` but shorter than `maxAttempts * fetchLimitPerActor`.
+   *     Expected: History is correctly fetched across pages and limited by `historyLimit`.
+   * 10. Deduplication: Ensure posts fetched from both user and bot feeds (if one references the other directly) appear only once.
+   * 11. Sorting: Posts from different feeds and different timestamps are correctly interleaved and sorted chronologically (newest first).
+   * 12. `historyLimit` Enforcement: More than `historyLimit` relevant posts exist. Expected: Only the `historyLimit` most recent posts are returned.
+   * 13. Invalid DIDs/Handles: How it behaves if `getProfile` fails for user handle (should log warning, filtering from bot to user may be less effective).
+   * 14. Facet Variations: Test with different facet structures for mentions, ensuring DID-based matching is robust.
+   *
+   * @param {string} userDid - The DID of the user.
+   * @param {string} botDid - The DID of the bot.
+   * @param {number} historyLimit - The maximum number of conversation items to return.
+   * @returns {Promise<Array<Object>>} A promise that resolves to an array of post objects.
+   */
+  async getBotUserConversationHistory(userDid, botDid, historyLimit) {
+    console.log(`[ConvHistory] Fetching conversation history between user ${userDid} and bot ${botDid}, limit ${historyLimit}`);
+    const allRelevantPosts = [];
+    // Fetch slightly more posts than needed to account for filtering
+    const fetchLimitPerActor = Math.min(100, historyLimit + 25);
+
+    const botHandle = this.config.BLUESKY_IDENTIFIER; // Assuming this is the bot's handle
+
+    // Helper to fetch and filter one actor's feed
+    const fetchAndFilterActorFeed = async (actorToFetchDid, otherActorDid, otherActorHandleToMatch) => {
+      let cursor;
+      const actorPosts = [];
+      let fetchedCount = 0;
+      const maxAttempts = 3; // Max pages to fetch to avoid long loops if history is sparse
+      let attempts = 0;
+
+      while (fetchedCount < fetchLimitPerActor && attempts < maxAttempts) {
+        attempts++;
+        try {
+          console.log(`[ConvHistory] Fetching feed for ${actorToFetchDid}, limit: ${fetchLimitPerActor}, attempt: ${attempts}, cursor: ${cursor}`);
+          const response = await this.agent.api.app.bsky.feed.getAuthorFeed({
+            actor: actorToFetchDid,
+            limit: fetchLimitPerActor, // Request a decent number each time
+            cursor: cursor,
+            filter: 'posts_with_replies'
+          });
+
+          if (!response.success || !response.data.feed) {
+            console.warn(`[ConvHistory] Failed to fetch feed or empty feed for ${actorToFetchDid}`);
+            break;
+          }
+
+          for (const item of response.data.feed) {
+            if (!item.post || !item.post.record) continue;
+
+            const postRecord = item.post.record;
+            const postAuthorDid = item.post.author.did;
+            const postAuthorHandle = item.post.author.handle;
+            const postText = postRecord.text || "";
+            const createdAt = postRecord.createdAt;
+            const postUri = item.post.uri;
+
+            let isRelevant = false;
+
+            // 1. Check for direct replies
+            if (postRecord.reply) {
+              const parentPostUri = postRecord.reply.parent?.uri;
+              if (parentPostUri) {
+                // We need to check if the parent post was authored by the otherActorDid
+                // The `item.reply.parent.author.did` might not always be populated directly in getAuthorFeed.
+                // A more robust check might involve fetching the parent post, but that's expensive.
+                // Let's assume if `reply.parent.author.did` is available, we use it.
+                // Otherwise, we might rely on mentions if the reply structure is not fully detailed.
+                // For now, we'll be optimistic or rely on mentions as a fallback.
+                // A common pattern is that the reply object in the feed item *does* contain parent author info.
+                if (item.reply?.parent?.author?.did === otherActorDid) {
+                  isRelevant = true;
+                  console.log(`[ConvHistory] Relevant reply found: ${postUri} from ${postAuthorHandle} to ${otherActorHandleToMatch}`);
+                }
+              }
+            }
+
+            // 2. Check for mentions (if not already marked as a relevant reply)
+            if (!isRelevant && postRecord.facets) {
+              for (const facet of postRecord.facets) {
+                if (facet.features) {
+                  for (const feature of facet.features) {
+                    if (feature.$type === 'app.bsky.richtext.facet#mention') {
+                      // feature.did should be the DID of the mentioned user
+                      if (feature.did === otherActorDid) {
+                        isRelevant = true;
+                        console.log(`[ConvHistory] Relevant mention found: ${postUri} from ${postAuthorHandle} mentions ${otherActorHandleToMatch}`);
+                        break;
+                      }
+                    }
+                  }
+                }
+                if (isRelevant) break;
+              }
+            }
+
+            // 3. Alternative check for mentions if DID isn't in facet (less reliable but a fallback)
+            // This is more of a heuristic if the DID isn't available in the facet.
+            if (!isRelevant && postText.includes(`@${otherActorHandleToMatch}`)) {
+                 // This could lead to false positives if the handle is mentioned but not as a user mention facet.
+                 // Only use this if other checks fail and you accept potential inaccuracies.
+                 // For now, let's be conservative and rely on facet DIDs or reply structures.
+                 // console.log(`[ConvHistory] Potential relevant text mention: ${postUri} from ${postAuthorHandle} includes @${otherActorHandleToMatch}`);
+                 // isRelevant = true; // Uncomment with caution
+            }
+
+
+            if (isRelevant) {
+              const postToAdd = { // Changed variable name to avoid conflict if currentPost is used elsewhere
+                uri: postUri,
+                text: postText,
+                authorDid: postAuthorDid,
+                authorHandle: postAuthorHandle,
+                createdAt: createdAt,
+                embedDetails: null, // Initialize embedDetails
+              };
+
+              // Temporarily commenting out complex embed processing to isolate syntax error
+              /*
+              if (item.post.embed) {
+                const embed = item.post.embed;
+                if (embed.$type === 'app.bsky.embed.images#view' || embed.$type === 'app.bsky.embed.images') {
+                  postToAdd.embedDetails = {
+                    type: 'images',
+                    images: embed.images?.map(img => ({
+                      alt: img.alt || '',
+                      cid: img.image?.cid || img.cid || null,
+                      thumb: img.thumb || null,
+                      fullsize: img.fullsize || null
+                    })) || []
+                  };
+                } else if (embed.$type === 'app.bsky.embed.external#view' || embed.$type === 'app.bsky.embed.external') {
+                  postToAdd.embedDetails = {
+                    type: 'external',
+                    external: {
+                      uri: embed.external?.uri || embed.uri || '',
+                      title: embed.external?.title || embed.title || '',
+                      description: embed.external?.description || embed.description || ''
+                    }
+                  };
+                } else if (embed.$type === 'app.bsky.embed.record#view' || embed.$type === 'app.bsky.embed.record') {
+                  const embeddedRec = embed.record;
+                  if (embeddedRec) {
+                     postToAdd.embedDetails = {
+                        type: 'record',
+                        record: {
+                          uri: embeddedRec.uri || '',
+                          cid: embeddedRec.cid || '',
+                          authorHandle: embeddedRec.author?.handle || '',
+                          textSnippet: (embeddedRec.value?.text && typeof embeddedRec.value.text === 'string' ? embeddedRec.value.text.substring(0,100) : (typeof embeddedRec.value === 'string' ? embeddedRec.value.substring(0,100) : ''))
+                        }
+                     };
+                  }
+                } else if (embed.$type === 'app.bsky.embed.recordWithMedia#view' || embed.$type === 'app.bsky.embed.recordWithMedia') {
+                  postToAdd.embedDetails = { type: 'recordWithMedia', record: null, media: null };
+                  if (embed.record && (embed.record.$type === 'app.bsky.embed.record#view' || embed.record.$type === 'app.bsky.embed.record')) {
+                     const embeddedRec = embed.record.record;
+                     if (embeddedRec) {
+                        postToAdd.embedDetails.record = {
+                           uri: embeddedRec.uri || '',
+                           cid: embeddedRec.cid || '',
+                           authorHandle: embeddedRec.author?.handle || '',
+                           textSnippet: (embeddedRec.value?.text && typeof embeddedRec.value.text === 'string' ? embeddedRec.value.text.substring(0,100) : (typeof embeddedRec.value === 'string' ? embeddedRec.value.substring(0,100) : ''))
+                        };
+                     }
+                  }
+                  if (embed.media) {
+                    if (embed.media.$type === 'app.bsky.embed.images#view' || embed.media.$type === 'app.bsky.embed.images') {
+                      postToAdd.embedDetails.media = {
+                        type: 'images',
+                        images: embed.media.images?.map(img => ({
+                          alt: img.alt || '',
+                          cid: img.image?.cid || img.cid || null,
+                          thumb: img.thumb || null,
+                          fullsize: img.fullsize || null
+                        })) || []
+                      };
+                    } else if (embed.media.$type === 'app.bsky.embed.external#view' || embed.media.$type === 'app.bsky.embed.external') {
+                      postToAdd.embedDetails.media = {
+                        type: 'external',
+                        external: {
+                          uri: embed.media.external?.uri || embed.media.uri || '',
+                          title: embed.media.external?.title || embed.media.title || '',
+                          description: embed.media.external?.description || embed.media.description || ''
+                        }
+                      };
+                    }
+                  }
+                }
+              }
+              */
+              actorPosts.push(postToAdd);
+              fetchedCount++;
+            }
+          }
+
+          cursor = response.data.cursor;
+          if (!cursor || response.data.feed.length === 0) {
+            console.log(`[ConvHistory] No more posts or cursor for ${actorToFetchDid}. Fetched ${actorPosts.length} relevant posts so far.`);
+            break; // Exit if no cursor or no new posts
+          }
+          if (actorPosts.length >= fetchLimitPerActor) { // If we have enough relevant posts
+             console.log(`[ConvHistory] Sufficient relevant posts collected for ${actorToFetchDid} (${actorPosts.length}).`);
+             break;
+          }
+
+        } catch (error) {
+          console.error(`[ConvHistory] Error fetching feed for ${actorToFetchDid}:`, error);
+          break; // Exit on error
+        }
+      }
+      return actorPosts;
+    };
+
+    // We need the user's handle to check if the bot mentioned the user by handle (less reliable than DID)
+    // This requires an extra API call if we don't have it. Assuming `post.author.handle` is available from the triggering post.
+    // For now, we will primarily rely on DID matching in facets and reply parent author DIDs.
+    // Let's assume the calling context (`generateResponse`) has `post.author.handle`.
+    // For now, we'll assume `this.config.BLUESKY_IDENTIFIER` is the bot's handle.
+    // And we'll need the user's handle to check bot's mentions of the user.
+    // This is tricky because getAuthorFeed items don't always resolve handles for mentions if only DIDs are present.
+    // Let's refine the logic to pass the handles too.
+
+    let userHandle = ''; // We need this. Let's try to get it.
+    try {
+        const userProfile = await this.agent.getProfile({actor: userDid});
+        if (userProfile && userProfile.data && userProfile.data.handle) {
+            userHandle = userProfile.data.handle;
+        } else {
+            console.warn(`[ConvHistory] Could not fetch handle for user DID ${userDid}`);
+        }
+    } catch (e) {
+        console.error(`[ConvHistory] Error fetching profile for user DID ${userDid} to get handle:`, e);
+    }
+    if (!userHandle) { // Fallback if API call fails or no handle
+        console.warn(`[ConvHistory] User handle for ${userDid} is unknown. Mention filtering might be less effective.`);
+        // We could try to extract it from the `post` object passed to `generateResponse` if that's feasible
+        // For now, proceeding without it means mention filtering from bot to user might be impaired if only handle is used.
+    }
+
+
+    const userPostsFiltered = await fetchAndFilterActorFeed(userDid, botDid, botHandle);
+    const botPostsFiltered = await fetchAndFilterActorFeed(botDid, userDid, userHandle || "user"); // Pass userHandle if available
+
+    allRelevantPosts.push(...userPostsFiltered);
+    allRelevantPosts.push(...botPostsFiltered);
+
+    // Deduplicate posts based on URI
+    const uniquePosts = Array.from(new Map(allRelevantPosts.map(p => [p.uri, p])).values());
+
+    // Sort by creation date (newest first)
+    uniquePosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // Limit to the most recent `historyLimit` posts
+    const finalHistory = uniquePosts.slice(0, historyLimit);
+
+    console.log(`[ConvHistory] Found ${uniquePosts.length} unique relevant posts. Returning ${finalHistory.length} for history.`);
+    return finalHistory;
+  }
+
+  async searchBotMediaGallery(keywords, limit) {
+    console.log(`[BotMediaSearch] Searching bot's own media gallery. Keywords: ${JSON.stringify(keywords)}, Limit: ${limit}`);
+    const botDid = this.agent.did;
+    const matchingPosts = [];
+    let cursor = undefined;
+    const fetchPageLimit = 50; // How many to fetch per API call
+    let fetchedImagePostsCount = 0; // Count of posts with images we've processed enough of
+    const maxApiPages = 3; // Limit API calls to avoid excessive scanning for very broad searches
+    let apiPagesCalled = 0;
+
+    try {
+      while (apiPagesCalled < maxApiPages && (matchingPosts.length < limit || fetchedImagePostsCount < limit * 2 /* fetch a bit more to sort from */) ) {
+        apiPagesCalled++;
+        console.log(`[BotMediaSearch] Fetching bot's feed page ${apiPagesCalled}. Cursor: ${cursor}`);
+        const response = await this.agent.api.app.bsky.feed.getAuthorFeed({
+          actor: botDid,
+          limit: fetchPageLimit,
+          cursor: cursor
+        });
+
+        if (!response.success || !response.data.feed || response.data.feed.length === 0) {
+          console.log("[BotMediaSearch] No more posts in bot's feed or API error.");
+          break;
+        }
+
+        for (const item of response.data.feed) {
+          if (!item.post || !item.post.record || item.post.author.did !== botDid) {
+            continue; // Should always be bot's post, but double check
+          }
+
+          const postRecord = item.post.record;
+          const embed = item.post.embed;
+          let postImages = [];
+
+          if (embed) {
+            if (embed.$type === 'app.bsky.embed.images#view' || embed.$type === 'app.bsky.embed.images') {
+              postImages = embed.images?.map(img => ({
+                alt: img.alt || '',
+                cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+              })) || [];
+            } else if (embed.$type === 'app.bsky.embed.recordWithMedia#view' || embed.$type === 'app.bsky.embed.recordWithMedia') {
+              if (embed.media && (embed.media.$type === 'app.bsky.embed.images#view' || embed.media.$type === 'app.bsky.embed.images')) {
+                postImages = embed.media.images?.map(img => ({
+                  alt: img.alt || '',
+                  cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+                })) || [];
+              }
+            }
+          }
+
+          if (postImages.length > 0) {
+            fetchedImagePostsCount++;
+            const postTextLower = (postRecord.text || "").toLowerCase();
+            const altTextsLower = postImages.map(img => (img.alt || "").toLowerCase()).join(" ");
+            const combinedTextForSearch = `${postTextLower} ${altTextsLower}`;
+
+            let keywordsMatch = true;
+            if (keywords && keywords.length > 0) {
+              keywordsMatch = keywords.every(kw => combinedTextForSearch.includes(kw.toLowerCase()));
+            }
+
+            if (keywordsMatch) {
+              matchingPosts.push({
+                uri: item.post.uri,
+                text: postRecord.text || "",
+                authorHandle: item.post.author.handle, // Bot's handle
+                authorDid: item.post.author.did,     // Bot's DID
+                createdAt: postRecord.createdAt,
+                embedDetails: { type: 'images', images: postImages } // Store extracted image info
+              });
+              if (matchingPosts.length >= limit) break; // Found enough
+            }
+          }
+        }
+        if (matchingPosts.length >= limit) break;
+
+        cursor = response.data.cursor;
+        if (!cursor) {
+          console.log("[BotMediaSearch] No more cursor from bot's feed.");
+          break;
+        }
+      }
+    } catch (error) {
+      console.error(`[BotMediaSearch] Error searching bot's media gallery:`, error);
+    }
+
+    // Sort by creation date (newest first) - already fetched in this order generally, but good to ensure
+    matchingPosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const finalResults = matchingPosts.slice(0, limit);
+    console.log(`[BotMediaSearch] Found ${finalResults.length} matching image posts in bot's gallery.`);
+    return finalResults;
+  }
+
+  async performWebSearch(searchQuery, freshness = null) {
+    console.log(`[WebSearch] Performing web search for query: "${searchQuery}", Freshness: ${freshness}`);
+    if (!this.config.LANGSEARCH_API_KEY) {
+      console.error("[WebSearch] LANGSEARCH_API_KEY is not set. Cannot perform web search.");
+      return [];
+    }
+
+    const requestBody = { query: searchQuery };
+    if (freshness && ["oneDay", "oneWeek", "oneMonth"].includes(freshness)) { // Basic validation for freshness
+      requestBody.freshness = freshness;
+    }
+
+    try {
+      const response = await fetch('https://api.langsearch.com/v1/web-search', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.config.LANGSEARCH_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[WebSearch] LangSearch API error: ${response.status} - ${errorText}`);
+        return [];
+      }
+
+      const data = await response.json();
+
+      if (data.webPages && data.webPages.value && data.webPages.value.length > 0) {
+        const results = data.webPages.value.slice(0, 3).map(page => ({ // Take top 3 results
+          title: page.name || "No title",
+          url: page.url,
+          snippet: page.snippet || "No snippet available.",
+          // summary: page.summary || null // If summary parameter were used and field existed
+        }));
+        console.log(`[WebSearch] Found ${results.length} results for query "${searchQuery}"`);
+        return results;
+      } else {
+        console.log(`[WebSearch] No web page results found for query "${searchQuery}"`);
+        return [];
+      }
+    } catch (error) {
+      console.error(`[WebSearch] Exception during web search for query "${searchQuery}":`, error);
+      return [];
+    }
+  }
+
+  async getSearchHistoryIntent(userQueryText) {
+    if (!userQueryText || userQueryText.trim() === "") {
+      return { intent: "none" };
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
+
+Output a JSON object. Choose ONE of the following intent structures:
+
+1. If searching PAST INTERACTIONS (conversation history, bot's gallery):
+{
+  "intent": "search_history",
+  "target_type": "image" | "link" | "post" | "message" | "unknown", // REQUIRED.
+  "author_filter": "user" | "bot" | "any", // REQUIRED.
+  "keywords": ["keyword1", ...], // Content-specific keywords. EXCLUDE recency cues & type words. Max 5.
+  "recency_cue": "textual cue for recency" | null,
+  "search_scope": "bot_gallery" | "conversation" | null // REQUIRED for bot image searches. Default "conversation". Null otherwise.
+}
+
+2. If it's a GENERAL QUESTION for a WEB SEARCH:
+{
+  "intent": "web_search",
+  "search_query": "optimized query for web search engine" // REQUIRED. The user's question, possibly rephrased for search.
+}
+
+3. If NEITHER of the above:
+{
+  "intent": "none"
+}
+
+IMPORTANT RULES for "search_history":
+- "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
+- "author_filter": "user" (they sent/posted), "bot" (you sent/generated), or "any".
+- "keywords": Core content terms. EXCLUDE recency cues (e.g., "yesterday") AND type words (e.g., "image", "link").
+- "recency_cue": Time phrases (e.g., "yesterday", "last week"). Null if none.
+- "search_scope": For "target_type": "image" AND "author_filter": "bot":
+    - "bot_gallery" if general request (e.g., "image you made of X", "your picture of Y").
+    - "conversation" if implies shared context (e.g., "image you sent *me*"). Default to "conversation" if ambiguous.
+    - Null otherwise.
+
+IMPORTANT RULES for "web_search":
+- Use "web_search" for general knowledge questions, requests for current information/news, or explanations of concepts not tied to your direct prior interactions or capabilities (e.g., "What is the capital of France?", "latest advancements in AI", "how do black holes work?").
+- "search_query" should be the essence of the user's question, suitable for a search engine.
+
+PRIORITIZATION:
+- If a query mentions past interactions directly (e.g., "you sent me", "we discussed", "in our chat"), prefer "search_history".
+- If it's a straightforward factual question about the world, prefer "web_search".
+
+If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.
+
+Examples:
+- User query: "find the image you generated for me of a cat yesterday"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": "yesterday", "search_scope": "conversation"}
+- User query: "show me a picture you made of a dog"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["dog"], "recency_cue": null, "search_scope": "bot_gallery"}
+- User query: "what was that link about dogs I sent last tuesday?"
+  Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday", "search_scope": null}
+- User query: "What is the tallest mountain in the world?"
+  Response: {"intent": "web_search", "search_query": "tallest mountain in the world"}
+- User query: "latest news about the Mars rover"
+  Response: {"intent": "web_search", "search_query": "latest news Mars rover"}
+- User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
+  Response: {"intent": "none"}
+`;
+
+    const userPrompt = `User query: '${userQueryText}'`;
+    console.log(`[IntentClassifier] Calling Scout (getSearchHistoryIntent) for query: "${userQueryText}"`);
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.2, // Low temperature for classification/extraction
+          max_tokens: 150, // Enough for the JSON structure
+          stream: false
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (getSearchHistoryIntent). Query: "${userQueryText}". Error: ${errorText}`);
+        return { intent: "none", error: `API error ${response.status}` };
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        let rawContent = data.choices[0].message.content.trim();
+        console.log(`[IntentClassifier] Scout raw response (getSearchHistoryIntent) for query "${userQueryText}": "${rawContent}"`);
+
+        // Attempt to extract JSON from potential markdown code blocks or directly
+        const jsonRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/;
+        const match = rawContent.match(jsonRegex);
+        let jsonString = "";
+        if (match && match[1]) {
+          jsonString = match[1];
+        } else if (rawContent.startsWith("{") && rawContent.endsWith("}")) {
+          jsonString = rawContent;
+        } else {
+          // Fallback if JSON is not clearly demarcated - find first '{' and last '}'
+          const firstBrace = rawContent.indexOf('{');
+          const lastBrace = rawContent.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace > firstBrace) {
+            jsonString = rawContent.substring(firstBrace, lastBrace + 1);
+          }
+        }
+
+        if (jsonString) {
+          try {
+            const parsedJson = JSON.parse(jsonString);
+            // Basic validation of the parsed structure
+            if (parsedJson.intent === "search_history") {
+              const validTarget = ["image", "link", "post", "message", "unknown"].includes(parsedJson.target_type);
+              const validAuthor = ["user", "bot", "any"].includes(parsedJson.author_filter);
+              const validKeywords = Array.isArray(parsedJson.keywords);
+              let validScope = true;
+              if (parsedJson.target_type === "image" && parsedJson.author_filter === "bot") {
+                validScope = ["bot_gallery", "conversation", null].includes(parsedJson.search_scope);
+                if (parsedJson.search_scope === undefined) parsedJson.search_scope = "conversation"; // Default if undefined
+              } else {
+                if (parsedJson.search_scope !== null && parsedJson.search_scope !== undefined) {
+                  // Non-bot-image searches shouldn't ideally have a scope, but allow null/undefined
+                }
+              }
+              if (!validTarget || !validAuthor || !validKeywords || !validScope) {
+                console.warn(`[IntentClassifier] Scout 'search_history' response malformed: ${jsonString}. Validations: target=${validTarget}, author=${validAuthor}, keywords=${validKeywords}, scope=${validScope}`);
+                // Attempt to salvage with defaults
+                parsedJson.target_type = parsedJson.target_type || "unknown";
+                parsedJson.author_filter = parsedJson.author_filter || "any";
+                parsedJson.keywords = parsedJson.keywords || [];
+                if (parsedJson.target_type === "image" && parsedJson.author_filter === "bot" && !validScope) {
+                  parsedJson.search_scope = "conversation";
+                }
+              }
+            } else if (parsedJson.intent === "web_search") {
+              if (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim()) {
+                console.warn(`[IntentClassifier] Scout 'web_search' response missing or empty 'search_query': ${jsonString}`);
+                return { intent: "none", error: "Malformed web_search intent from Scout (missing search_query)." };
+              }
+              // Ensure other search_history fields are not present or are null for web_search intent
+              parsedJson.target_type = null;
+              parsedJson.author_filter = null;
+              parsedJson.keywords = [];
+              parsedJson.recency_cue = null;
+              parsedJson.search_scope = null;
+            } else if (parsedJson.intent !== "none") {
+               console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
+               return { intent: "none", error: "Unknown intent from Scout."};
+            }
+            console.log(`[IntentClassifier] Scout parsed intent (getSearchHistoryIntent) for query "${userQueryText}":`, parsedJson);
+            return parsedJson;
+          } catch (e) {
+            console.error(`[IntentClassifier] Error parsing JSON from Scout (getSearchHistoryIntent) for query "${userQueryText}". JSON string: "${jsonString}". Error:`, e);
+            return { intent: "none", error: "JSON parsing error." };
+          }
+        } else {
+            console.error(`[IntentClassifier] Could not extract JSON from Scout response (getSearchHistoryIntent) for query "${userQueryText}". Raw: "${rawContent}"`);
+            return { intent: "none", error: "Could not extract JSON from Scout response." };
+        }
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (getSearchHistoryIntent). Query: "${userQueryText}". Data:`, JSON.stringify(data));
+      return { intent: "none", error: "Unexpected response format." };
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (getSearchHistoryIntent). Query: "${userQueryText}":`, error);
+      return { intent: "none", error: "Exception during API call." };
+    }
   }
 
   async shouldFetchProfileContext(userQueryText) {

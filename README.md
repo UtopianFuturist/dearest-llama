@@ -11,6 +11,7 @@ A Bluesky bot that responds to mentions using Nvidia NIM for text generation (sp
 - `BLUESKY_IDENTIFIER`: Your Bluesky handle (e.g., `username.bsky.social`)
 - `BLUESKY_APP_PASSWORD`: Your Bluesky app password
 - `ADMIN_BLUESKY_HANDLE`: (Required for admin features) The Bluesky handle of the bot's administrator (e.g., `adminuser.bsky.social`). Only this user can issue admin commands.
+- `LANGSEARCH_API_KEY`: Your API key for LangSearch (for the web search feature). Obtain from [LangSearch Dashboard](https://langsearch.com/dashboard).
 Note: These require an active BlueSky account.
 
 ### Optional Environment Variables
@@ -29,6 +30,8 @@ Note: These require an active BlueSky account.
 - `MAX_RETRIES`: Maximum number of retries for failed operations (default: `5`)
 - `BACKOFF_DELAY`: Base delay in milliseconds for exponential backoff (default: `60000`)
 - `MAX_REPLIED_POSTS`: Maximum number of posts to track as replied (default: `1000`)
+
+**Note on New Features**: The features described under "Key Bot Capabilities & LLM Features" (such as Conversational Memory, History Search, Like Awareness, and refined Profile Analysis) build upon the existing environment variable setup. No new, specific environment variables are required to enable them beyond the core API keys and bot credentials.
 
 ## Admin Features
 
@@ -62,26 +65,62 @@ The `!post` command allows the administrator to instruct the bot to create a new
 
 This bot leverages Large Language Models (LLMs) for several advanced interaction capabilities:
 
-### 1. Interactive User Profile Analysis
-When a user asks questions about their own Bluesky profile, recent activity, or common themes (e.g., "@botname what do you think of my profile?"), the bot employs a multi-step process:
-- **Contextual Understanding:** It first uses Llama 4 Scout to determine if the query is indeed about self-analysis based on Bluesky activity.
-- **Data Fetching:** If so, it fetches up to the last 100 items from the user's author feed (including their own posts, replies, quote posts, and attributed reposts).
-- **Initial Summary & Invitation:** Llama 3.3 Nemotron Super analyzes this data and generates a concise summary of its findings. This summary is posted as a single reply and **ends with an invitation** for the user to ask for more details (e.g., "I've found a few themes. Would you like a more detailed breakdown?").
-- **Detailed Analysis on Request:** If the user replies affirmatively (e.g., "yes", "tell me more"), the bot will then post 1-3 additional messages, each containing a specific detailed analysis point derived from the user's activity. These detailed messages are threaded to the summary and numbered with a suffix (e.g., `... [1/3]`). If an image was part of the original analysis context/request, it's attached to the last detailed message.
-This interactive approach allows for a concise initial response, with the option for users to dive deeper if they wish.
+### 1. Conversational Memory & Contextual Understanding
+- **How it Works**: When appropriate (often for profile analysis or when specifically searching conversation), the bot can fetch the last ~50 interactions (replies and mentions) between itself and the querying user from both their feeds.
+- **Purpose**: This history provides Llama 3.3 Nemotron Super with richer context, enabling more informed, personalized, and continuous responses, especially when analyzing past interactions or user profiles. This acts as a short-term memory system for ongoing conversations.
 
-### 2. Image Generation Coordination
+### 2. Searching Past Interactions
+Users can ask the bot to find specific items from their shared conversation history or from images the bot has generated.
+- **How to Trigger**: Use natural language queries like:
+    - *"find the image you sent me about cats"*
+    - *"what was that link I shared on dogs?"*
+    - *"show me a picture you made of a sunset"*
+    - *"where's my post about the meeting yesterday?"*
+- **Behind the Scenes**:
+    - Llama 4 Scout (`getSearchHistoryIntent`) first analyzes your query to understand what you're looking for (e.g., an image, link, or general post), who might have posted it (you or the bot), relevant keywords, and any time references (like "yesterday").
+    - Based on this intent, the bot uses one of two search methods:
+        - **Bot's Image Gallery Search (`searchBotMediaGallery`)**: If you ask for an image the bot generated generally (e.g., "an image you made of X"), it will search its own feed for matching image posts (checking text and image alt text).
+        - **Conversation History Search (`getBotUserConversationHistory`)**: For items mentioned as part of your direct conversation with the bot, or if the gallery search doesn't apply/yield results, it searches the shared interaction history. This search now looks at post text and extracted details from embeds (like image alt text or link titles).
+- **Output**: The bot will reply with a direct Bluesky URL to the found post (e.g., `https://bsky.app/profile/handle/post/rkey`) if a match is found, or a message indicating it couldn't find the requested item. Usually, only the most relevant match is returned.
+
+### 3. Web Search Capability
+The bot can perform web searches using the LangSearch API to answer general knowledge questions or find current information.
+- **How to Trigger**: Ask the bot a question that would typically require a web search, e.g.:
+    - *"What is the capital of France?"*
+    - *"Latest news on AI advancements."*
+    - *"Explain how black holes work."*
+- **Behind the Scenes**:
+    - Llama 4 Scout (`getSearchHistoryIntent`) identifies if the query is a general informational request suitable for a web search (distinguishing it from history searches or other commands).
+    - The extracted search query undergoes a safety check using `isTextSafeScout`.
+    - If safe, the bot calls the LangSearch API (`performWebSearch`).
+    - Llama 3.3 Nemotron Super then synthesizes an answer based on the top search results (typically 2-3 snippets, titles, and URLs).
+- **Output**: The bot provides a synthesized answer based on the web search results. It may cite source URLs if appropriate and guided by Nemotron's response style. If no relevant information is found or the query is unsafe, it will inform the user accordingly.
+
+### 4. Interactive User Profile Analysis (Refined)
+When a user asks questions about their own Bluesky profile, recent activity, or common themes (e.g., "@botname what do you think of my profile?"), the bot employs a multi-step process:
+- **Contextual Understanding**: It first uses Llama 4 Scout to determine if the query is indeed about self-analysis.
+- **Data Fetching**: If Llama 4 Scout determines the query warrants a deeper look (`shouldFetchProfileContext`), the bot now primarily uses the **Conversational Memory** feature to fetch the recent shared history between the user and the bot. This focused context is then used for the analysis.
+- **Initial Summary & Invitation**: Llama 3.3 Nemotron Super analyzes the gathered context and generates a concise summary. This summary is posted as a reply and **ends with an invitation** for the user to ask for more details.
+- **Detailed Analysis on Request**: If the user replies affirmatively (e.g., "yes", "tell me more"), the bot will then post 1-3 additional messages. Each message contains a specific detailed analysis point.
+    - **Improved Formatting**: These points are now phrased more naturally and conversationally. Internal list markers or labels are stripped, and the points are posted sequentially, threaded to the summary. The `... [X/Y]` suffix will only appear if a single detailed point is itself too long for one Bluesky post, indicating segments of that specific point.
+
+### 5. Like Notification Awareness
+- The bot now processes 'like' notifications it receives.
+- It logs when one of its posts or replies is liked and by whom (e.g., "[Notification] Post [URI] was liked by @[likerHandle]").
+- **Important**: The bot does *not* send a reply or take any direct action on Bluesky in response to a 'like'. This is purely for awareness and logging.
+- The `likeCount` property on post objects (when available in feed views) is the recommended data source for any future features related to sorting posts by popularity, for API efficiency.
+
+### 6. Image Generation Coordination (Existing)
 - The bot can understand requests for image generation (e.g., "generate an image of...").
 - It coordinates with Llama 4 Scout for prompt safety checks and refinement, and then with the Together AI API (using `black-forest-labs/FLUX.1-schnell-Free`) for the actual image creation.
 - Generated images are posted back to Bluesky, attached to the bot's reply.
 
-### 3. Multi-Part Replies for Detailed Responses
+### 7. Multi-Part Replies for Detailed Responses (Existing, with note on Detailed Analysis)
 - For complex topics or detailed analyses (like profile summaries) that exceed Bluesky's single-post character limit (approx. 300 characters), the bot can automatically split its response into multiple threaded parts (up to 3).
-- Each part is numbered for clarity, with the numbering appearing at the end of the post (e.g., `... [1/3]`, `... [2/3]`).
-- If an image is included with a multi-part response, it will be attached to the last part of the sequence.
+- Each part is numbered for clarity, with the numbering appearing at the end of the post (e.g., `... [1/3]`, `... [2/3]`). This applies to general long responses and also if a single "Detailed Analysis Point" is too long.
 
-### 4. Persona-Driven Text Generation
-- All text responses are generated by Llama 3.3 Nemotron Super, guided by a system prompt that defines its persona (friendly, inquisitive, occasionally witty) and its capabilities.
+### 8. Persona-Driven Text Generation (Existing)
+- All text responses are generated by Llama 3.3 Nemotron Super, guided by a system prompt (`TEXT_SYSTEM_PROMPT`) that defines its persona and core instructions.
 - Llama 4 Scout assists in refining the formatting of Nemotron's output to ensure it's suitable for Bluesky (e.g., character limits, emoji preservation, avoiding markdown issues).
 
 ## Image Generation
