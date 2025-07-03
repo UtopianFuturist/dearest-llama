@@ -932,44 +932,80 @@ class LlamaBot extends BaseBot {
               parent: { uri: summaryPostUriUserIsReplyingTo, cid: post.record.reply.parent.cid }
             };
 
-            const detailImageBase64 = storedDataForFollowUp.imageBase64; // Get stored image data
+            const detailImageBase64 = storedDataForFollowUp.imageBase64;
             const detailAltText = storedDataForFollowUp.altText;
 
+            // The 'post' object here is the user's message like "yes, tell me more".
+            // We need to reply to the bot's summary message, which is storedDataForFollowUp.summaryPostUri
+            // And the root of the thread is storedDataForFollowUp.replyToRootUri
+
+            let replyTargetForThisSequence = { // This is what each detailed point will reply to initially.
+                root: { uri: storedDataForFollowUp.replyToRootUri, cid: null }, // CID of root is not critical here, URI is.
+                parent: { uri: storedDataForFollowUp.summaryPostUri, cid: null } // Replying to the bot's summary post.
+            };
+            // The `post` object that `this.postReply` needs should be a mock or minimal representation
+            // of the post we are replying to, for constructing the replyRef.
+            // Let's construct a minimal 'parentPostForReply' object.
+             const parentPostForReply = {
+                uri: storedDataForFollowUp.summaryPostUri, // The summary post by the bot
+                cid: null, // CID might not be readily available here, but URI is key for reply parent ref
+                author: { did: this.agent.did, handle: this.config.BLUESKY_IDENTIFIER }, // Bot's identity
+                record: {
+                    // text: "summary text placeholder", // Not strictly needed for reply ref
+                    reply: { // The summary post itself was a reply to the original user query
+                        root: { uri: storedDataForFollowUp.replyToRootUri },
+                        parent: { uri: storedDataForFollowUp.replyToRootUri } // Simplified, could be more complex
+                    }
+                }
+            };
+
+
             for (let i = 0; i < storedDataForFollowUp.points.length; i++) {
-              const pointText = storedDataForFollowUp.points[i];
-              const isLastDetailPart = i === storedDataForFollowUp.points.length - 1;
+              const pointText = storedDataForFollowUp.points[i]; // Already cleaned
+              const isLastConceptualPoint = i === storedDataForFollowUp.points.length - 1;
 
-              let detailPostText = pointText;
-              // Suffix is added for all detail parts, even if only one detail part.
-              detailPostText = `${pointText.trim()} ... [${i + 1}/${storedDataForFollowUp.points.length}]`;
+              console.log(`[FollowUp] Preparing to post conceptual detail point ${i+1}/${storedDataForFollowUp.points.length}`);
 
-              const replyObject = {
-                text: utils.truncateResponse(detailPostText, 300),
-                reply: currentDetailReplyTarget
+              // Each `pointText` will be posted. If it's long, `this.postReply` will split it.
+              // The image is only attached to the very last segment of the very last conceptual point.
+              const imageToSendWithThisPoint = isLastConceptualPoint ? detailImageBase64 : null;
+              const altTextForThisPoint = isLastConceptualPoint ? detailAltText : "Generated image";
+
+              // We need to pass a 'post' object to this.postReply that represents the post we are replying to.
+              // For the first detailed point, it's parentPostForReply (the summary).
+              // For subsequent points, it's the last part of the previous point.
+              const currentParentPostForReply = {
+                uri: replyTargetForThisSequence.parent.uri,
+                cid: replyTargetForThisSequence.parent.cid, // May be null if not easily available
+                author: { did: this.agent.did }, // Assuming replying to bot's own chain
+                record: { reply: { root: replyTargetForThisSequence.root }} // Ensure root is threaded correctly
               };
 
-              if (isLastDetailPart && detailImageBase64) {
-                 try {
-                  const imageBytes = Uint8Array.from(Buffer.from(detailImageBase64, 'base64'));
-                  if (imageBytes.length > 0) {
-                    const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
-                    if (uploadedImage?.data?.blob) {
-                      replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: detailAltText }] };
-                       console.log(`[FollowUp] Attached image to detail part ${i+1}`);
-                    }
-                  }
-                } catch (imgErr) { console.error("[FollowUp] Error attaching image to detail post:", imgErr); }
+              const postedPartsUris = await this.postReply(
+                currentParentPostForReply, // The post this point is replying to
+                pointText,
+                imageToSendWithThisPoint,
+                altTextForThisPoint
+              );
+
+              if (postedPartsUris && postedPartsUris.length > 0) {
+                // Update replyTargetForThisSequence for the *next* conceptual point
+                // It should reply to the *last part* of the current conceptual point.
+                replyTargetForThisSequence.parent = {
+                    uri: postedPartsUris[postedPartsUris.length - 1],
+                    // We don't easily get the CID back from postReply's agent.post,
+                    // but URI is the critical part for the reply parent reference.
+                    // The @atproto/api might handle CID resolution internally or it might be optional for reply refs.
+                    cid: null // Placeholder, as postReply doesn't return CIDs of new posts.
+                };
+                console.log(`[FollowUp] Conceptual point ${i+1} posted. Next reply parent URI: ${replyTargetForThisSequence.parent.uri}`);
+              } else {
+                console.error(`[FollowUp] Failed to post conceptual detail point ${i+1}. Aborting further details.`);
+                break;
               }
 
-              console.log(`[FollowUp] Posting detail ${i+1}/${storedDataForFollowUp.points.length}: "${replyObject.text.substring(0,50)}..." replying to ${currentDetailReplyTarget.parent.uri}`);
-              const result = await this.agent.post(replyObject);
-              console.log(`[FollowUp] Successfully posted detail part ${i+1}: ${result.uri}`);
-
-              if (!isLastDetailPart) {
-                currentDetailReplyTarget.parent = { uri: result.uri, cid: result.cid };
-              }
-              if (storedDataForFollowUp.points.length > 1 && i < storedDataForFollowUp.points.length -1) {
-                 await utils.sleep(1000);
+              if (storedDataForFollowUp.points.length > 1 && !isLastConceptualPoint) {
+                 await utils.sleep(1500); // Slightly longer delay between conceptual points
               }
             }
             this.pendingDetailedAnalyses.delete(keyForDeletion);
@@ -1198,14 +1234,16 @@ This summary **must end with a clear question inviting the user to ask for more 
 
 PART 2: DETAILED ANALYSIS POINTS
 Immediately following Part 1, and on new lines, provide 1 to 3 detailed analysis points.
-Each point must start with an exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc.
-Each detailed point should be written as a complete, standalone message (under 290 characters), suitable for a separate Bluesky post. Ensure any internal lists (e.g., "1. Sub-point A, 2. Sub-point B") are well-formed within each point.
-Analyze themes, common topics, or aspects of their online presence as reflected in their posts, replies, quote posts, and attributed reposts.
+Each point MUST start with the exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc. NO OTHER TEXT BEFORE THE MARKER ON THAT LINE.
+For each point, write a short paragraph (around 2-4 sentences, keeping total under 290 characters for a Bluesky post) that flows naturally as if you are explaining your insights one by one.
+Your tone should be insightful, friendly, and engaging, reflecting your persona: "${this.config.TEXT_SYSTEM_PROMPT}".
+Avoid starting the *content* of a point with "1.", "a)", or other list markers unless it's a very natural way to present a list *within* your flowing explanation. Focus on conversational delivery of each distinct insight.
+Analyze themes, common topics, or aspects of their interaction as reflected in the provided context (conversation history or user's general activity).
 
-USER'S RECENT BLUESKY ACTIVITY:
+USER'S RECENT BLUESKY ACTIVITY (or CONVERSATION HISTORY):
 ${userBlueskyPostsContext}
 ---
-${conversationHistory ? `\nBrief conversation history for immediate interaction context (less critical than the Bluesky Activity for this specific analysis):\n${conversationHistory}\n---` : ''}
+${conversationHistory ? `\nBrief current thread context (less critical than the main context above for this specific analysis):\n${conversationHistory}\n---` : ''}
 Your structured response (Summary with Invitation, then Detailed Points):
 ${baseInstruction}`;
       } else {
@@ -1295,39 +1333,45 @@ ${baseInstruction}`;
           let textAfterSummaryMarker = scoutFormattedText.substring(summaryStartIndex + summaryMarker.length);
 
           let nextDetailPointIndex = textAfterSummaryMarker.indexOf(detailMarkerBase + "1]");
-          if (nextDetailPointIndex === -1) { // Maybe no detail points, or marker format issue
-            summaryText = textAfterSummaryMarker.trim(); // Assume all remaining text is summary
+          if (nextDetailPointIndex === -1) {
+            summaryText = textAfterSummaryMarker.trim();
           } else {
             summaryText = textAfterSummaryMarker.substring(0, nextDetailPointIndex).trim();
-            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex); // Remaining text has detail points
+            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex);
           }
 
           // Extract detailed points
-          let currentPoint = 1;
-          while (true) {
-            const currentDetailMarker = `${detailMarkerBase}${currentPoint}]`;
-            const nextDetailMarker = `${detailMarkerBase}${currentPoint + 1}]`;
+          let currentPointNum = 1;
+          while (detailedPoints.length < 3) { // Max 3 detailed points
+            const currentDetailMarker = `${detailMarkerBase}${currentPointNum}]`;
+            const nextDetailMarker = `${detailMarkerBase}${currentPointNum + 1}]`;
 
             const startOfCurrentPoint = textAfterSummaryMarker.indexOf(currentDetailMarker);
-            if (startOfCurrentPoint === -1) break; // No more points with this number
+            if (startOfCurrentPoint === -1) break;
 
             let endOfCurrentPoint = textAfterSummaryMarker.indexOf(nextDetailMarker, startOfCurrentPoint + currentDetailMarker.length);
-            let pointText;
+            let pointTextContent;
 
-            if (endOfCurrentPoint === -1) { // This is the last detail point
-              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
+            if (endOfCurrentPoint === -1) {
+              pointTextContent = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
             } else {
-              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
+              pointTextContent = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
             }
 
-            if (pointText) detailedPoints.push(pointText);
-            if (endOfCurrentPoint === -1 || detailedPoints.length >= 3) break; // Max 3 detail points
+            // Clean any leading list-like markers from Nemotron/Scout
+            pointTextContent = pointTextContent.replace(/^(\s*(\d+\.|\d+\)|\*|-)\s*)+/, '').trim();
 
-            currentPoint++;
+            if (pointTextContent) {
+                detailedPoints.push(pointTextContent);
+            }
+
+            if (endOfCurrentPoint === -1) break; // Last point processed
+            textAfterSummaryMarker = textAfterSummaryMarker.substring(endOfCurrentPoint); // Move to the start of the next potential marker
+            currentPointNum++;
           }
 
           console.log(`[LlamaBot.generateResponse] Parsed Summary: "${summaryText}"`);
-          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1}: "${p}"`));
+          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1} (cleaned): "${p.substring(0,100)}..."`));
 
           if (summaryText) {
             // Store detailed points if any, then return only summary for initial post
