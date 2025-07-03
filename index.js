@@ -33,9 +33,14 @@ const utils = {
   async imageUrlToBase64(imageUrl) {
     try {
       const response = await fetch(imageUrl);
-      return (await response.buffer()).toString('base64');
+      if (!response.ok) {
+        console.error(`Error fetching image from URL: ${response.status} ${response.statusText}. URL: ${imageUrl}`);
+        return null;
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer).toString('base64');
     } catch (error) {
-      console.error('Error converting image to base64:', error);
+      console.error(`Error converting image to base64 (URL: ${imageUrl}):`, error);
       return null;
     }
   },
