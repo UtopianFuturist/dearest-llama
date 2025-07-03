@@ -390,7 +390,7 @@ class BaseBot {
                     if (imageDescriptionFromScout) {
                       console.log(`Scout successfully described the image: "${imageDescriptionFromScout}"`);
                       finalAltText = imageDescriptionFromScout; // Use Scout's description for Alt Text
-                      let combinedResponseText = `${imageDescriptionFromScout}\n\nHere's the image you requested:`;
+                      let combinedResponseText = `Here's the image you requested:\n\n${imageDescriptionFromScout}`; // Flipped order
                       // The standardTextResponse from Nemotron is now replaced by Scout's image description
                       await this.postReply(latestPost.post, combinedResponseText, imageBase64, finalAltText);
                     } else {
@@ -1162,8 +1162,16 @@ Ensure your entire response is ONLY the JSON object.`;
         const apiData = JSON.parse(apiResponseText);
 
         if (apiData.choices && apiData.choices.length > 0 && apiData.choices[0].message && apiData.choices[0].message.content) {
-          const nestedJsonString = apiData.choices[0].message.content;
-          console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Nested JSON String: ${nestedJsonString}`);
+          let nestedJsonString = apiData.choices[0].message.content.trim();
+          console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw Nested String: ${nestedJsonString}`);
+
+          // Remove Markdown code block fences if present
+          const markdownJsonRegex = /^```(?:json)?\s*([\s\S]*?)\s*```$/;
+          const match = nestedJsonString.match(markdownJsonRegex);
+          if (match && match[1]) {
+            nestedJsonString = match[1].trim();
+            console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Cleaned Nested JSON String: ${nestedJsonString}`);
+          }
 
           try {
             const scoutDecision = JSON.parse(nestedJsonString);
