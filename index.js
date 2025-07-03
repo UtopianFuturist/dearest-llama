@@ -1455,7 +1455,7 @@ ${baseInstruction}`;
 
 
             if (isRelevant) {
-              actorPosts.push({
+              const postToAdd = { // Changed variable name to avoid conflict if currentPost is used elsewhere
                 uri: postUri,
                 text: postText,
                 authorDid: postAuthorDid,
@@ -1464,22 +1464,22 @@ ${baseInstruction}`;
                 embedDetails: null, // Initialize embedDetails
               };
 
-              // Extract embed details
+              // Temporarily commenting out complex embed processing to isolate syntax error
+              /*
               if (item.post.embed) {
                 const embed = item.post.embed;
                 if (embed.$type === 'app.bsky.embed.images#view' || embed.$type === 'app.bsky.embed.images') {
-                  currentPost.embedDetails = {
+                  postToAdd.embedDetails = {
                     type: 'images',
                     images: embed.images?.map(img => ({
                       alt: img.alt || '',
-                      // Attempt to get CID or a link; structure varies based on full record vs view
-                      cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+                      cid: img.image?.cid || img.cid || null,
                       thumb: img.thumb || null,
                       fullsize: img.fullsize || null
                     })) || []
                   };
                 } else if (embed.$type === 'app.bsky.embed.external#view' || embed.$type === 'app.bsky.embed.external') {
-                  currentPost.embedDetails = {
+                  postToAdd.embedDetails = {
                     type: 'external',
                     external: {
                       uri: embed.external?.uri || embed.uri || '',
@@ -1488,48 +1488,44 @@ ${baseInstruction}`;
                     }
                   };
                 } else if (embed.$type === 'app.bsky.embed.record#view' || embed.$type === 'app.bsky.embed.record') {
-                  // Ensure we are accessing the record data correctly, it might be nested under 'record'
                   const embeddedRec = embed.record;
                   if (embeddedRec) {
-                     currentPost.embedDetails = {
+                     postToAdd.embedDetails = {
                         type: 'record',
                         record: {
                           uri: embeddedRec.uri || '',
                           cid: embeddedRec.cid || '',
                           authorHandle: embeddedRec.author?.handle || '',
-                          textSnippet: embeddedRec.value?.text?.substring(0, 100) || // For full record
-                                       embeddedRec.value?.substring?.(0,100) || // If value is just text
-                                       (typeof embeddedRec.value === 'object' && embeddedRec.value.text ? String(embeddedRec.value.text).substring(0,100) : '') // common case for app.bsky.feed.post
+                          textSnippet: (embeddedRec.value?.text && typeof embeddedRec.value.text === 'string' ? embeddedRec.value.text.substring(0,100) : (typeof embeddedRec.value === 'string' ? embeddedRec.value.substring(0,100) : ''))
                         }
                      };
                   }
                 } else if (embed.$type === 'app.bsky.embed.recordWithMedia#view' || embed.$type === 'app.bsky.embed.recordWithMedia') {
-                  currentPost.embedDetails = { type: 'recordWithMedia', record: null, media: null };
+                  postToAdd.embedDetails = { type: 'recordWithMedia', record: null, media: null };
                   if (embed.record && (embed.record.$type === 'app.bsky.embed.record#view' || embed.record.$type === 'app.bsky.embed.record')) {
-                     const embeddedRec = embed.record.record; // Note the double .record here for recordWithMedia views
+                     const embeddedRec = embed.record.record;
                      if (embeddedRec) {
-                        currentPost.embedDetails.record = {
+                        postToAdd.embedDetails.record = {
                            uri: embeddedRec.uri || '',
                            cid: embeddedRec.cid || '',
                            authorHandle: embeddedRec.author?.handle || '',
-                           textSnippet: embeddedRec.value?.text?.substring(0, 100) ||
-                                        (typeof embeddedRec.value === 'object' && embeddedRec.value.text ? String(embeddedRec.value.text).substring(0,100) : '')
+                           textSnippet: (embeddedRec.value?.text && typeof embeddedRec.value.text === 'string' ? embeddedRec.value.text.substring(0,100) : (typeof embeddedRec.value === 'string' ? embeddedRec.value.substring(0,100) : ''))
                         };
                      }
                   }
                   if (embed.media) {
                     if (embed.media.$type === 'app.bsky.embed.images#view' || embed.media.$type === 'app.bsky.embed.images') {
-                      currentPost.embedDetails.media = {
+                      postToAdd.embedDetails.media = {
                         type: 'images',
                         images: embed.media.images?.map(img => ({
                           alt: img.alt || '',
-                          cid: img.image?.cid || img.cid || (typeof img.image === 'object' ? img.image.ref?.toString() : null) || null,
+                          cid: img.image?.cid || img.cid || null,
                           thumb: img.thumb || null,
                           fullsize: img.fullsize || null
                         })) || []
                       };
                     } else if (embed.media.$type === 'app.bsky.embed.external#view' || embed.media.$type === 'app.bsky.embed.external') {
-                      currentPost.embedDetails.media = {
+                      postToAdd.embedDetails.media = {
                         type: 'external',
                         external: {
                           uri: embed.media.external?.uri || embed.media.uri || '',
@@ -1541,7 +1537,8 @@ ${baseInstruction}`;
                   }
                 }
               }
-              actorPosts.push(currentPost);
+              */
+              actorPosts.push(postToAdd);
               fetchedCount++;
             }
           }
