@@ -1719,7 +1719,7 @@ ${baseInstruction}`;
                         external: {
                           uri: embed.media.external?.uri || embed.media.uri || '',
                           title: embed.media.external?.title || embed.media.title || '',
-                          description: embed.media.external?.description || embed.media.description || ''
+                          description: embed.media.external?.description || embed.description || ''
                         }
                       };
                     }
@@ -1729,8 +1729,8 @@ ${baseInstruction}`;
               */
               actorPosts.push(postToAdd);
               fetchedCount++;
-            } // Closing brace for 'if (isRelevant)' moved here
-          }
+            } // Ensures if(isRelevant) is properly closed here
+          } // Closes 'for (const item of response.data.feed)'
 
           cursor = response.data.cursor;
           if (!cursor || response.data.feed.length === 0) {
