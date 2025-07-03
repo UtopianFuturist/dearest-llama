@@ -1038,21 +1038,29 @@ class LlamaBot extends BaseBot {
           const topMatch = matches[0]; // Get the single best match
           const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
 
-          // Construct a very direct prompt for Nemotron
-          nemotronSearchPrompt = `The user asked: "${userQueryText}".\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "I found this: ${postUrl}" or "This might be what you're looking for: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          if (searchIntent.recency_cue) {
+            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+          }
+
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this: ${postUrl}" or "This might be what you're looking for from ${searchIntent.recency_cue || 'recently'}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
 
           if (matches.length > 1) {
-            nemotronSearchPrompt += `\n(Internally, I found ${matches.length} potential matches, but I'm giving you the URL for the most relevant one.)`; // Context for Nemotron, not necessarily for user
+            nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches, but I'm giving you the URL for the most relevant one based on recency and keywords. The user's recency cue was "${searchIntent.recency_cue}". Focus the user response on the single URL provided.)`;
           }
 
         } else {
-          nemotronSearchPrompt = `The user asked: "${userQueryText}".\n\nI searched our conversation history but couldn't find any posts that specifically matched your description. Please formulate a polite response to the user stating this, for example: "Sorry, I couldn't find a post matching that in our recent history. Could you try describing it differently?"`;
+          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          if (searchIntent.recency_cue) {
+            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+          }
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched our conversation history but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description from ${searchIntent.recency_cue || 'our recent history'} but couldn't find it. Could you try different keywords?"`;
         }
 
         console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
 
         // System prompt for Nemotron when handling search results - updated for conciseness
-        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's query and the search result (either a direct Post URL if found, or a message that nothing was found). If a Post URL is provided, your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself. Do not add extra descriptions, author details, or text snippets unless they are part of the brief confirmation phrase. If nothing was found, state that clearly and politely.";
+        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's original query (including any recency cue they gave like 'yesterday') and the search result (either a direct Post URL if found, or a message that nothing was found along with the keywords used for the search). If a Post URL is provided, your response to the user MUST consist of a brief confirmation phrase (which can acknowledge their recency cue if provided) and then the Post URL itself. Do not add extra descriptions, author details, or text snippets unless they are part of the brief confirmation phrase. If nothing was found, state that clearly and politely, you can mention the keywords used for the search if it seems helpful for the user to refine their query.";
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
           method: 'POST',
@@ -1613,33 +1621,40 @@ ${baseInstruction}`;
       return { intent: "none" };
     }
     const modelId = 'meta/llama-4-scout-17b-16e-instruct';
-    const systemPrompt = `Your task is to analyze the user's query to determine if they are asking to find a specific item (image, link, post, or message) from their past conversation history with you (the bot).
+    const systemPrompt = `Your task is to analyze the user's query to determine if they are asking to find a specific item (an image, a link, or a general post/message) from their past conversation history with you (the bot).
 
-If the query is a request to find something from the history, respond with a JSON object with the following structure:
+Output a JSON object with the following structure:
 {
-  "intent": "search_history",
-  "target_type": "image" | "link" | "post" | "message" | "unknown", // What kind of item are they looking for?
-  "author_filter": "user" | "bot" | "any", // Who are they implying posted it? 'user' for user, 'bot' for you, 'any' if unclear.
-  "keywords": ["keyword1", "keyword2", ...], // Keywords from the query that describe the content. Max 5 keywords.
-  "recency_cue": "textual cue for recency" | null // e.g., "yesterday", "last week", "a few days ago". Null if not specified.
+  "intent": "search_history" | "none",
+  "target_type": "image" | "link" | "post" | "message" | "unknown", // REQUIRED if intent is "search_history". Default to "message" if unsure but it's a search.
+  "author_filter": "user" | "bot" | "any", // REQUIRED if intent is "search_history".
+  "keywords": ["keyword1", "keyword2", ...], // Content-specific keywords ONLY. EXCLUDE recency cues. Max 5 keywords.
+  "recency_cue": "textual cue for recency" | null // e.g., "yesterday", "last week". Null if not specified.
 }
 
-Examples:
-- User query: "find the image you generated for me of a cat"
-  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": null}
-- User query: "show me the link i sent about dogs"
-  Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs", "link"], "recency_cue": null}
-- User query: "what was that thing we talked about yesterday regarding the meeting"
-  Response: {"intent": "search_history", "target_type": "message", "author_filter": "any", "keywords": ["meeting"], "recency_cue": "yesterday"}
-- User query: "can you make a new picture of a sunset"
-  Response: {"intent": "none"}
-- User query: "what's the weather like"
-  Response: {"intent": "none"}
+IMPORTANT RULES:
+1.  If the query mentions "image", "picture", "photo", "generated image", "drew", "showed me a pic of", set "target_type" to "image". This takes precedence even if "post" or "message" is also mentioned.
+2.  If the query mentions "link", "URL", "site", "article you sent", set "target_type" to "link".
+3.  Words indicating time (e.g., "yesterday", "last week", "a few days ago", "recently") are RECENCY CUES and MUST go into "recency_cue". DO NOT include them in "keywords".
+4.  "keywords" should only be for nouns, adjectives, or verbs describing the *content* of the item, not its type or when it was sent/generated.
+5.  If the query is NOT a request to find a past item, "intent" MUST be "none". All other fields can be omitted or null.
+6.  Be conservative: if very unsure about a search_history intent, classify as "intent": "none".
+7.  Output ONLY the JSON object.
 
-If the query is NOT a request to find something from the conversation history, respond with ONLY the JSON object: {"intent": "none"}.
-Focus on specific requests for past items. General requests for new information or actions are not history searches.
-Be conservative: if unsure, classify as {"intent": "none"}.
-Ensure the entire output is ONLY the JSON object.`;
+Examples:
+- User query: "find the image you generated for me of a cat yesterday"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": "yesterday"}
+- User query: "show me the post with the mountain image you made"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["mountain"], "recency_cue": null}
+- User query: "what was that link about dogs I sent last tuesday?"
+  Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday"}
+- User query: "search for the message about our meeting"
+  Response: {"intent": "search_history", "target_type": "message", "author_filter": "any", "keywords": ["meeting"], "recency_cue": null}
+- User query: "can you generate a new image of a forest?"
+  Response: {"intent": "none"}
+- User query: "what time is it?"
+  Response: {"intent": "none"}
+`;
 
     const userPrompt = `User query: '${userQueryText}'`;
     console.log(`[IntentClassifier] Calling Scout (getSearchHistoryIntent) for query: "${userQueryText}"`);
