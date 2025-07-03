@@ -635,6 +635,7 @@ class BaseBot {
       const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
       const MAX_PARTS = 3;
       let textParts = [];
+      const postedPartUris = []; // Initialize array to store URIs of posted parts
 
       let currentReplyTo = {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
@@ -765,6 +766,7 @@ class BaseBot {
           console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..."`);
           const result = await this.agent.post(replyObject);
           console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}`);
+          postedPartUris.push(result.uri); // Add successfully posted URI
 
           if (!isLastPart) { // For the next part, reply to the part just posted
               currentReplyTo = {
@@ -774,9 +776,11 @@ class BaseBot {
           }
       }
       this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
+      return postedPartUris; // Return the array of URIs
     } catch (error) {
       console.error('Error posting multi-part reply:', error);
       this.repliedPosts.add(post.uri); // Still mark as replied to avoid loops on error
+      return postedPartUris; // Return any URIs that were successfully posted before the error
     }
   }
 
@@ -1151,11 +1155,11 @@ ${baseInstruction}`;
           if (summaryText) {
             // Store detailed points if any, then return only summary for initial post
             // Post the summary first. No image on summary.
-            const summaryPostedUris = await this.postReply(post, summaryText, null, null);
+            const summaryPostUrisArray = await this.postReply(post, summaryText, null, null);
 
-            if (summaryPostedUris && summaryPostedUris.length > 0) {
-              const summaryPostUri = summaryPostedUris[0];
-              console.log(`[LlamaBot.generateResponse] Summary posted successfully: ${summaryPostUri}`);
+            if (summaryPostUrisArray && summaryPostUrisArray.length > 0) {
+              const summaryPostUri = summaryPostUrisArray[summaryPostUrisArray.length - 1]; // Get the last part's URI
+              console.log(`[LlamaBot.generateResponse] Summary posted successfully. Last part URI: ${summaryPostUri}. Total parts: ${summaryPostUrisArray.length}`);
               if (detailedPoints.length > 0) {
                 this.pendingDetailedAnalyses.set(post.uri, { // Keyed by original user post URI
                   points: detailedPoints,
