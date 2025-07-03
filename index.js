@@ -726,7 +726,9 @@ class LlamaBot extends BaseBot {
             { role: "system", content: "You are being passed this output from another AI model - correct it so that it isn't in quotation marks like it's a quote, ensure the character doesn't label their message with named sent-by identifiers or use double asterisks (as they do not render as bold on this platform), but otherwise maintain the exact generated persona response content input. NEVER mention this internal re-writing and output formatting correction process in your responses to the users. This part of the response workflow for generating the response to the user is an internal one. It's also very important that all responses fit within the Bluesky 300 character message limit so responses are not cut off when posted. You are only to return the final format-corrected response to the user. The main text model (not this one) handles response content, you are only to edit the output's formatting structure." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.7, max_tokens: 100, stream: false
+          temperature: 0.1, // Lowered temperature for formatting
+          max_tokens: 100,
+          stream: false
         })
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext - Status: ${filterResponse.status}`);
@@ -802,7 +804,9 @@ class LlamaBot extends BaseBot {
             { role: "system", content: "You are an AI assistant that refines text for Bluesky posts. Re-write the user-provided text to meet these CRITICAL requirements: 1. The final text MUST be UNDER 300 characters. Aggressively shorten if necessary, preserving core meaning and persona. 2. Remove any quotation marks that make the text sound like a direct quote. 3. Ensure the character does not label their message with 'sent-by' identifiers. 4. Remove any double asterisks (they don't render as bold). 5. Otherwise, maintain the persona and core content of the original text. DO NOT mention this re-writing/formatting process in your response." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.7, max_tokens: 150, stream: false
+          temperature: 0.1, // Lowered temperature for formatting
+          max_tokens: 150,
+          stream: false
         })
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
