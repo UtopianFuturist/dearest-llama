@@ -107,6 +107,19 @@ class BaseBot {
     this.config = config;
     this.agent = agent;
     this.repliedPosts = new Set();
+    this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
+    this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
+  }
+
+  // Helper to cleanup expired pending analyses
+  _cleanupExpiredDetailedAnalyses() {
+    const now = Date.now();
+    for (const [key, value] of this.pendingDetailedAnalyses.entries()) {
+      if (now - value.timestamp > this.DETAIL_ANALYSIS_TTL) {
+        this.pendingDetailedAnalyses.delete(key);
+        console.log(`[CacheCleanup] Removed expired detailed analysis for post URI: ${key}`);
+      }
+    }
   }
 
   async generateResponse(post, context) {
@@ -872,6 +885,88 @@ class LlamaBot extends BaseBot {
   }
 
   async generateResponse(post, context) {
+    this._cleanupExpiredDetailedAnalyses(); // Cleanup cache at the start of processing a new response
+
+    // Check if this interaction is a follow-up to a summary invitation
+    if (post.record?.reply && post.record.reply.parent?.uri && post.record.reply.parent?.author?.did === this.agent.did) {
+      const summaryPostUriUserIsReplyingTo = post.record.reply.parent.uri;
+      const originalUserQueryUri = post.record.reply.root?.uri || post.uri; // The root of the thread, usually the user's first message.
+
+      // Iterate over pending analyses to find if the parentPostUri matches a stored summaryPostUri
+      let storedDataForFollowUp = null;
+      let keyForDeletion = null;
+
+      for (const [key, value] of this.pendingDetailedAnalyses.entries()) {
+        if (value.summaryPostUri === summaryPostUriUserIsReplyingTo) {
+          storedDataForFollowUp = value;
+          keyForDeletion = key; // This 'key' is the URI of the user's original post that triggered the summary
+          break;
+        }
+      }
+
+      if (storedDataForFollowUp) {
+        console.log(`[FollowUp] Detected reply to bot's summary post ${summaryPostUriUserIsReplyingTo}. Original trigger: ${keyForDeletion}`);
+        const wantsDetails = await this.isRequestingDetails(post.record.text);
+        if (wantsDetails) {
+          if (storedDataForFollowUp.points && storedDataForFollowUp.points.length > 0) {
+            console.log(`[FollowUp] User requested details for original post ${keyForDeletion}. Posting ${storedDataForFollowUp.points.length} points.`);
+
+            let currentDetailReplyTarget = {
+              root: storedDataForFollowUp.replyToRootUri,
+              parent: { uri: summaryPostUriUserIsReplyingTo, cid: post.record.reply.parent.cid }
+            };
+
+            const detailImageBase64 = storedDataForFollowUp.imageBase64; // Get stored image data
+            const detailAltText = storedDataForFollowUp.altText;
+
+            for (let i = 0; i < storedDataForFollowUp.points.length; i++) {
+              const pointText = storedDataForFollowUp.points[i];
+              const isLastDetailPart = i === storedDataForFollowUp.points.length - 1;
+
+              let detailPostText = pointText;
+              // Suffix is added for all detail parts, even if only one detail part.
+              detailPostText = `${pointText.trim()} ... [${i + 1}/${storedDataForFollowUp.points.length}]`;
+
+              const replyObject = {
+                text: utils.truncateResponse(detailPostText, 300),
+                reply: currentDetailReplyTarget
+              };
+
+              if (isLastDetailPart && detailImageBase64) {
+                 try {
+                  const imageBytes = Uint8Array.from(Buffer.from(detailImageBase64, 'base64'));
+                  if (imageBytes.length > 0) {
+                    const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+                    if (uploadedImage?.data?.blob) {
+                      replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: detailAltText }] };
+                       console.log(`[FollowUp] Attached image to detail part ${i+1}`);
+                    }
+                  }
+                } catch (imgErr) { console.error("[FollowUp] Error attaching image to detail post:", imgErr); }
+              }
+
+              console.log(`[FollowUp] Posting detail ${i+1}/${storedDataForFollowUp.points.length}: "${replyObject.text.substring(0,50)}..." replying to ${currentDetailReplyTarget.parent.uri}`);
+              const result = await this.agent.post(replyObject);
+              console.log(`[FollowUp] Successfully posted detail part ${i+1}: ${result.uri}`);
+
+              if (!isLastDetailPart) {
+                currentDetailReplyTarget.parent = { uri: result.uri, cid: result.cid };
+              }
+              if (storedDataForFollowUp.points.length > 1 && i < storedDataForFollowUp.points.length -1) {
+                 await utils.sleep(1000);
+              }
+            }
+            this.pendingDetailedAnalyses.delete(keyForDeletion);
+            console.log(`[FollowUp] Cleared pending details for ${keyForDeletion}.`);
+            return null;
+          }
+        } else {
+            console.log(`[FollowUp] User reply to summary for ${keyForDeletion} was not a clear YES for details. Text: "${post.record.text}". Treating as new query.`);
+        }
+      }
+    }
+
+    // If not a follow-up or follow-up not actioned, proceed with normal response generation
     try {
       let conversationHistory = '';
       if (context && context.length > 0) {
@@ -1011,17 +1106,26 @@ class LlamaBot extends BaseBot {
 
       if (userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "") {
         // Profile analysis prompt
-        nemotronUserPrompt = `The user's current question is: "${post.record.text}"
+        nemotronUserPrompt = `The user's question is: "${post.record.text}"
 
-Please use your "User Profile Analyzer" capability. You have been provided with a selection of the user's recent Bluesky activity below under "USER'S RECENT BLUESKY ACTIVITY".
-Your task is to analyze THIS PROVIDED TEXT (their posts, replies, quote posts, and attributed reposts) to formulate a comprehensive answer to their question. Identify themes, common topics, or aspects of their online presence as reflected in this activity.
+Activate your "User Profile Analyzer" capability. Based on the "USER'S RECENT BLUESKY ACTIVITY" provided below, generate your response in two parts:
+
+PART 1: SUMMARY AND INVITATION
+Format this part starting with the exact marker "[SUMMARY FINDING WITH INVITATION]".
+Provide a concise summary (approx. 250-280 characters, in your persona) of your analysis of the user's activity.
+This summary **must end with a clear question inviting the user to ask for more details** (e.g., "I found some interesting patterns. Would you like a more detailed breakdown of these points?").
+
+PART 2: DETAILED ANALYSIS POINTS
+Immediately following Part 1, and on new lines, provide 1 to 3 detailed analysis points.
+Each point must start with an exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc.
+Each detailed point should be written as a complete, standalone message (under 290 characters), suitable for a separate Bluesky post. Ensure any internal lists (e.g., "1. Sub-point A, 2. Sub-point B") are well-formed within each point.
+Analyze themes, common topics, or aspects of their online presence as reflected in their posts, replies, quote posts, and attributed reposts.
 
 USER'S RECENT BLUESKY ACTIVITY:
 ${userBlueskyPostsContext}
 ---
-Your analysis and response, drawing insights from the activity above (you may also consider the brief conversation history below if it's directly relevant to clarifying the user's immediate question about their profile):
-${conversationHistory}
----
+${conversationHistory ? `\nBrief conversation history for immediate interaction context (less critical than the Bluesky Activity for this specific analysis):\n${conversationHistory}\n---` : ''}
+Your structured response (Summary with Invitation, then Detailed Points):
 ${baseInstruction}`;
       } else {
         // Standard prompt (no specific profile context fetched)
@@ -1068,11 +1172,11 @@ ${baseInstruction}`;
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [
-            { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences (this is a soft limit, final splitting is handled later). 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens). Apply your formatting rules consistently. The final splitting into multiple posts will be handled after your step, but ensure your output is clean and respects the other rules." },
+            { role: "system", content: "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens)." },
             { role: "user", content: initialResponse }
           ],
           temperature: 0.1, // Temperature for formatting (already lowered)
-          max_tokens: 350, // Increased max_tokens for Scout to handle longer Nemotron output
+          max_tokens: 450, // Increased max_tokens for Scout to handle longer, structured Nemotron output
           stream: false
         })
       });
@@ -1087,12 +1191,107 @@ ${baseInstruction}`;
         console.error('Unexpected response format from Nvidia NIM (filter model):', JSON.stringify(filterData));
         return initialResponse;
       }
-      const finalResponse = filterData.choices[0].message.content;
-      console.log(`[LlamaBot.generateResponse] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
-      return finalResponse;
+      const scoutFormattedText = filterData.choices[0].message.content;
+      console.log(`[LlamaBot.generateResponse] Scout formatted text (raw): "${scoutFormattedText}"`);
+
+      // Attempt to parse structured response if profile analysis was done
+      // Note: an image generated for the *initial* query that leads to a summary/details flow.
+      // This image should be passed if details are later requested.
+      // We need to receive potential imageBase64 & altText if they were generated for the initial query.
+      // Let's assume `post.generatedImageForThisInteraction = { imageBase64, altText }` if available.
+      // This is a placeholder; actual passing of this data needs to be handled from the monitor call.
+
+      if (fetchContextDecision) {
+        const summaryMarker = "[SUMMARY FINDING WITH INVITATION]";
+        const detailMarkerBase = "[DETAILED ANALYSIS POINT "; // e.g., "[DETAILED ANALYSIS POINT 1]"
+
+        let summaryText = "";
+        const detailedPoints = [];
+
+        const summaryStartIndex = scoutFormattedText.indexOf(summaryMarker);
+
+        if (summaryStartIndex !== -1) {
+          let textAfterSummaryMarker = scoutFormattedText.substring(summaryStartIndex + summaryMarker.length);
+
+          let nextDetailPointIndex = textAfterSummaryMarker.indexOf(detailMarkerBase + "1]");
+          if (nextDetailPointIndex === -1) { // Maybe no detail points, or marker format issue
+            summaryText = textAfterSummaryMarker.trim(); // Assume all remaining text is summary
+          } else {
+            summaryText = textAfterSummaryMarker.substring(0, nextDetailPointIndex).trim();
+            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex); // Remaining text has detail points
+          }
+
+          // Extract detailed points
+          let currentPoint = 1;
+          while (true) {
+            const currentDetailMarker = `${detailMarkerBase}${currentPoint}]`;
+            const nextDetailMarker = `${detailMarkerBase}${currentPoint + 1}]`;
+
+            const startOfCurrentPoint = textAfterSummaryMarker.indexOf(currentDetailMarker);
+            if (startOfCurrentPoint === -1) break; // No more points with this number
+
+            let endOfCurrentPoint = textAfterSummaryMarker.indexOf(nextDetailMarker, startOfCurrentPoint + currentDetailMarker.length);
+            let pointText;
+
+            if (endOfCurrentPoint === -1) { // This is the last detail point
+              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
+            } else {
+              pointText = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
+            }
+
+            if (pointText) detailedPoints.push(pointText);
+            if (endOfCurrentPoint === -1 || detailedPoints.length >= 3) break; // Max 3 detail points
+
+            currentPoint++;
+          }
+
+          console.log(`[LlamaBot.generateResponse] Parsed Summary: "${summaryText}"`);
+          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1}: "${p}"`));
+
+          if (summaryText) {
+            // Store detailed points if any, then return only summary for initial post
+            // Post the summary first. No image on summary.
+            const summaryPostedUris = await this.postReply(post, summaryText, null, null);
+
+            if (summaryPostedUris && summaryPostedUris.length > 0) {
+              const summaryPostUri = summaryPostedUris[0];
+              console.log(`[LlamaBot.generateResponse] Summary posted successfully: ${summaryPostUri}`);
+              if (detailedPoints.length > 0) {
+                this.pendingDetailedAnalyses.set(post.uri, { // Keyed by original user post URI
+                  points: detailedPoints,
+                  timestamp: Date.now(),
+                  summaryPostUri: summaryPostUri, // URI of the bot's summary post
+                  replyToRootUri: post.record?.reply?.root?.uri || post.uri, // Root for threading details
+                  // imageBase64 and altText from the initial query, if any.
+                  // These need to be passed into generateResponse if they existed.
+                  // For now, assuming they might be on `post.generatedImageForThisInteraction`
+                  imageBase64: post.generatedImageForThisInteraction?.imageBase64 || null,
+                  altText: post.generatedImageForThisInteraction?.altText || "Generated image for detail",
+                });
+                console.log(`[LlamaBot.generateResponse] Stored ${detailedPoints.length} detailed points, pending for original post URI: ${post.uri}, summary URI: ${summaryPostUri}`);
+              }
+              return null; // Signal that response (summary) has been handled, and details are pending.
+            } else {
+              console.error("[LlamaBot.generateResponse] Failed to post summary. Falling back to sending full text.");
+              return scoutFormattedText; // Fallback
+            }
+          } else {
+            console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Returning full Scout output.");
+            return scoutFormattedText; // Fallback
+          }
+        } else {
+          console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
+          return scoutFormattedText; // Fallback
+        }
+      } else {
+        // Standard response, not profile analysis. Return the text for monitor to post.
+        // If there was an image for this standard response, it should be on `post.generatedImageForThisInteraction`
+        // and `monitor` loop will pass it to `postReply`.
+        return scoutFormattedText;
+      }
     } catch (error) {
-      console.error('Error generating Llama response:', error);
-      return null;
+      console.error('Error in LlamaBot.generateResponse:', error);
+      return null; // Ensure null is returned on error so monitor doesn't try to post it.
     }
   }
 
@@ -1108,7 +1307,7 @@ ${baseInstruction}`;
     const systemPrompt = "Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about themselves, their posts, their online personality, their Bluesky account, or their life, in a way that their recent Bluesky activity could provide relevant context. Respond with only the word YES or the word NO.";
     const userPrompt = `User query: '${userQueryText}'`;
 
-    console.log(`[IntentClassifier] Calling Scout to check if profile context is needed for query: "${userQueryText}"`);
+    console.log(`[IntentClassifier] Calling Scout (shouldFetchProfileContext) for query: "${userQueryText}"`);
 
     try {
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -1128,21 +1327,107 @@ ${baseInstruction}`;
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification. Query: "${userQueryText}". Error: ${errorText}`);
-        return false; // Default to not fetching context on error
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (shouldFetchProfileContext). Query: "${userQueryText}". Error: ${errorText}`);
+        return false;
       }
 
       const data = await response.json();
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
         const decision = data.choices[0].message.content.trim().toUpperCase();
-        console.log(`[IntentClassifier] Scout decision for query "${userQueryText}": "${decision}"`);
+        console.log(`[IntentClassifier] Scout decision (shouldFetchProfileContext) for query "${userQueryText}": "${decision}"`);
         return decision === 'YES';
       }
-      console.error(`[IntentClassifier] Unexpected response format from Scout for intent classification. Query: "${userQueryText}". Data:`, JSON.stringify(data));
-      return false; // Default to not fetching context on unexpected format
+      console.error(`[IntentClassifier] Unexpected response format from Scout (shouldFetchProfileContext). Query: "${userQueryText}". Data:`, JSON.stringify(data));
+      return false;
     } catch (error) {
-      console.error(`[IntentClassifier] Error calling Scout for intent classification. Query: "${userQueryText}":`, error);
-      return false; // Default to not fetching context on error
+      console.error(`[IntentClassifier] Error calling Scout (shouldFetchProfileContext). Query: "${userQueryText}":`, error);
+      return false;
+    }
+  }
+
+  async isRequestingDetails(userFollowUpText) {
+    if (!userFollowUpText || userFollowUpText.trim() === "") {
+      return false;
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
+    const userPrompt = `User reply: '${userFollowUpText}'`;
+
+    console.log(`[IntentClassifier] Calling Scout (isRequestingDetails) for follow-up: "${userFollowUpText}"`);
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 5,
+          stream: false
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (isRequestingDetails). Follow-up: "${userFollowUpText}". Error: ${errorText}`);
+        return false;
+      }
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        console.log(`[IntentClassifier] Scout decision (isRequestingDetails) for follow-up "${userFollowUpText}": "${decision}"`);
+        return decision === 'YES';
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (isRequestingDetails). Follow-up: "${userFollowUpText}". Data:`, JSON.stringify(data));
+      return false;
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (isRequestingDetails). Follow-up: "${userFollowUpText}":`, error);
+      return false;
+    }
+  }
+
+  async isRequestingDetails(userFollowUpText) {
+    if (!userFollowUpText || userFollowUpText.trim() === "") {
+      return false;
+    }
+    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
+    const systemPrompt = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
+    const userPrompt = `User reply: '${userFollowUpText}'`;
+
+    console.log(`[IntentClassifier] Calling Scout (isRequestingDetails) for follow-up: "${userFollowUpText}"`);
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 5,
+          stream: false
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (isRequestingDetails). Follow-up: "${userFollowUpText}". Error: ${errorText}`);
+        return false;
+      }
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        console.log(`[IntentClassifier] Scout decision (isRequestingDetails) for follow-up "${userFollowUpText}": "${decision}"`);
+        return decision === 'YES';
+      }
+      console.error(`[IntentClassifier] Unexpected response format from Scout (isRequestingDetails). Follow-up: "${userFollowUpText}". Data:`, JSON.stringify(data));
+      return false;
+    } catch (error) {
+      console.error(`[IntentClassifier] Error calling Scout (isRequestingDetails). Follow-up: "${userFollowUpText}":`, error);
+      return false;
     }
   }
 

@@ -62,15 +62,13 @@ The `!post` command allows the administrator to instruct the bot to create a new
 
 This bot leverages Large Language Models (LLMs) for several advanced interaction capabilities:
 
-### 1. User Profile Analysis
-When a user asks questions about their own Bluesky profile, recent activity, or common themes in their posts (e.g., by saying "@botname what do you think of my profile?" or "@botname what are my main topics?"), the bot can:
-- Fetch up to the last 100 items from the user's author feed. This includes:
-    - Posts authored by the user.
-    - Replies made by the user to others.
-    - Quote posts made by the user (showing their commentary and the original quoted content).
-    - Reposts made by the user (with content attributed to the original author).
-- Provide this activity summary as context to the Llama 3.3 Nemotron Super model.
-- Nemotron then analyzes this information to generate a response based on the user's actual recent activity, rather than generic replies.
+### 1. Interactive User Profile Analysis
+When a user asks questions about their own Bluesky profile, recent activity, or common themes (e.g., "@botname what do you think of my profile?"), the bot employs a multi-step process:
+- **Contextual Understanding:** It first uses Llama 4 Scout to determine if the query is indeed about self-analysis based on Bluesky activity.
+- **Data Fetching:** If so, it fetches up to the last 100 items from the user's author feed (including their own posts, replies, quote posts, and attributed reposts).
+- **Initial Summary & Invitation:** Llama 3.3 Nemotron Super analyzes this data and generates a concise summary of its findings. This summary is posted as a single reply and **ends with an invitation** for the user to ask for more details (e.g., "I've found a few themes. Would you like a more detailed breakdown?").
+- **Detailed Analysis on Request:** If the user replies affirmatively (e.g., "yes", "tell me more"), the bot will then post 1-3 additional messages, each containing a specific detailed analysis point derived from the user's activity. These detailed messages are threaded to the summary and numbered with a suffix (e.g., `... [1/3]`). If an image was part of the original analysis context/request, it's attached to the last detailed message.
+This interactive approach allows for a concise initial response, with the option for users to dive deeper if they wish.
 
 ### 2. Image Generation Coordination
 - The bot can understand requests for image generation (e.g., "generate an image of...").
