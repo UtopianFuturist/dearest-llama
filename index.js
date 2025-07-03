@@ -794,17 +794,76 @@ class LlamaBot extends BaseBot {
             if (authorFeed.success && authorFeed.data.feed.length > 0) {
               for (const feedItem of authorFeed.data.feed) {
                 if (feedItem.post && feedItem.post.record) {
-                  let postDetail = `User Post: "${feedItem.post.record.text}"`;
-                  if (feedItem.reply) {
-                    postDetail = `User Reply (to ${feedItem.reply.parent?.author?.handle || 'another post'}): "${feedItem.post.record.text}"`;
+                  let postText = feedItem.post.record.text || "";
+                  const postAuthorHandle = feedItem.post.author.handle;
+                  const userWhoseFeedIsBeingFetched = post.author.handle; // Assuming 'post' here is the original post that triggered the bot
+
+                  let postDetail = "";
+                  const snippetMaxLength = 75; // Max length for text snippets in context
+                  const truncateText = (text, maxLength) => {
+                    if (!text) return "";
+                    return text.length > maxLength ? text.substring(0, maxLength - 3) + "..." : text;
+                  };
+
+                  if (feedItem.reason && feedItem.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
+                    // This is a repost BY THE USER whose feed we are fetching
+                    // The feedItem.post is the post that was reposted.
+                    const originalAuthorHandle = feedItem.post.author.handle;
+                    const originalPostText = truncateText(feedItem.post.record.text, snippetMaxLength);
+                    postDetail = `User (${userWhoseFeedIsBeingFetched}) reposted from @${originalAuthorHandle}: "${originalPostText}"`;
+                  } else if (postAuthorHandle === userWhoseFeedIsBeingFetched) {
+                    // This is an original action by the user (post, reply, quote post)
+                    if (feedItem.post.record.reply) {
+                      const parentAuthorHandle = feedItem.reply?.parent?.author?.handle || 'another user';
+                      postDetail = `User (${userWhoseFeedIsBeingFetched}) replied to @${parentAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
+                    } else if (feedItem.post.record.embed && feedItem.post.record.embed.$type === 'app.bsky.embed.record') {
+                      // This is a quote post by the user
+                      const quotedRecord = feedItem.post.record.embed.record;
+                      // The 'quotedRecord' could be a full post object or a more minimal reference.
+                      // We need to fetch the actual quoted post's content if it's just a reference,
+                      // but for simplicity in context, we'll try to get text if available directly.
+                      // A full implementation might require another fetch for `quotedRecord.uri` if text isn't readily available.
+                      let quotedTextSnippet = "a post";
+                      let quotedAuthor = "another user";
+                      if (quotedRecord && quotedRecord.value && quotedRecord.value.text) { // Ideal case: full record embedded
+                          quotedTextSnippet = truncateText(quotedRecord.value.text, snippetMaxLength);
+                          quotedAuthor = quotedRecord.author?.handle || quotedAuthor;
+                      } else if (quotedRecord && quotedRecord.uri) {
+                          // If only URI, we could fetch it, but let's keep it simple for now.
+                          // This part might need enhancement if full quoted text is critical.
+                          quotedTextSnippet = `a post (URI: ${quotedRecord.uri.split('/').pop()})`;
+                          // Attempt to get author from URI if possible, otherwise use a generic term
+                          const didMatch = quotedRecord.uri.match(/at:\/\/(did:[^/]+)/);
+                          if (didMatch && didMatch[1] && didMatch[1] !== post.author.did) { // Avoid self-quotes being confusingly attributed
+                            // Ideally, resolve DID to handle here, but that's another API call.
+                            // For now, we'll just note the DID or a generic term.
+                            // This is a simplification; resolving DID to handle would be better.
+                            // For now, we assume `feedItem.post.record.embed.record.author.handle` might exist if it's a resolved embed.
+                            quotedAuthor = feedItem.post.record.embed.record.author?.handle || `user (${didMatch[1].substring(0,10)}...)`;
+                          }
+                      }
+                      postDetail = `User (${userWhoseFeedIsBeingFetched}) quote posted (commenting on @${quotedAuthor}'s post): "${truncateText(postText, snippetMaxLength)}" which quoted: "${quotedTextSnippet}"`;
+                    } else {
+                      // Original post by the user
+                      postDetail = `User (${userWhoseFeedIsBeingFetched}) posted: "${truncateText(postText, snippetMaxLength)}"`;
+                    }
+                  } else {
+                    // This case should ideally not happen if getAuthorFeed is working as expected for 'userWhoseFeedIsBeingFetched'
+                    // It means a post in the feed is not by the user and not a repost by the user.
+                    // However, to be safe, we can log it or create a generic entry.
+                    console.log(`[Context] Encountered unexpected item in feed for ${userWhoseFeedIsBeingFetched}: Post by ${postAuthorHandle}`);
+                    postDetail = `Feed item concerning @${userWhoseFeedIsBeingFetched}: A post by @${postAuthorHandle}: "${truncateText(postText, snippetMaxLength)}"`;
                   }
-                  collectedPosts.push(postDetail);
-                  fetchedPostsCount++;
-                  if (fetchedPostsCount >= maxPostsToFetch) break;
+
+                  if (postDetail) {
+                    collectedPosts.push(postDetail);
+                    fetchedPostsCount++;
+                    if (fetchedPostsCount >= maxPostsToFetch) break;
+                  }
                 }
               }
               authorFeedCursor = authorFeed.data.cursor;
-              if (!authorFeedCursor || authorFeed.data.feed.length < postsLimitPerCall) {
+              if (!authorFeedCursor || authorFeed.data.feed.length < postsLimitPerCall || fetchedPostsCount >= maxPostsToFetch) {
                 console.log("[Context] No more posts or cursor from getAuthorFeed.");
                 break;
               }
@@ -825,7 +884,7 @@ class LlamaBot extends BaseBot {
         }
       }
 
-      const nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n${userBlueskyPostsContext}Please respond to the request in the most recent message in 300 characters or less. If user profile context was provided above, use it to inform your response if relevant. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`;
+      const nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\n${userBlueskyPostsContext}Please respond to the request in the most recent message in 300 characters or less. The user profile context above may contain the user's own posts, replies, quote posts, and items they've reposted (with original authors noted). Use this information to inform your response if relevant, paying attention to the nature of each activity. Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot.`;
 
       console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1`);
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
