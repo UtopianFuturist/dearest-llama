@@ -1677,6 +1677,7 @@ ${baseInstruction}`;
             if (isRelevant) {
               const postToAdd = { // Changed variable name to avoid conflict if currentPost is used elsewhere
                 uri: postUri,
+                cid: item.post.cid, // <<< Ensure CID is captured here
                 text: postText,
                 authorDid: postAuthorDid,
                 authorHandle: postAuthorHandle,
