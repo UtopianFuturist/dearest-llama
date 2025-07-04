@@ -1517,6 +1517,7 @@ ${baseInstruction}`;
         return scoutFormattedText;
       }
     } // This closes the try block
+    }
   catch (error) { // This is line 1520 in Render's logs
       console.error('Error in LlamaBot.generateResponse:', error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
