@@ -1930,9 +1930,13 @@ ${baseInstruction}`;
       return [];
     }
 
-    const requestBody = { query: searchQuery };
+    const requestBody = {
+      query: searchQuery,
+      summary: true, // Request summaries
+      count: 3       // Request 3 results
+    };
     if (freshness && ["oneDay", "oneWeek", "oneMonth"].includes(freshness)) { // Basic validation for freshness
-      requestBody.freshness = freshness;
+      requestBody.freshness = freshness; // Keep freshness if provided
     }
 
     try {
@@ -1951,16 +1955,31 @@ ${baseInstruction}`;
         return [];
       }
 
-      const data = await response.json();
+      const searchData = await response.json(); // Assuming the top-level response is SearchData
 
-      if (data.webPages && data.webPages.value && data.webPages.value.length > 0) {
-        const results = data.webPages.value.slice(0, 3).map(page => ({ // Take top 3 results
+      // Log query context if available
+      if (searchData.queryContext) {
+        console.log(`[WebSearch] Query Context: Original Query - "${searchData.queryContext.originalQuery}"`);
+      }
+
+      if (searchData.webPages && searchData.webPages.value && searchData.webPages.value.length > 0) {
+        // The 'count' parameter should mean we don't need to slice here if the API respects it.
+        // However, to be safe and match old behavior of taking max 3, we can still slice or rely on API's count.
+        // For now, let's assume API returns 'count' items.
+        const results = searchData.webPages.value.map(page => ({
           title: page.name || "No title",
           url: page.url,
+          displayUrl: page.displayUrl || page.url, // Add displayUrl
           snippet: page.snippet || "No snippet available.",
-          // summary: page.summary || null // If summary parameter were used and field existed
+          summary: page.summary || null, // Extract summary
+          datePublished: page.datePublished || null,
+          dateLastCrawled: page.dateLastCrawled || null,
+          // id: page.id // id might be useful for debugging or future features
         }));
-        console.log(`[WebSearch] Found ${results.length} results for query "${searchQuery}"`);
+        console.log(`[WebSearch] Found ${results.length} results for query "${searchQuery}". Estimated total matches: ${searchData.webPages.totalEstimatedMatches || 'N/A'}`);
+        if (searchData.webPages.someResultsRemoved) {
+            console.warn("[WebSearch] Some results were removed due to restrictions.");
+        }
         return results;
       } else {
         console.log(`[WebSearch] No web page results found for query "${searchQuery}"`);
