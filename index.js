@@ -1977,8 +1977,9 @@ IMPORTANT RULES for "search_history":
 - "keywords": Core content terms. EXCLUDE recency cues (e.g., "yesterday") AND type words (e.g., "image", "link").
 - "recency_cue": Time phrases (e.g., "yesterday", "last week"). Null if none.
 - "search_scope": For "target_type": "image" AND "author_filter": "bot":
-    - "bot_gallery" if general request (e.g., "image you made of X", "your picture of Y").
-    - "conversation" if implies shared context (e.g., "image you sent *me*"). Default to "conversation" if ambiguous.
+    - If the user is asking for an image the bot *created/generated/made*, and it's not explicitly stated it was *sent to them in a reply* or *part of a specific prior discussion point with them*, prefer "bot_gallery". (e.g., "image you made of X", "your picture of Y", "the moon image you generated yesterday", "URL for the image you created of a sunset"). The phrase "provide me" or "show me" in the current request for information does not automatically imply the image was originally part of a direct conversation.
+    - If they say 'image you sent me', 'image in our chat about X', or the context clearly indicates a shared conversational item (e.g., the image was a direct reply to their previous post), then "conversation" is more suitable.
+    - Default to "conversation" if truly ambiguous after these checks.
     - Null otherwise.
 
 IMPORTANT RULES for "web_search":
@@ -1986,7 +1987,8 @@ IMPORTANT RULES for "web_search":
 - "search_query" should be the essence of the user's question, suitable for a search engine.
 
 PRIORITIZATION:
-- If a query mentions past interactions directly (e.g., "you sent me", "we discussed", "in our chat"), prefer "search_history".
+- If a query mentions past interactions directly (e.g., "you sent me", "we discussed", "in our chat"), prefer "search_history" with appropriate "conversation" scope.
+- If a query asks about something the bot *created* or *generated* (especially images), and it's not explicitly tied to a direct back-and-forth, lean towards "search_history" with "bot_gallery" scope if applicable.
 - If it's a straightforward factual question about the world, prefer "web_search".
 
 If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.
@@ -1996,6 +1998,8 @@ Examples:
   Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["cat", "generated"], "recency_cue": "yesterday", "search_scope": "conversation"}
 - User query: "show me a picture you made of a dog"
   Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["dog"], "recency_cue": null, "search_scope": "bot_gallery"}
+- User query: "can you provide me the URL for the moon image you generated yesterday"
+  Response: {"intent": "search_history", "target_type": "image", "author_filter": "bot", "keywords": ["moon", "generated"], "recency_cue": "yesterday", "search_scope": "bot_gallery"}
 - User query: "what was that link about dogs I sent last tuesday?"
   Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday", "search_scope": null}
 - User query: "What is the tallest mountain in the world?"
