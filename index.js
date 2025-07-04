@@ -1314,15 +1314,38 @@ class LlamaBot extends BaseBot {
               }
             } // end for loop
 
-            if (postedImageCount === 0) {
-              await this.postReply(post, `I found some images for "${searchIntent.search_query}" but had trouble displaying them.`);
+            if (postedImageCount > 0) {
+              return null; // Successfully posted at least one Google image.
             }
-            return null; // All images (or attempts) posted.
-          } else {
-            // Image search was intended, but no image results or an issue.
-            console.log(`[WebSearchFlow] Image search for "${searchIntent.search_query}" yielded no usable image results or results were not of type 'image'.`);
-            await this.postReply(post, `Sorry, I couldn't find any suitable images on the web for "${searchIntent.search_query}".`);
-            return null;
+            // If postedImageCount is 0, it means web image search found results but failed to post any,
+            // OR web image search found no results initially (covered by the 'else' below this 'if' block).
+            // Proceed to Flux fallback.
+            console.log(`[WebSearchFlow] No Google images posted for "${searchIntent.search_query}". Initiating FLUX fallback.`);
+          }
+          // This 'else' covers:
+          // 1. searchResults was empty from performGoogleWebSearch.
+          // 2. searchResults had items, but they were not of type 'image'.
+          // 3. postedImageCount was 0 after trying to post (handled by falling through the above 'if').
+          // In all these cases for an image search intent, try Flux fallback.
+          if (!searchResults || searchResults.length === 0 || postedImageCount === 0) { // Condition simplified to catch all scenarios needing Flux fallback.
+            console.log(`[WebSearchFlow] Web image search for "${searchIntent.search_query}" yielded no displayable results. Attempting FLUX generation.`);
+            const fluxPrompt = searchIntent.search_query;
+            const scoutResult = await this.processImagePromptWithScout(fluxPrompt);
+
+            if (scoutResult.safe) {
+              const imageBase64 = await this.generateImage(scoutResult.image_prompt);
+              if (imageBase64) {
+                const altText = await this.describeImageWithScout(imageBase64) || `Generated image for: ${fluxPrompt}`;
+                const responseText = `I couldn't find any images for "${fluxPrompt}" with a web search, so I've generated one for you with FLUX.1-Schnell instead.`;
+                await this.postReply(post, responseText, imageBase64, altText);
+              } else {
+                await this.postReply(post, `I couldn't find any images for "${fluxPrompt}" with a web search, and I also had trouble generating one for you right now.`);
+              }
+            } else {
+              const unsafeFluxReply = scoutResult.reply_text || `I couldn't find any images for "${fluxPrompt}" with a web search. Your query was also evaluated for image generation but was not suitable due to safety guidelines.`;
+              await this.postReply(post, unsafeFluxReply);
+            }
+            return null; // Fallback handled.
           }
         }
 
