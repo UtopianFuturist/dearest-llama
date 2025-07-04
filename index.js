@@ -1019,7 +1019,7 @@ class LlamaBot extends BaseBot {
     }
 
     // If not a follow-up or follow-up not actioned, proceed with normal response generation
-    try { // START OF MAIN TRY BLOCK (Line 937)
+    try { // START OF MAIN TRY BLOCK
       const userQueryText = post.record.text; // The current user's message text
 
       // 1. Check for search history intent first
@@ -1184,10 +1184,10 @@ class LlamaBot extends BaseBot {
           console.error(`[SearchHistory] Nvidia NIM API error for search response (${nimSearchResponse.status}) - Text: ${errorText}`);
           await this.postReply(post, "I had a little trouble formulating a response for your search query. Please try again!");
         }
-        return null; // End processing for this interaction (FIXED COMMA)
+        return null; // End processing for this interaction
       } // Closes if (searchIntent.intent === "search_history")
       // If not a search history or web_search intent, proceed with existing logic
-      else if (searchIntent.intent === "web_search" && searchIntent.search_query) { // Corrected: Removed extraneous '}' that was here
+      else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
 
         const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
@@ -1516,8 +1516,8 @@ ${baseInstruction}`;
         // and `monitor` loop will pass it to `postReply`.
         return scoutFormattedText;
       }
-    } // THIS IS THE MISSING BRACE FOR THE TRY BLOCK
-    catch (error) { // This is line 1528 in my current view (Render's 1519)
+    } // THIS IS THE CORRECTED BRACE FOR THE 'try' BLOCK
+    catch (error) { // This was line 1528 in my current view (Render's 1519, now 1520 due to my fix)
       console.error('Error in LlamaBot.generateResponse:', error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
     }
