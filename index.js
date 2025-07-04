@@ -1249,7 +1249,10 @@ class LlamaBot extends BaseBot {
           return null;
         }
 
-        const searchResults = await this.performWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
+        // const searchResults = await this.performWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
+        // Switch to Google Search
+        const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
+
         let nemotronWebServicePrompt = "";
         const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
@@ -1556,6 +1559,71 @@ ${baseInstruction}`;
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
   }
+
+  async performGoogleWebSearch(searchQuery, freshness = null) {
+    console.log(`[GoogleSearch] Performing Google web search for query: "${searchQuery}", Freshness: ${freshness}`);
+    if (!this.config.GOOGLE_CUSTOM_SEARCH_API_KEY || !this.config.GOOGLE_CUSTOM_SEARCH_CX_ID) {
+      console.error("[GoogleSearch] GOOGLE_CUSTOM_SEARCH_API_KEY or GOOGLE_CUSTOM_SEARCH_CX_ID is not set. Cannot perform web search.");
+      return [];
+    }
+
+    const apiKey = this.config.GOOGLE_CUSTOM_SEARCH_API_KEY;
+    const cxId = this.config.GOOGLE_CUSTOM_SEARCH_CX_ID;
+    let url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cxId}&q=${encodeURIComponent(searchQuery)}`;
+
+    if (freshness) {
+      let dateRestrict;
+      if (freshness === "oneDay") dateRestrict = "d1";
+      else if (freshness === "oneWeek") dateRestrict = "w1";
+      else if (freshness === "oneMonth") dateRestrict = "m1";
+      if (dateRestrict) {
+        url += `&dateRestrict=${dateRestrict}`;
+      }
+    }
+
+    url += `&num=3`; // Request 3 results
+
+    try {
+      const response = await fetch(url, { method: 'GET' });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let detail = "";
+        try {
+            const errorJson = JSON.parse(errorText);
+            if (errorJson.error && errorJson.error.message) {
+                detail = errorJson.error.message;
+            }
+        } catch (e) { /* ignore parsing error if not json */ }
+        console.error(`[GoogleSearch] API error: ${response.status} - ${detail || errorText}`);
+        return [];
+      }
+
+      const data = await response.json();
+
+      if (data.items && data.items.length > 0) {
+        const results = data.items.map(item => ({
+          title: item.title || "No title",
+          url: item.link,
+          displayUrl: item.displayLink || item.link,
+          snippet: item.snippet || "No snippet available.",
+          summary: item.snippet || null,
+          datePublished: item.pagemap?.cse_metatags?.[0]?.['article:published_time'] || item.pagemap?.metatags?.[0]?.['article:published_time'] || null,
+          dateLastCrawled: null,
+        }));
+        console.log(`[GoogleSearch] Found ${results.length} results for query "${searchQuery}". Total results: ${data.searchInformation?.totalResults || 'N/A'}`);
+        return results;
+      } else {
+        console.log(`[GoogleSearch] No web page results found for query "${searchQuery}"`);
+        return [];
+      }
+    } catch (error) {
+      console.error(`[GoogleSearch] Exception during web search for query "${searchQuery}":`, error);
+      return [];
+    }
+  }
+
+  // Old performWebSearch for LangSearch has been removed.
 
   /**
    * Fetches and constructs a chronological conversation history between a specific user and the bot.
