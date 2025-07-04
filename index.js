@@ -1249,9 +1249,9 @@ class LlamaBot extends BaseBot {
           return null;
         }
 
-        const searchResults = await this.performWebSearch(searchIntent.search_query);
+        const searchResults = await this.performWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
         let nemotronWebServicePrompt = "";
-        const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}".
+        const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
 Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
 If the search results do not provide a clear answer, state that you couldn't find specific information from the web for their query.
@@ -1994,7 +1994,8 @@ Output a JSON object. Choose ONE of the following intent structures:
 2. If it's a GENERAL QUESTION for a WEB SEARCH:
 {
   "intent": "web_search",
-  "search_query": "optimized query for web search engine" // REQUIRED. The user's question, possibly rephrased for search.
+  "search_query": "optimized query for web search engine", // REQUIRED. The user's question, possibly rephrased for search.
+  "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null // Suggested freshness if query implies recency.
 }
 
 3. If NEITHER of the above:
@@ -2016,6 +2017,7 @@ IMPORTANT RULES for "search_history":
 IMPORTANT RULES for "web_search":
 - Use "web_search" for general knowledge questions, requests for current information/news, or explanations of concepts not tied to your direct prior interactions or capabilities (e.g., "What is the capital of France?", "latest advancements in AI", "how do black holes work?").
 - "search_query" should be the essence of the user's question, suitable for a search engine.
+- "freshness_suggestion": If the query contains terms implying recency like "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", or "oneMonth" respectively. If multiple apply, pick the most specific or smallest sensible period (e.g., "latest news today" -> "oneDay"). If no strong recency cue, set to null. Keywords like "yesterday" or "last week" in a web search query should also inform this field.
 
 PRIORITIZATION:
 - If a query mentions past interactions directly (e.g., "you sent me", "we discussed", "in our chat"), prefer "search_history" with appropriate "conversation" scope.
@@ -2034,9 +2036,11 @@ Examples:
 - User query: "what was that link about dogs I sent last tuesday?"
   Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday", "search_scope": null}
 - User query: "What is the tallest mountain in the world?"
-  Response: {"intent": "web_search", "search_query": "tallest mountain in the world"}
+  Response: {"intent": "web_search", "search_query": "tallest mountain in the world", "freshness_suggestion": null}
 - User query: "latest news about the Mars rover"
-  Response: {"intent": "web_search", "search_query": "latest news Mars rover"}
+  Response: {"intent": "web_search", "search_query": "news Mars rover", "freshness_suggestion": "oneDay"}
+- User query: "recent news stories from Reuters this week"
+  Response: {"intent": "web_search", "search_query": "news stories from Reuters", "freshness_suggestion": "oneWeek"}
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
