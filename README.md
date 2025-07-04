@@ -11,7 +11,8 @@ A Bluesky bot that responds to mentions using Nvidia NIM for text generation (sp
 - `BLUESKY_IDENTIFIER`: Your Bluesky handle (e.g., `username.bsky.social`)
 - `BLUESKY_APP_PASSWORD`: Your Bluesky app password
 - `ADMIN_BLUESKY_HANDLE`: (Required for admin features) The Bluesky handle of the bot's administrator (e.g., `adminuser.bsky.social`). Only this user can issue admin commands.
-- `LANGSEARCH_API_KEY`: Your API key for LangSearch (for the web search feature). Obtain from [LangSearch Dashboard](https://langsearch.com/dashboard).
+- `GOOGLE_CUSTOM_SEARCH_API_KEY`: Your Google Cloud API Key that is enabled for the Custom Search JSON API. This is used for web and image search features.
+- `GOOGLE_CUSTOM_SEARCH_CX_ID`: Your Google Custom Search Engine ID (cx value). The Search Engine should be configured to "Search the entire web" for the broadest results.
 Note: These require an active BlueSky account.
 
 ### Optional Environment Variables
@@ -83,18 +84,27 @@ Users can ask the bot to find specific items from their shared conversation hist
         - **Conversation History Search (`getBotUserConversationHistory`)**: For items mentioned as part of your direct conversation with the bot, or if the gallery search doesn't apply/yield results, it searches the shared interaction history. This search now looks at post text and extracted details from embeds (like image alt text or link titles).
 - **Output**: The bot will reply with a direct Bluesky URL to the found post (e.g., `https://bsky.app/profile/handle/post/rkey`) if a match is found, or a message indicating it couldn't find the requested item. Usually, only the most relevant match is returned.
 
-### 3. Web Search Capability
-The bot can perform web searches using the LangSearch API to answer general knowledge questions or find current information.
-- **How to Trigger**: Ask the bot a question that would typically require a web search, e.g.:
-    - *"What is the capital of France?"*
-    - *"Latest news on AI advancements."*
-    - *"Explain how black holes work."*
+### 3. Web & Image Search Capability (via Google Custom Search)
+The bot can perform web page and web image searches using the Google Custom Search JSON API to answer general knowledge questions or find current information. SafeSearch (`safe=active`) is enforced for all searches.
+
+- **How to Trigger**:
+    - For web page searches: Ask the bot a question that would typically require a web search, e.g.:
+        - *"What is the capital of France?"*
+        - *"Latest news on AI advancements."*
+    - For web image searches: Clearly ask for images, e.g.:
+        - *"Show me pictures of kittens from the web."*
+        - *"Search the web for images of the Eiffel Tower."*
+
 - **Behind the Scenes**:
-    - Llama 4 Scout (`getSearchHistoryIntent`) identifies if the query is a general informational request suitable for a web search (distinguishing it from history searches or other commands).
+    - Llama 4 Scout (`getSearchHistoryIntent`) identifies if the query is a general informational request suitable for a web search and determines if it's a standard web page search or an image search (setting `search_type` to `webpage` or `image`).
     - The extracted search query undergoes a safety check using `isTextSafeScout`.
-    - If safe, the bot calls the LangSearch API (`performWebSearch`).
-    - Llama 3.3 Nemotron Super then synthesizes an answer based on the top search results (typically 2-3 snippets, titles, and URLs).
-- **Output**: The bot provides a synthesized answer based on the web search results. It may cite source URLs if appropriate and guided by Nemotron's response style. If no relevant information is found or the query is unsafe, it will inform the user accordingly.
+    - If safe, the bot calls the Google Custom Search API via the `performGoogleWebSearch` method, including the `searchType` and enforcing `safe=active`.
+    - **For web page searches**: Llama 3.3 Nemotron Super synthesizes an answer based on the top search results (typically 2-3 snippets, titles, and URLs).
+    - **For image searches**: The bot attempts to download and display the top image result directly in the reply, along with a brief caption. If the image cannot be processed, a link might be provided.
+- **Output**:
+    - For web page searches: The bot provides a synthesized answer. It may cite source URLs if appropriate.
+    - For image searches: The bot posts the found image with a caption or a link if the image cannot be displayed directly.
+    - If no relevant information is found or the query is unsafe, it will inform the user accordingly.
 
 ### 4. Interactive User Profile Analysis (Refined)
 When a user asks questions about their own Bluesky profile, recent activity, or common themes (e.g., "@botname what do you think of my profile?"), the bot employs a multi-step process:
