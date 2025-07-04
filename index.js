@@ -1510,14 +1510,15 @@ ${baseInstruction}`;
           console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
           return scoutFormattedText; // Fallback
         }
-            } else {
+} else {
         // Standard response, not profile analysis. Return the text for monitor to post.
         // If there was an image for this standard response, it should be on `post.generatedImageForThisInteraction`
         // and `monitor` loop will pass it to `postReply`.
         return scoutFormattedText;
       }
-    } // THIS IS THE CORRECTED BRACE FOR THE 'try' BLOCK
-    catch (error) { // This is line 1520 in Render's logs
+    } // This closes the else block
+  } // This closes the try block
+  catch (error) { // This is line 1520 in Render's logs
       console.error('Error in LlamaBot.generateResponse:', error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
     }
