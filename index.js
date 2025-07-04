@@ -632,7 +632,7 @@ class BaseBot {
     }
   }
 
-  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null) {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null) {
     try {
       RateLimit.check();
       RateLimit.check();
@@ -744,42 +744,55 @@ class BaseBot {
               reply: currentReplyTo
           };
 
-          // Embed logic: Record embed takes precedence if provided.
-          // Image embed is only considered if no record embed and it's the last part.
-          if (isLastPart && embedRecordDetails && embedRecordDetails.uri && embedRecordDetails.cid) {
-            replyObject.embed = {
-              $type: 'app.bsky.embed.record',
-              record: {
-                uri: embedRecordDetails.uri,
-                cid: embedRecordDetails.cid
-              }
-            };
-            console.log(`[postReply] Record embed for part ${i+1}/${totalParts} created for URI: ${embedRecordDetails.uri}`);
-          } else if (isLastPart && imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
-              try {
-                  const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
-                  if (imageBytes.length === 0) {
-                      console.error('[postReply] Image byte array is empty for last part. Skipping image upload.');
-                  } else {
-                      const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
-                      if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
-                          replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
-                          console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}"`);
-                      } else {
-                          console.error('[postReply] Uploaded image data or blob is missing. Cannot embed image for last part.');
-                      }
-                  }
-              } catch (uploadError) { console.error(`[postReply] Error during image upload for part ${i+1}/${totalParts}:`, uploadError); }
-          } else if (isLastPart && imageBase64) { // imageBase64 present but invalid, or some other case
-              console.warn(`[postReply] imageBase64 was present for last part but invalid, or record embed took precedence. Skipping image embed if applicable.`);
+          // Embed logic: Precedence: Record > External Link Card > Image
+          // Embeds are typically only on the last part of a multi-part reply.
+          if (isLastPart) {
+            if (embedRecordDetails && embedRecordDetails.uri && embedRecordDetails.cid) {
+              replyObject.embed = {
+                $type: 'app.bsky.embed.record',
+                record: {
+                  uri: embedRecordDetails.uri,
+                  cid: embedRecordDetails.cid
+                }
+              };
+              console.log(`[postReply] Record embed for part ${i+1}/${totalParts} created for URI: ${embedRecordDetails.uri}`);
+            } else if (externalEmbedDetails && externalEmbedDetails.uri && externalEmbedDetails.title && externalEmbedDetails.description) {
+              replyObject.embed = {
+                $type: 'app.bsky.embed.external',
+                external: {
+                  uri: externalEmbedDetails.uri,
+                  title: externalEmbedDetails.title,
+                  description: externalEmbedDetails.description
+                  // Bluesky proxy will attempt to fetch a thumbnail from the URI
+                }
+              };
+              console.log(`[postReply] External link card embed for part ${i+1}/${totalParts} created for URI: ${externalEmbedDetails.uri}`);
+            } else if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+                try {
+                    const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+                    if (imageBytes.length === 0) {
+                        console.error('[postReply] Image byte array is empty for last part. Skipping image upload.');
+                    } else {
+                        const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+                        if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+                            replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
+                            console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}"`);
+                        } else {
+                            console.error('[postReply] Uploaded image data or blob is missing. Cannot embed image for last part.');
+                        }
+                    }
+                } catch (uploadError) { console.error(`[postReply] Error during image upload for part ${i+1}/${totalParts}:`, uploadError); }
+            } else if (imageBase64) { // imageBase64 present but invalid
+                console.warn(`[postReply] imageBase64 was present for last part but invalid. Skipping image embed.`);
+            }
           }
 
-          // If only an image or only a record embed is being posted (no text parts initially)
-          if (totalParts === 1 && textParts.length === 0 && (imageBase64 || embedRecordDetails)) {
+          // If only an embed is being posted (no text parts initially, e.g. just an image or card)
+          if (totalParts === 1 && textParts.length === 0 && (imageBase64 || embedRecordDetails || externalEmbedDetails)) {
             replyObject.text = replyObject.text || ""; // Ensure text is at least an empty string if there's an embed and no other text.
           }
 
-          // If there's an embed, and the text is completely empty, Bluesky might require text to be explicitly null or not present.
+          // If there's an embed (any type), and the text is completely empty, Bluesky might require text to be explicitly null or not present.
           // However, the current logic sets text to "" if it was going to be empty with an embed.
           // For now, an empty string `text: ""` with an embed is generally acceptable.
 
@@ -1229,6 +1242,7 @@ class LlamaBot extends BaseBot {
 
           let imageToPostBase64 = null;
           let altText = apodData.title;
+          let externalEmbed = null;
           const BLUESKY_IMAGE_SIZE_LIMIT_BYTES = 976.56 * 1024; // 976.56KB
 
           if (apodData.media_type === 'image') {
@@ -1236,40 +1250,52 @@ class LlamaBot extends BaseBot {
             console.log(`[NasaApodFlow] Fetching image from ${imageUrlToFetch}`);
             const downloadedImageBase64 = await utils.imageUrlToBase64(imageUrlToFetch);
             if (downloadedImageBase64) {
-              const imageSizeBytes = downloadedImageBase64.length * 0.75; // Approximate binary size
+              const imageSizeBytes = downloadedImageBase64.length * 0.75;
               if (imageSizeBytes > BLUESKY_IMAGE_SIZE_LIMIT_BYTES) {
-                console.warn(`[NasaApodFlow] APOD image is too large (${(imageSizeBytes / 1024).toFixed(2)}KB). Max is ${BLUESKY_IMAGE_SIZE_LIMIT_BYTES / 1024}KB.`);
-                responseText += `\n\n(The APOD image is too large to post directly. View it here: ${apodData.url})`;
+                console.warn(`[NasaApodFlow] APOD image is too large. Creating link card instead.`);
+                responseText = `Today's APOD: ${apodData.title}.\nThe image is too large to post directly, but you can view it here:`; // Shorter text for card
+                externalEmbed = {
+                  uri: apodData.url, // Link to the APOD page or image if page isn't distinct
+                  title: apodData.title,
+                  description: utils.truncateResponse(apodData.explanation, 150) // Shorter desc for card
+                };
               } else {
                 imageToPostBase64 = downloadedImageBase64;
+                // responseText already contains title and full explanation from above
               }
-            } else {
-              console.warn(`[NasaApodFlow] Failed to download APOD image. Will post text only with link.`);
-              responseText += `\n\nImage: ${apodData.url}`;
+            } else { // Download failed
+              console.warn(`[NasaApodFlow] Failed to download APOD image. Creating link card.`);
+              responseText = `Today's APOD: ${apodData.title}.\nI couldn't download the image, but you can view it here:`;
+              externalEmbed = {
+                uri: apodData.url,
+                title: apodData.title,
+                description: utils.truncateResponse(apodData.explanation, 150)
+              };
             }
           } else if (apodData.media_type === 'video') {
-            responseText += `\n\nWatch video: ${apodData.url}`;
-            if (apodData.thumbnail_url) {
-              console.log(`[NasaApodFlow] Fetching video thumbnail from ${apodData.thumbnail_url}`);
-              const downloadedThumbnailBase64 = await utils.imageUrlToBase64(apodData.thumbnail_url);
-              if (downloadedThumbnailBase64) {
-                const thumbnailSizeBytes = downloadedThumbnailBase64.length * 0.75;
-                if (thumbnailSizeBytes > BLUESKY_IMAGE_SIZE_LIMIT_BYTES) {
-                  console.warn(`[NasaApodFlow] APOD video thumbnail is too large (${(thumbnailSizeBytes / 1024).toFixed(2)}KB).`);
-                  responseText += `\n(Video thumbnail is too large to display. Link: ${apodData.thumbnail_url})`;
-                } else {
-                  imageToPostBase64 = downloadedThumbnailBase64;
-                  altText = `Video thumbnail for: ${apodData.title}`;
-                }
-              } else {
-                console.warn(`[NasaApodFlow] Failed to download APOD video thumbnail.`);
-              }
-            }
+            console.log(`[NasaApodFlow] APOD is a video. Creating link card for ${apodData.url}`);
+            // For videos, always use an external link card.
+            // The main responseText already includes title, explanation. We add a lead-in for the card.
+            responseText = `Today's APOD is a video: ${apodData.title}.\n${utils.truncateResponse(apodData.explanation, 200)}\nWatch here:`;
+            if (apodData.copyright) responseText += `\n(Copyright: ${apodData.copyright})`;
+            externalEmbed = {
+              uri: apodData.url, // This should be the video URL (e.g., YouTube)
+              title: apodData.title,
+              description: `Video: ${utils.truncateResponse(apodData.explanation, 150)}`
+            };
+            // We won't try to download and attach the video thumbnail if using a card,
+            // as Bluesky's card service will try to generate one from the video page.
           } else { // Unknown media type
-             responseText += `\n\nMedia: ${apodData.url}`;
+             console.log(`[NasaApodFlow] APOD is unknown media type. Creating link card for ${apodData.url}`);
+             responseText = `Today's APOD: ${apodData.title}.\nType: ${apodData.media_type}.\nView media here:`;
+             externalEmbed = {
+                uri: apodData.url,
+                title: apodData.title,
+                description: utils.truncateResponse(apodData.explanation, 150)
+             };
           }
 
-          await this.postReply(post, responseText, imageToPostBase64, altText);
+          await this.postReply(post, responseText, imageToPostBase64, altText, null, externalEmbed);
         } else {
           await this.postReply(post, "Sorry, I couldn't fetch the NASA Picture of the Day. Please check the date or try again later.");
         }
