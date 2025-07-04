@@ -1215,6 +1215,49 @@ class LlamaBot extends BaseBot {
         }
         return null; // End processing for this interaction
       } // Closes if (searchIntent.intent === "search_history")
+      else if (searchIntent.intent === "nasa_apod") {
+        console.log(`[NasaApodFlow] NASA APOD intent detected. Date: ${searchIntent.date}`);
+        const apodData = await this.getNasaApod(searchIntent.date);
+
+        if (apodData) {
+          let responseText = `NASA Picture of the Day for ${apodData.date}:\n**${apodData.title}**\n\n`;
+          responseText += utils.truncateResponse(apodData.explanation, 800); // Allow longer explanation for APOD
+
+          if (apodData.copyright) {
+            responseText += `\n\n(Copyright: ${apodData.copyright})`;
+          }
+
+          let imageToPostBase64 = null;
+          let altText = apodData.title;
+
+          if (apodData.media_type === 'image') {
+            const imageUrlToFetch = apodData.hdurl || apodData.url;
+            console.log(`[NasaApodFlow] Fetching image from ${imageUrlToFetch}`);
+            imageToPostBase64 = await utils.imageUrlToBase64(imageUrlToFetch);
+            if (!imageToPostBase64) {
+              console.warn(`[NasaApodFlow] Failed to download APOD image. Will post text only with link.`);
+              responseText += `\n\nImage: ${apodData.url}`;
+            }
+          } else if (apodData.media_type === 'video') {
+            responseText += `\n\nWatch video: ${apodData.url}`;
+            if (apodData.thumbnail_url) {
+              console.log(`[NasaApodFlow] Fetching video thumbnail from ${apodData.thumbnail_url}`);
+              imageToPostBase64 = await utils.imageUrlToBase64(apodData.thumbnail_url);
+              altText = `Video thumbnail for: ${apodData.title}`;
+              if (!imageToPostBase64) {
+                console.warn(`[NasaApodFlow] Failed to download APOD video thumbnail.`);
+              }
+            }
+          } else { // Unknown media type
+             responseText += `\n\nMedia: ${apodData.url}`;
+          }
+
+          await this.postReply(post, responseText, imageToPostBase64, altText);
+        } else {
+          await this.postReply(post, "Sorry, I couldn't fetch the NASA Picture of the Day. Please check the date or try again later.");
+        }
+        return null; // APOD handling complete
+      }
       // If not a search history or web_search intent, proceed with existing logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
@@ -1655,6 +1698,72 @@ ${baseInstruction}`;
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  async getNasaApod(requestedDate = null) {
+    console.log(`[NasaApod] Fetching APOD. Requested date: ${requestedDate}`);
+    const apiKey = "DEMO_KEY"; // Using DEMO_KEY as specified
+    let apiUrl = `https://api.nasa.gov/planetary/apod?api_key=${apiKey}&thumbs=true`;
+
+    if (requestedDate && requestedDate !== "today" && requestedDate !== "yesterday") {
+      // Basic validation for YYYY-MM-DD format, more robust validation could be added
+      if (/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
+        apiUrl += `&date=${requestedDate}`;
+      } else {
+        // Handle relative dates like "yesterday" - NASA API doesn't directly support this.
+        // We need to calculate it.
+        // For now, if it's not YYYY-MM-DD or "today", we might just let it default to today or log a warning.
+        // Let's try to calculate "yesterday".
+        if (requestedDate.toLowerCase() === 'yesterday') {
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yyyy = yesterday.getFullYear();
+            const mm = String(yesterday.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+            const dd = String(yesterday.getDate()).padStart(2, '0');
+            apiUrl += `&date=${yyyy}-${mm}-${dd}`;
+            console.log(`[NasaApod] Calculated 'yesterday' as ${yyyy}-${mm}-${dd}`);
+        } else {
+            console.warn(`[NasaApod] Invalid or unhandled date format for APOD: ${requestedDate}. Defaulting to today.`);
+            // No date parameter added, API defaults to today's APOD
+        }
+      }
+    }
+    // If requestedDate is "today" or null, no date parameter is added, API defaults to today.
+
+    try {
+      const response = await fetch(apiUrl);
+      if (!response.ok) {
+        const errorText = await response.text();
+        let detail = errorText;
+        try {
+            const errorJson = JSON.parse(errorText);
+            if (errorJson.msg) detail = errorJson.msg;
+            else if (errorJson.error && errorJson.error.message) detail = errorJson.error.message;
+        } catch(e) { /* ignore */ }
+        console.error(`[NasaApod] NASA APOD API error: ${response.status} - ${detail}`);
+        return null;
+      }
+      const data = await response.json();
+      // Ensure essential fields are present, especially URL, title, explanation, media_type
+      if (!data.url || !data.title || !data.explanation || !data.media_type) {
+          console.error('[NasaApod] NASA APOD API response missing essential fields:', data);
+          return null;
+      }
+      console.log(`[NasaApod] Successfully fetched APOD for date: ${data.date}, Title: ${data.title}`);
+      return {
+        title: data.title,
+        explanation: data.explanation,
+        url: data.url,
+        hdurl: data.hdurl || null,
+        media_type: data.media_type, // "image" or "video"
+        thumbnail_url: data.thumbnail_url || null, // Only if media_type is video and thumbs=true
+        copyright: data.copyright || null,
+        date: data.date, // The actual date of the APOD returned
+      };
+    } catch (error) {
+      console.error(`[NasaApod] Exception during NASA APOD API call:`, error);
+      return null;
+    }
   }
 
   async performGoogleWebSearch(searchQuery, freshness = null, searchType = 'webpage') {
@@ -2201,7 +2310,13 @@ Output a JSON object. Choose ONE of the following intent structures:
   "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null // Suggested freshness if query implies recency.
 }
 
-3. If NEITHER of the above:
+3. If asking for NASA's Astronomy Picture of the Day (APOD):
+{
+  "intent": "nasa_apod",
+  "date": "YYYY-MM-DD" | "today" | null // Extracted date or "today" if no specific date. Null if ambiguous.
+}
+
+4. If NEITHER of the above:
 {
   "intent": "none"
 }
@@ -2251,6 +2366,12 @@ Examples:
   Response: {"intent": "web_search", "search_query": "Reuters news", "search_type": "webpage", "freshness_suggestion": "oneWeek"}
 - User query: "do a web search for recent news stories from NBC"
   Response: {"intent": "web_search", "search_query": "NBC news", "search_type": "webpage", "freshness_suggestion": "oneDay"}
+- User query: "show me today's astronomy picture of the day"
+  Response: {"intent": "nasa_apod", "date": "today"}
+- User query: "APOD for 2024-01-15"
+  Response: {"intent": "nasa_apod", "date": "2024-01-15"}
+- User query: "nasa picture yesterday"
+  Response: {"intent": "nasa_apod", "date": "yesterday"} // LLM should try to convert relative dates if possible, or pass as is.
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
@@ -2344,6 +2465,12 @@ Examples:
               parsedJson.keywords = [];
               parsedJson.recency_cue = null;
               parsedJson.search_scope = null;
+            } else if (parsedJson.intent === "nasa_apod") {
+              if (parsedJson.date === undefined) { // Ensure date field exists, even if null
+                parsedJson.date = null;
+              }
+              // Potentially add date validation or normalization here if LLM provides varied formats for "yesterday" etc.
+              // For now, accept what LLM provides or null/today.
             } else if (parsedJson.intent !== "none") {
                console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
                return { intent: "none", error: "Unknown intent from Scout." };
