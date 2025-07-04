@@ -641,7 +641,7 @@ class BaseBot {
       const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
       const MAX_PARTS = 3;
       let textParts = [];
-      const postedPartUris = []; // Initialize array to store URIs of posted parts
+      let postedPartUris = []; // Initialize array to store URIs of posted parts
 
       let currentReplyTo = {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
@@ -1229,12 +1229,21 @@ class LlamaBot extends BaseBot {
 
           let imageToPostBase64 = null;
           let altText = apodData.title;
+          const BLUESKY_IMAGE_SIZE_LIMIT_BYTES = 976.56 * 1024; // 976.56KB
 
           if (apodData.media_type === 'image') {
             const imageUrlToFetch = apodData.hdurl || apodData.url;
             console.log(`[NasaApodFlow] Fetching image from ${imageUrlToFetch}`);
-            imageToPostBase64 = await utils.imageUrlToBase64(imageUrlToFetch);
-            if (!imageToPostBase64) {
+            const downloadedImageBase64 = await utils.imageUrlToBase64(imageUrlToFetch);
+            if (downloadedImageBase64) {
+              const imageSizeBytes = downloadedImageBase64.length * 0.75; // Approximate binary size
+              if (imageSizeBytes > BLUESKY_IMAGE_SIZE_LIMIT_BYTES) {
+                console.warn(`[NasaApodFlow] APOD image is too large (${(imageSizeBytes / 1024).toFixed(2)}KB). Max is ${BLUESKY_IMAGE_SIZE_LIMIT_BYTES / 1024}KB.`);
+                responseText += `\n\n(The APOD image is too large to post directly. View it here: ${apodData.url})`;
+              } else {
+                imageToPostBase64 = downloadedImageBase64;
+              }
+            } else {
               console.warn(`[NasaApodFlow] Failed to download APOD image. Will post text only with link.`);
               responseText += `\n\nImage: ${apodData.url}`;
             }
@@ -1242,9 +1251,17 @@ class LlamaBot extends BaseBot {
             responseText += `\n\nWatch video: ${apodData.url}`;
             if (apodData.thumbnail_url) {
               console.log(`[NasaApodFlow] Fetching video thumbnail from ${apodData.thumbnail_url}`);
-              imageToPostBase64 = await utils.imageUrlToBase64(apodData.thumbnail_url);
-              altText = `Video thumbnail for: ${apodData.title}`;
-              if (!imageToPostBase64) {
+              const downloadedThumbnailBase64 = await utils.imageUrlToBase64(apodData.thumbnail_url);
+              if (downloadedThumbnailBase64) {
+                const thumbnailSizeBytes = downloadedThumbnailBase64.length * 0.75;
+                if (thumbnailSizeBytes > BLUESKY_IMAGE_SIZE_LIMIT_BYTES) {
+                  console.warn(`[NasaApodFlow] APOD video thumbnail is too large (${(thumbnailSizeBytes / 1024).toFixed(2)}KB).`);
+                  responseText += `\n(Video thumbnail is too large to display. Link: ${apodData.thumbnail_url})`;
+                } else {
+                  imageToPostBase64 = downloadedThumbnailBase64;
+                  altText = `Video thumbnail for: ${apodData.title}`;
+                }
+              } else {
                 console.warn(`[NasaApodFlow] Failed to download APOD video thumbnail.`);
               }
             }
