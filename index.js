@@ -1250,9 +1250,39 @@ class LlamaBot extends BaseBot {
         }
 
         // const searchResults = await this.performWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
-        // Switch to Google Search
-        const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
+        // Switch to Google Search. Pass search_type from intent.
+        const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null, searchIntent.search_type || 'webpage');
 
+        if (searchIntent.search_type === 'image' && searchResults && searchResults.length > 0 && searchResults[0].type === 'image') {
+          const topImageResult = searchResults[0];
+          console.log(`[WebSearchFlow] Image search successful. Top result: ${topImageResult.imageUrl}`);
+          try {
+            const imageBase64 = await utils.imageUrlToBase64(topImageResult.imageUrl);
+            if (imageBase64) {
+              // Simple text response, could be enhanced by LLM later if needed.
+              let responseText = `Here's an image I found on the web for "${searchIntent.search_query}":`;
+              if (topImageResult.title) {
+                responseText += `\nTitle: ${topImageResult.title}`;
+              }
+              // Alt text could be title or snippet
+              const altText = utils.truncateResponse(topImageResult.title || topImageResult.snippet || searchIntent.search_query, 280);
+              await this.postReply(post, responseText, imageBase64, altText);
+            } else {
+              await this.postReply(post, `I found an image for "${searchIntent.search_query}" but couldn't display it. You can try viewing it here: ${topImageResult.imageUrl}`);
+            }
+          } catch (error) {
+            console.error(`[WebSearchFlow] Error processing image result for "${searchIntent.search_query}":`, error);
+            await this.postReply(post, `I found an image for "${searchIntent.search_query}" but encountered an error trying to display it. Source: ${topImageResult.contextUrl || topImageResult.imageUrl}`);
+          }
+          return null; // Image posted, end processing.
+        } else if (searchIntent.search_type === 'image') {
+          // Image search was intended, but no image results or an issue.
+          console.log(`[WebSearchFlow] Image search for "${searchIntent.search_query}" yielded no usable image results.`);
+          await this.postReply(post, `Sorry, I couldn't find any suitable images on the web for "${searchIntent.search_query}".`);
+          return null;
+        }
+
+        // If not an image search, or image search failed and fell through (though it shouldn't with current logic), proceed with text synthesis.
         let nemotronWebServicePrompt = "";
         const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
@@ -1560,8 +1590,8 @@ ${baseInstruction}`;
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
   }
 
-  async performGoogleWebSearch(searchQuery, freshness = null) {
-    console.log(`[GoogleSearch] Performing Google web search for query: "${searchQuery}", Freshness: ${freshness}`);
+  async performGoogleWebSearch(searchQuery, freshness = null, searchType = 'webpage') {
+    console.log(`[GoogleSearch] Performing Google search. Type: ${searchType}, Query: "${searchQuery}", Freshness: ${freshness}`);
     if (!this.config.GOOGLE_CUSTOM_SEARCH_API_KEY || !this.config.GOOGLE_CUSTOM_SEARCH_CX_ID) {
       console.error("[GoogleSearch] GOOGLE_CUSTOM_SEARCH_API_KEY or GOOGLE_CUSTOM_SEARCH_CX_ID is not set. Cannot perform web search.");
       return [];
@@ -1569,7 +1599,11 @@ ${baseInstruction}`;
 
     const apiKey = this.config.GOOGLE_CUSTOM_SEARCH_API_KEY;
     const cxId = this.config.GOOGLE_CUSTOM_SEARCH_CX_ID;
-    let url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cxId}&q=${encodeURIComponent(searchQuery)}`;
+    let url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cxId}&q=${encodeURIComponent(searchQuery)}&safe=active`; // Added safe=active
+
+    if (searchType === 'image') {
+      url += `&searchType=image`;
+    }
 
     if (freshness) {
       let dateRestrict;
@@ -1581,7 +1615,7 @@ ${baseInstruction}`;
       }
     }
 
-    url += `&num=3`; // Request 3 results
+    url += `&num=3`; // Request 3 results (applies to both web and image searches)
 
     try {
       const response = await fetch(url, { method: 'GET' });
@@ -1602,23 +1636,37 @@ ${baseInstruction}`;
       const data = await response.json();
 
       if (data.items && data.items.length > 0) {
-        const results = data.items.map(item => ({
-          title: item.title || "No title",
-          url: item.link,
-          displayUrl: item.displayLink || item.link,
-          snippet: item.snippet || "No snippet available.",
-          summary: item.snippet || null,
-          datePublished: item.pagemap?.cse_metatags?.[0]?.['article:published_time'] || item.pagemap?.metatags?.[0]?.['article:published_time'] || null,
-          dateLastCrawled: null,
-        }));
-        console.log(`[GoogleSearch] Found ${results.length} results for query "${searchQuery}". Total results: ${data.searchInformation?.totalResults || 'N/A'}`);
+        let results;
+        if (searchType === 'image') {
+          results = data.items.map(item => ({
+            type: 'image',
+            title: item.title || "No title",
+            imageUrl: item.link, // For images, item.link is the direct link to the image
+            contextUrl: item.image?.contextLink || '',
+            snippet: item.snippet || "No snippet available.", // Snippet might describe the image or its context page
+            // Other image-specific fields like item.mime, item.image.thumbnailLink could be added if needed
+          }));
+          console.log(`[GoogleSearch] Found ${results.length} image results for query "${searchQuery}". Total results: ${data.searchInformation?.totalResults || 'N/A'}`);
+        } else { // webpage
+          results = data.items.map(item => ({
+            type: 'webpage',
+            title: item.title || "No title",
+            url: item.link,
+            displayUrl: item.displayLink || item.link,
+            snippet: item.snippet || "No snippet available.",
+            summary: item.snippet || null,
+            datePublished: item.pagemap?.cse_metatags?.[0]?.['article:published_time'] || item.pagemap?.metatags?.[0]?.['article:published_time'] || null,
+            dateLastCrawled: null,
+          }));
+          console.log(`[GoogleSearch] Found ${results.length} web page results for query "${searchQuery}". Total results: ${data.searchInformation?.totalResults || 'N/A'}`);
+        }
         return results;
       } else {
-        console.log(`[GoogleSearch] No web page results found for query "${searchQuery}"`);
+        console.log(`[GoogleSearch] No results found (type: ${searchType}) for query "${searchQuery}"`);
         return [];
       }
     } catch (error) {
-      console.error(`[GoogleSearch] Exception during web search for query "${searchQuery}":`, error);
+      console.error(`[GoogleSearch] Exception during web search (type: ${searchType}) for query "${searchQuery}":`, error);
       return [];
     }
   }
@@ -2078,10 +2126,11 @@ Output a JSON object. Choose ONE of the following intent structures:
   "search_scope": "bot_gallery" | "conversation" | null // REQUIRED for bot image searches. Default "conversation". Null otherwise.
 }
 
-2. If it's a GENERAL QUESTION for a WEB SEARCH:
+2. If it's a GENERAL QUESTION for a WEB SEARCH (text or image):
 {
   "intent": "web_search",
   "search_query": "optimized query for web search engine", // REQUIRED. The user's question, possibly rephrased for search.
+  "search_type": "webpage" | "image", // REQUIRED. Default to "webpage" if not explicitly an image search.
   "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null // Suggested freshness if query implies recency.
 }
 
@@ -2124,13 +2173,17 @@ Examples:
 - User query: "what was that link about dogs I sent last tuesday?"
   Response: {"intent": "search_history", "target_type": "link", "author_filter": "user", "keywords": ["dogs"], "recency_cue": "last tuesday", "search_scope": null}
 - User query: "What is the tallest mountain in the world?"
-  Response: {"intent": "web_search", "search_query": "tallest mountain in the world", "freshness_suggestion": null}
+  Response: {"intent": "web_search", "search_query": "tallest mountain in the world", "search_type": "webpage", "freshness_suggestion": null}
 - User query: "latest news about the Mars rover"
-  Response: {"intent": "web_search", "search_query": "Mars rover latest news", "freshness_suggestion": "oneDay"}
+  Response: {"intent": "web_search", "search_query": "Mars rover latest news", "search_type": "webpage", "freshness_suggestion": "oneDay"}
+- User query: "show me pictures of kittens from the web"
+  Response: {"intent": "web_search", "search_query": "kittens", "search_type": "image", "freshness_suggestion": null}
+- User query: "search the web for images of the Eiffel Tower"
+  Response: {"intent": "web_search", "search_query": "Eiffel Tower", "search_type": "image", "freshness_suggestion": null}
 - User query: "recent news stories from Reuters this week"
-  Response: {"intent": "web_search", "search_query": "Reuters news", "freshness_suggestion": "oneWeek"}
+  Response: {"intent": "web_search", "search_query": "Reuters news", "search_type": "webpage", "freshness_suggestion": "oneWeek"}
 - User query: "do a web search for recent news stories from NBC"
-  Response: {"intent": "web_search", "search_query": "NBC news", "freshness_suggestion": "oneDay"}
+  Response: {"intent": "web_search", "search_query": "NBC news", "search_type": "webpage", "freshness_suggestion": "oneDay"}
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
@@ -2214,6 +2267,10 @@ Examples:
                 console.warn(`[IntentClassifier] Scout 'web_search' response missing or empty 'search_query': ${jsonString}`);
                 return { intent: "none", error: "Malformed web_search intent from Scout (missing search_query)." };
               }
+              if (!["webpage", "image"].includes(parsedJson.search_type)) {
+                console.warn(`[IntentClassifier] Scout 'web_search' response has invalid 'search_type': ${parsedJson.search_type}. Defaulting to 'webpage'. JSON: ${jsonString}`);
+                parsedJson.search_type = "webpage";
+              }
               // Ensure other search_history fields are not present or are null for web_search intent
               parsedJson.target_type = null;
               parsedJson.author_filter = null;
@@ -2222,7 +2279,7 @@ Examples:
               parsedJson.search_scope = null;
             } else if (parsedJson.intent !== "none") {
                console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
-               return { intent: "none", error: "Unknown intent from Scout."};
+               return { intent: "none", error: "Unknown intent from Scout." };
             }
             console.log(`[IntentClassifier] Scout parsed intent (getSearchHistoryIntent) for query "${userQueryText}":`, parsedJson);
             return parsedJson;
