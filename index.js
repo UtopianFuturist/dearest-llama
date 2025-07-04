@@ -1184,10 +1184,10 @@ class LlamaBot extends BaseBot {
           console.error(`[SearchHistory] Nvidia NIM API error for search response (${nimSearchResponse.status}) - Text: ${errorText}`);
           await this.postReply(post, "I had a little trouble formulating a response for your search query. Please try again!");
         }
-        return null, // End processing for this interaction
-      }
-
-      } else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
+        return null; // End processing for this interaction
+      } // Closes if (searchIntent.intent === "search_history")
+      // If not a search history or web_search intent, proceed with existing logic
+      else if (searchIntent.intent === "web_search" && searchIntent.search_query) { // Corrected: Removed extraneous '}'
         console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
 
         const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
@@ -2471,3 +2471,5 @@ async function startBots() {
 }
 
 startBots().catch(console.error);
+
+[end of index.js]
