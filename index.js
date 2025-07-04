@@ -632,7 +632,7 @@ class BaseBot {
     }
   }
 
-  async postReply(post, response, imageBase64 = null, altText = "Generated image") {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null) {
     try {
       RateLimit.check();
       RateLimit.check();
@@ -744,7 +744,18 @@ class BaseBot {
               reply: currentReplyTo
           };
 
-          if (isLastPart && imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+          // Embed logic: Record embed takes precedence if provided.
+          // Image embed is only considered if no record embed and it's the last part.
+          if (isLastPart && embedRecordDetails && embedRecordDetails.uri && embedRecordDetails.cid) {
+            replyObject.embed = {
+              $type: 'app.bsky.embed.record',
+              record: {
+                uri: embedRecordDetails.uri,
+                cid: embedRecordDetails.cid
+              }
+            };
+            console.log(`[postReply] Record embed for part ${i+1}/${totalParts} created for URI: ${embedRecordDetails.uri}`);
+          } else if (isLastPart && imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
               try {
                   const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
                   if (imageBytes.length === 0) {
@@ -759,17 +770,20 @@ class BaseBot {
                       }
                   }
               } catch (uploadError) { console.error(`[postReply] Error during image upload for part ${i+1}/${totalParts}:`, uploadError); }
-          } else if (isLastPart && imageBase64) {
-              console.warn(`[postReply] imageBase64 was present for last part but invalid. Skipping image embed.`);
+          } else if (isLastPart && imageBase64) { // imageBase64 present but invalid, or some other case
+              console.warn(`[postReply] imageBase64 was present for last part but invalid, or record embed took precedence. Skipping image embed if applicable.`);
           }
 
-          // If only an image is being posted (no text parts initially)
-          if (totalParts === 1 && textParts.length === 0 && imageBase64) {
-            replyObject.text = ""; // Ensure text is empty if only posting an image
+          // If only an image or only a record embed is being posted (no text parts initially)
+          if (totalParts === 1 && textParts.length === 0 && (imageBase64 || embedRecordDetails)) {
+            replyObject.text = replyObject.text || ""; // Ensure text is at least an empty string if there's an embed and no other text.
           }
 
+          // If there's an embed, and the text is completely empty, Bluesky might require text to be explicitly null or not present.
+          // However, the current logic sets text to "" if it was going to be empty with an embed.
+          // For now, an empty string `text: ""` with an embed is generally acceptable.
 
-          console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..."`);
+          console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..." Embed type: ${replyObject.embed ? replyObject.embed.$type : 'none'}`);
           const result = await this.agent.post(replyObject);
           console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}`);
           postedPartUris.push(result.uri); // Add successfully posted URI
@@ -1097,31 +1111,35 @@ class LlamaBot extends BaseBot {
         let nemotronSearchPrompt = "";
         if (matches.length > 0) {
           const topMatch = matches[0]; // Get the single best match
-          const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
+          // const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`; // URL will be part of the embed
 
           let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
-          // Add where it was found:
-          userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
+          userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
 
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
 
-          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}" or "This might be what you're looking for from ${searchIntent.recency_cue || 'recently'} ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+          // Prepare details for embedding the found post
+          const foundPostToEmbed = {
+            uri: topMatch.uri,
+            cid: topMatch.cid
+          };
 
-          if (matches.length > 1 && searchPerformed === "in our recent conversation history") { // Only show multi-match note if it was from conversation history for now
-            nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches from our conversation, but I'm giving you the URL for the most relevant one based on recency and keywords. The user's recency cue was "${searchIntent.recency_cue}". Focus the user response on the single URL provided.)`;
-          } else if (matches.length > 1 && searchPerformed === "in my own image gallery"){
-             nemotronSearchPrompt += `\n(Note for AI: Internally, I found ${matches.length} potential matches in my gallery. Showing the most relevant. The user's recency cue was "${searchIntent.recency_cue}".)`;
+          if (!foundPostToEmbed.uri || !foundPostToEmbed.cid) {
+            console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
+            // Fallback to old behavior if critical embed info is missing
+            const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
+            nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
           }
 
 
-        } else {
+        } else { // NO MATCHES FOUND
           let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
-          // Add where it was searched, even for no results
           userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
 
           nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched ${searchPerformed} but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description ${searchPerformed} from ${searchIntent.recency_cue || 'recently'} but couldn't find it. Could you try different keywords?"`;
@@ -1129,8 +1147,10 @@ class LlamaBot extends BaseBot {
 
         console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
 
-        // System prompt for Nemotron when handling search results - updated for conciseness
-        const searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something in your past conversation. You have been provided with the user's original query (including any recency cue they gave like 'yesterday') and the search result (either a direct Post URL if found, or a message that nothing was found along with the keywords used for the search and where the search was performed). If a Post URL is provided, your response to the user MUST consist of a brief confirmation phrase (which can acknowledge their recency cue and where it was found, e.g. 'in my gallery' or 'in our conversation') and then the Post URL itself. Do not add extra descriptions, author details, or text snippets unless they are part of the brief confirmation phrase. If nothing was found, state that clearly and politely, you can mention the keywords used for the search and where you looked if it seems helpful for the user to refine their query.";
+        const searchSystemPrompt = matches.length > 0 && matches[0].uri && matches[0].cid
+          ? "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and confirmation that a relevant post was found. Formulate a brief, natural confirmation message (e.g., 'I found this post for you:', 'This might be what you were looking for:'). The actual post will be embedded by the system, so DO NOT include the URL or any details of the post in your text response. Just a short introductory phrase."
+          : "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and the result of your search. If nothing was found, state that clearly and politely. If a post URL was found (but cannot be embedded), your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself.";
+
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
           method: 'POST',
@@ -1139,10 +1159,10 @@ class LlamaBot extends BaseBot {
             model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
             messages: [
               { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${searchSystemPrompt}` },
-              { role: "user", content: nemotronSearchPrompt } // nemotronSearchPrompt already contains user's original query and results
+              { role: "user", content: nemotronSearchPrompt }
             ],
-            temperature: 0.5, // Slightly lower temp for factual presentation
-            max_tokens: 200,
+            temperature: 0.5,
+            max_tokens: 100, // Shorter, as it's just a confirmation if embedding
             stream: false
           })
         });
@@ -1151,8 +1171,9 @@ class LlamaBot extends BaseBot {
         if (nimSearchResponse.ok) {
           const nimSearchData = await nimSearchResponse.json();
           if (nimSearchData.choices && nimSearchData.choices.length > 0 && nimSearchData.choices[0].message && nimSearchData.choices[0].message.content) {
-            const finalSearchResponseText = nimSearchData.choices[0].message.content.trim();
-            // Minimal formatting by Scout, similar to other responses
+            const baseResponseText = nimSearchData.choices[0].message.content.trim();
+
+            // Scout formatting for the text part
             const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
@@ -1160,21 +1181,29 @@ class LlamaBot extends BaseBot {
                   model: 'meta/llama-4-scout-17b-16e-instruct',
                   messages: [
                     { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
-                    { role: "user", content: finalSearchResponseText }
+                    { role: "user", content: baseResponseText }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
                 })
             });
+
+            let finalResponseText = baseResponseText; // Default to base if filter fails
             if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
                 if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
-                    await this.postReply(post, filterData.choices[0].message.content.trim());
-                } else {
-                     await this.postReply(post, finalSearchResponseText); // Fallback to unfiltered if Scout formatting fails
+                    finalResponseText = filterData.choices[0].message.content.trim();
                 }
-            } else {
-               await this.postReply(post, finalSearchResponseText); // Fallback to unfiltered if Scout call fails
             }
+
+            // Now, decide whether to embed based on `topMatch` having URI and CID
+            if (matches.length > 0 && matches[0].uri && matches[0].cid) {
+                const foundPostToEmbed = { uri: matches[0].uri, cid: matches[0].cid };
+                await this.postReply(post, finalResponseText, null, null, foundPostToEmbed);
+            } else {
+                // This branch is for when no match was found, or match was missing uri/cid (fallback to text URL)
+                await this.postReply(post, finalResponseText);
+            }
+
           } else {
             console.error('[SearchHistory] Nvidia NIM API response for search was ok, but no content found:', JSON.stringify(nimSearchData));
             await this.postReply(post, "I found some information, but had a slight hiccup displaying it. You might want to try asking again!");
@@ -1862,6 +1891,7 @@ ${baseInstruction}`;
             if (keywordsMatch) {
               matchingPosts.push({
                 uri: item.post.uri,
+                cid: item.post.cid, // Capture the CID of the post
                 text: postRecord.text || "",
                 authorHandle: item.post.author.handle, // Bot's handle
                 authorDid: item.post.author.did,     // Bot's DID
