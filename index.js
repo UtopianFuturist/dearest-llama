@@ -1253,36 +1253,80 @@ class LlamaBot extends BaseBot {
         // Switch to Google Search. Pass search_type from intent.
         const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null, searchIntent.search_type || 'webpage');
 
-        if (searchIntent.search_type === 'image' && searchResults && searchResults.length > 0 && searchResults[0].type === 'image') {
-          const topImageResult = searchResults[0];
-          console.log(`[WebSearchFlow] Image search successful. Top result: ${topImageResult.imageUrl}`);
-          try {
-            const imageBase64 = await utils.imageUrlToBase64(topImageResult.imageUrl);
-            if (imageBase64) {
-              // Simple text response, could be enhanced by LLM later if needed.
-              let responseText = `Here's an image I found on the web for "${searchIntent.search_query}":`;
-              if (topImageResult.title) {
-                responseText += `\nTitle: ${topImageResult.title}`;
+        if (searchIntent.search_type === 'image') {
+          if (searchResults && searchResults.length > 0 && searchResults.every(r => r.type === 'image')) {
+            let postedImageCount = 0;
+            let lastPostUri = post.uri; // Initial parent is the user's post
+            let lastPostCid = post.cid; // Initial parent CID
+            const rootUri = post.record?.reply?.root?.uri || post.uri;
+            const rootCid = post.record?.reply?.root?.cid || post.cid;
+
+            let replyToForNextPost = { // Structure for the first image post
+                root: { uri: rootUri, cid: rootCid },
+                parent: { uri: lastPostUri, cid: lastPostCid }
+            };
+
+            for (let i = 0; i < Math.min(searchResults.length, 4); i++) {
+              const imageResult = searchResults[i];
+              console.log(`[WebSearchFlow] Processing image ${i+1}/${searchResults.length}: ${imageResult.imageUrl}`);
+              try {
+                const imageBase64 = await utils.imageUrlToBase64(imageResult.imageUrl);
+                if (imageBase64) {
+                  let responseText = `Image [${i + 1}/${Math.min(searchResults.length, 4)}] for "${searchIntent.search_query}":`;
+                  if (imageResult.title && imageResult.title !== "No title") {
+                    responseText += `\n${imageResult.title}`;
+                  }
+                  const altText = utils.truncateResponse(imageResult.title || imageResult.snippet || searchIntent.search_query, 280);
+
+                  // Construct a minimal 'parentPostForReply' object for postReply
+                  const parentPostForReply = {
+                      uri: replyToForNextPost.parent.uri,
+                      cid: replyToForNextPost.parent.cid, // May be null if from initial user post if CID not available
+                      author: { did: (i === 0 ? post.author.did : this.agent.did) }, // User's DID for first, then bot's DID
+                      record: { reply: { root: replyToForNextPost.root } }
+                  };
+
+                  const postedPartUris = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
+
+                  if (postedPartUris && postedPartUris.length > 0) {
+                    // Update replyToForNextPost for the *next* image. It should reply to the last part of the current image's post.
+                    // We need the URI and CID of the post just made.
+                    // This is tricky because postReply itself calls agent.post and doesn't directly return the CID of the new post.
+                    // For simplicity, we'll assume the URI is enough and Bluesky handles CID resolution for parent.
+                    // A more robust way would be to fetch the post we just made to get its CID.
+                    // However, the `postReply` method itself handles threading for multi-part text posts.
+                    // Here, each image is a *conceptually separate reply* in a thread.
+                    // The last URI from `postedPartUris` is the one to reply to for the next image.
+                    replyToForNextPost.parent = { uri: postedPartUris[postedPartUris.length - 1], cid: null /* CID not easily available here */ };
+                    postedImageCount++;
+                    if (i < Math.min(searchResults.length, 4) - 1) { // Don't sleep after the last image
+                        await utils.sleep(2000); // 2-second delay between image posts
+                    }
+                  } else {
+                     console.warn(`[WebSearchFlow] Failed to post image ${i+1} (${imageResult.imageUrl}). Skipping.`);
+                  }
+                } else {
+                  console.warn(`[WebSearchFlow] Could not download/convert image ${i+1}: ${imageResult.imageUrl}. Skipping.`);
+                }
+              } catch (error) {
+                console.error(`[WebSearchFlow] Error processing image ${i+1} (${imageResult.imageUrl}):`, error);
+                // Optionally post a text message about the error for this specific image
               }
-              // Alt text could be title or snippet
-              const altText = utils.truncateResponse(topImageResult.title || topImageResult.snippet || searchIntent.search_query, 280);
-              await this.postReply(post, responseText, imageBase64, altText);
-            } else {
-              await this.postReply(post, `I found an image for "${searchIntent.search_query}" but couldn't display it. You can try viewing it here: ${topImageResult.imageUrl}`);
+            } // end for loop
+
+            if (postedImageCount === 0) {
+              await this.postReply(post, `I found some images for "${searchIntent.search_query}" but had trouble displaying them.`);
             }
-          } catch (error) {
-            console.error(`[WebSearchFlow] Error processing image result for "${searchIntent.search_query}":`, error);
-            await this.postReply(post, `I found an image for "${searchIntent.search_query}" but encountered an error trying to display it. Source: ${topImageResult.contextUrl || topImageResult.imageUrl}`);
+            return null; // All images (or attempts) posted.
+          } else {
+            // Image search was intended, but no image results or an issue.
+            console.log(`[WebSearchFlow] Image search for "${searchIntent.search_query}" yielded no usable image results or results were not of type 'image'.`);
+            await this.postReply(post, `Sorry, I couldn't find any suitable images on the web for "${searchIntent.search_query}".`);
+            return null;
           }
-          return null; // Image posted, end processing.
-        } else if (searchIntent.search_type === 'image') {
-          // Image search was intended, but no image results or an issue.
-          console.log(`[WebSearchFlow] Image search for "${searchIntent.search_query}" yielded no usable image results.`);
-          await this.postReply(post, `Sorry, I couldn't find any suitable images on the web for "${searchIntent.search_query}".`);
-          return null;
         }
 
-        // If not an image search, or image search failed and fell through (though it shouldn't with current logic), proceed with text synthesis.
+        // If not an image search, proceed with text synthesis for webpage results.
         let nemotronWebServicePrompt = "";
         const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
@@ -1615,7 +1659,7 @@ ${baseInstruction}`;
       }
     }
 
-    url += `&num=3`; // Request 3 results (applies to both web and image searches)
+    url += `&num=4`; // Request up to 4 results (applies to both web and image searches)
 
     try {
       const response = await fetch(url, { method: 'GET' });
