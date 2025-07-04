@@ -2017,6 +2017,7 @@ IMPORTANT RULES for "search_history":
 IMPORTANT RULES for "web_search":
 - Use "web_search" for general knowledge questions, requests for current information/news, or explanations of concepts not tied to your direct prior interactions or capabilities (e.g., "What is the capital of France?", "latest advancements in AI", "how do black holes work?").
 - "search_query" should be the essence of the user's question, suitable for a search engine.
+  - For news queries about a specific source (e.g., "recent news stories from NBC", "latest articles from CNN", "what did BBC say about X"), simplify the `search_query` to "[Source] news" or "[Source] latest news". For example, "recent news stories from NBC" becomes `search_query: "NBC news"`. Extract the source and combine it with a general news term.
 - "freshness_suggestion": If the query contains terms implying recency like "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", or "oneMonth" respectively. If multiple apply, pick the most specific or smallest sensible period (e.g., "latest news today" -> "oneDay"). If no strong recency cue, set to null. Keywords like "yesterday" or "last week" in a web search query should also inform this field.
 
 PRIORITIZATION:
@@ -2038,9 +2039,11 @@ Examples:
 - User query: "What is the tallest mountain in the world?"
   Response: {"intent": "web_search", "search_query": "tallest mountain in the world", "freshness_suggestion": null}
 - User query: "latest news about the Mars rover"
-  Response: {"intent": "web_search", "search_query": "news Mars rover", "freshness_suggestion": "oneDay"}
+  Response: {"intent": "web_search", "search_query": "Mars rover latest news", "freshness_suggestion": "oneDay"}
 - User query: "recent news stories from Reuters this week"
-  Response: {"intent": "web_search", "search_query": "news stories from Reuters", "freshness_suggestion": "oneWeek"}
+  Response: {"intent": "web_search", "search_query": "Reuters news", "freshness_suggestion": "oneWeek"}
+- User query: "do a web search for recent news stories from NBC"
+  Response: {"intent": "web_search", "search_query": "NBC news", "freshness_suggestion": "oneDay"}
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
