@@ -2202,49 +2202,6 @@ Examples:
     }
   }
 
-  async isRequestingDetails(userFollowUpText) {
-    if (!userFollowUpText || userFollowUpText.trim() === "") {
-      return false;
-    }
-    const modelId = 'meta/llama-4-scout-17b-16e-instruct';
-    const systemPrompt = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
-    const userPrompt = `User reply: '${userFollowUpText}'`;
-
-    console.log(`[IntentClassifier] Calling Scout (isRequestingDetails) for follow-up: "${userFollowUpText}"`);
-    try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-        body: JSON.stringify({
-          model: modelId,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt }
-          ],
-          temperature: 0.1,
-          max_tokens: 5,
-          stream: false
-        })
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[IntentClassifier] Scout API error (${response.status}) for intent classification (isRequestingDetails). Follow-up: "${userFollowUpText}". Error: ${errorText}`);
-        return false;
-      }
-      const data = await response.json();
-      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
-        const decision = data.choices[0].message.content.trim().toUpperCase();
-        console.log(`[IntentClassifier] Scout decision (isRequestingDetails) for follow-up "${userFollowUpText}": "${decision}"`);
-        return decision === 'YES';
-      }
-      console.error(`[IntentClassifier] Unexpected response format from Scout (isRequestingDetails). Follow-up: "${userFollowUpText}". Data:`, JSON.stringify(data));
-      return false;
-    } catch (error) {
-      console.error(`[IntentClassifier] Error calling Scout (isRequestingDetails). Follow-up: "${userFollowUpText}":`, error);
-      return false;
-    }
-  }
-
   async generateImage(prompt) {
     const modelToUse = "black-forest-labs/FLUX.1-schnell-Free";
     const apiKey = this.config.TOGETHER_AI_API_KEY;
