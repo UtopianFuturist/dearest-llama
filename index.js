@@ -1301,6 +1301,118 @@ class LlamaBot extends BaseBot {
         }
         return null; // APOD handling complete
       }
+      else if (searchIntent.intent === "create_meme") {
+        console.log(`[MemeFlow] Create Meme intent detected:`, searchIntent);
+
+        if (searchIntent.template_query && searchIntent.template_query.toLowerCase() === 'list') {
+          const templates = await this.getImgflipTemplates();
+          if (templates && templates.length > 0) {
+            const topTemplates = templates.slice(0, 10); // Show top 10 or so
+            let replyText = "Here are some popular Imgflip meme templates you can use:\n";
+            topTemplates.forEach(t => {
+              replyText += `\n- ${t.name} (ID: ${t.id}, Boxes: ${t.box_count})`;
+            });
+            replyText += "\n\nTo use one, say something like: !meme [ID or Name] | [Text for Box 1] | [Text for Box 2]";
+            await this.postReply(post, replyText);
+          } else {
+            await this.postReply(post, "Sorry, I couldn't fetch the list of meme templates right now.");
+          }
+          return null;
+        }
+
+        if (!searchIntent.template_query) {
+          await this.postReply(post, "You need to specify a meme template name or ID. Try asking me to 'list meme templates' first!");
+          return null;
+        }
+
+        // Find template ID
+        const allTemplates = await this.getImgflipTemplates(); // TODO: Cache this
+        if (!allTemplates || allTemplates.length === 0) {
+            await this.postReply(post, "Sorry, I couldn't load any meme templates to choose from.");
+            return null;
+        }
+        const foundTemplate = allTemplates.find(t =>
+            t.id === searchIntent.template_query ||
+            (t.name && t.name.toLowerCase() === searchIntent.template_query.toLowerCase())
+        );
+
+        if (!foundTemplate) {
+          await this.postReply(post, `Sorry, I couldn't find the meme template "${searchIntent.template_query}". Try 'list meme templates'.`);
+          return null;
+        }
+
+        let captions = searchIntent.captions || [];
+
+        if (searchIntent.generate_captions) {
+          if (captions.length > 0) { // User provided topic/context in caption field for generation
+            const topic = captions.join(" ");
+            console.log(`[MemeFlow] Generating captions for template "${foundTemplate.name}" on topic: "${topic}"`);
+            // Simplified prompt for caption generation
+            const captionGenPrompt = `Generate ${foundTemplate.box_count} short, witty meme captions for the "${foundTemplate.name}" template, related to: "${topic}". Respond with each caption on a new line.`;
+            const nemotronSystemPrompt = "You are a creative and funny meme caption generator."; // Different persona for this
+
+            const nimResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or a model good for creative short text
+                  messages: [ { role: "system", content: nemotronSystemPrompt }, { role: "user", content: captionGenPrompt } ],
+                  temperature: 0.8, max_tokens: 50 * foundTemplate.box_count, stream: false
+                })
+            });
+            if (nimResponse.ok) {
+                const nimData = await nimResponse.json();
+                if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
+                    captions = nimData.choices[0].message.content.split('\n').map(c => c.trim()).filter(c => c.length > 0).slice(0, foundTemplate.box_count);
+                    console.log(`[MemeFlow] Generated captions:`, captions);
+                } else {
+                     await this.postReply(post, "I had trouble thinking of captions for that. Please provide your own!"); return null;
+                }
+            } else {
+                 await this.postReply(post, "My caption generator seems to be down. Please provide your own captions!"); return null;
+            }
+          } else {
+             await this.postReply(post, "If you want me to generate captions, please provide a topic or theme in the caption fields."); return null;
+          }
+        }
+
+        if (captions.length === 0 || captions.length > foundTemplate.box_count) {
+             await this.postReply(post, `This meme template ("${foundTemplate.name}") needs ${foundTemplate.box_count} caption(s). You provided ${captions.length}. Please try again.`);
+             return null;
+        }
+
+        // Text safety check for user-provided or LLM-generated captions
+        for (const caption of captions) {
+            if (!await this.isTextSafeScout(caption)) {
+                await this.postReply(post, "One of the captions seems unsafe. I can't create this meme.");
+                return null;
+            }
+        }
+
+        const memeData = await this.captionImgflipMeme(foundTemplate.id, captions);
+        if (!memeData || !memeData.imageUrl) {
+          await this.postReply(post, "Sorry, I couldn't create the meme with Imgflip. There might have been an issue with the template or captions.");
+          return null;
+        }
+
+        console.log(`[MemeFlow] Meme created by Imgflip: ${memeData.imageUrl}. Now downloading for safety check & posting.`);
+        const finalMemeBase64 = await utils.imageUrlToBase64(memeData.imageUrl);
+
+        if (!finalMemeBase64) {
+          await this.postReply(post, `I created the meme, but had trouble downloading it. You can see it here: ${memeData.pageUrl}`);
+          return null;
+        }
+
+        const isVisuallySafe = await this.isImageSafeScout(finalMemeBase64);
+        if (!isVisuallySafe) {
+          await this.postReply(post, `I created a meme, but it didn't pass the final visual safety check. I cannot post it. You can try viewing it on Imgflip if you wish: ${memeData.pageUrl}`);
+          return null;
+        }
+
+        const altText = `${foundTemplate.name} meme. Captions: ${captions.join(" - ")}`;
+        await this.postReply(post, `Here's your "${foundTemplate.name}" meme:`, finalMemeBase64, utils.truncateResponse(altText, 280));
+        return null;
+      }
       // If not a search history or web_search intent, proceed with existing logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
@@ -1741,6 +1853,90 @@ ${baseInstruction}`;
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
+  }
+
+  async getImgflipTemplates() {
+    console.log('[Imgflip] Fetching meme templates from Imgflip...');
+    try {
+      const response = await fetch('https://api.imgflip.com/get_memes');
+      if (!response.ok) {
+        console.error(`[Imgflip] API error fetching templates: ${response.status} ${response.statusText}`);
+        return [];
+      }
+      const data = await response.json();
+      if (data.success && data.data && data.data.memes) {
+        console.log(`[Imgflip] Successfully fetched ${data.data.memes.length} meme templates.`);
+        return data.data.memes.map(meme => ({
+          id: meme.id,
+          name: meme.name,
+          url: meme.url,
+          box_count: meme.box_count,
+          width: meme.width,
+          height: meme.height
+        }));
+      } else {
+        console.error('[Imgflip] API call successful but response format incorrect or no memes found:', data.error_message || 'No error message');
+        return [];
+      }
+    } catch (error) {
+      console.error('[Imgflip] Exception fetching meme templates:', error);
+      return [];
+    }
+  }
+
+  async captionImgflipMeme(templateId, texts = [], font = null, maxFontSize = null) {
+    console.log(`[Imgflip] Captioning meme template ID: ${templateId} with ${texts.length} texts.`);
+    if (!this.config.IMGFLIP_USERNAME || !this.config.IMGFLIP_PASSWORD) {
+      console.error('[Imgflip] Imgflip username or password not configured.');
+      return null;
+    }
+
+    const params = new URLSearchParams();
+    params.append('template_id', templateId);
+    params.append('username', this.config.IMGFLIP_USERNAME);
+    params.append('password', this.config.IMGFLIP_PASSWORD);
+
+    // For V1, using text0 and text1 for simplicity for 2-box memes.
+    // The API docs state: "If boxes is specified, text0 and text1 will be ignored"
+    // "you may leave the first box completely empty, so that the second box will automatically be used for the bottom text."
+    // This implies text0 is top, text1 is bottom if box_count is 2.
+    if (texts.length > 0) {
+      params.append('text0', texts[0]);
+    }
+    if (texts.length > 1) {
+      params.append('text1', texts[1]);
+    }
+    // For more than 2 texts, the `boxes` parameter would be needed. We'll omit for V1 simplicity.
+
+    if (font) {
+      params.append('font', font);
+    }
+    if (maxFontSize) {
+      params.append('max_font_size', maxFontSize.toString());
+    }
+
+    try {
+      const response = await fetch('https://api.imgflip.com/caption_image', {
+        method: 'POST',
+        body: params // URLSearchParams will be sent as application/x-www-form-urlencoded
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        console.error(`[Imgflip] API error captioning image: ${response.status} - ${data.error_message || 'Unknown error'}`);
+        return null;
+      }
+
+      console.log(`[Imgflip] Successfully captioned meme. URL: ${data.data.url}, Page URL: ${data.data.page_url}`);
+      return {
+        imageUrl: data.data.url,
+        pageUrl: data.data.page_url
+      };
+    } catch (error) {
+      console.error('[Imgflip] Exception captioning meme:', error);
+      return null;
+    }
   }
 
   async getNasaApod(requestedDate = null) {
@@ -2359,7 +2555,15 @@ Output a JSON object. Choose ONE of the following intent structures:
   "date": "YYYY-MM-DD" | "today" | null // Extracted date or "today" if no specific date. Null if ambiguous.
 }
 
-4. If NEITHER of the above:
+4. If asking to create a meme using Imgflip templates:
+{
+  "intent": "create_meme",
+  "template_query": "drake" | "181913649" | "list" | null, // User's query for template name, ID, or "list". Null if ambiguous.
+  "captions": ["top text", "bottom text", ...], // Array of caption strings. Can be empty. Max 2 for now.
+  "generate_captions": true | false // True if bot should generate captions. False if user provided them or none are needed.
+}
+
+5. If NEITHER of the above:
 {
   "intent": "none"
 }
@@ -2415,6 +2619,14 @@ Examples:
   Response: {"intent": "nasa_apod", "date": "2024-01-15"}
 - User query: "nasa picture yesterday"
   Response: {"intent": "nasa_apod", "date": "yesterday"} // LLM should try to convert relative dates if possible, or pass as is.
+- User query: "list meme templates"
+  Response: {"intent": "create_meme", "template_query": "list", "captions": [], "generate_captions": false}
+- User query: "make a drake meme with top 'no new features' and bottom 'new features are better'"
+  Response: {"intent": "create_meme", "template_query": "drake", "captions": ["no new features", "new features are better"], "generate_captions": false}
+- User query: "use template 181913649 and say 'one does not simply' then 'walk into mordor'"
+  Response: {"intent": "create_meme", "template_query": "181913649", "captions": ["one does not simply", "walk into mordor"], "generate_captions": false}
+- User query: "generate a meme about coffee using the expanding brain template"
+  Response: {"intent": "create_meme", "template_query": "expanding brain", "captions": [], "generate_captions": true}
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
@@ -2514,6 +2726,11 @@ Examples:
               }
               // Potentially add date validation or normalization here if LLM provides varied formats for "yesterday" etc.
               // For now, accept what LLM provides or null/today.
+            } else if (parsedJson.intent === "create_meme") {
+              if (parsedJson.template_query === undefined) parsedJson.template_query = null;
+              if (!Array.isArray(parsedJson.captions)) parsedJson.captions = [];
+              parsedJson.captions = parsedJson.captions.slice(0, 2); // Limit to 2 captions for V1 (text0, text1)
+              if (typeof parsedJson.generate_captions !== 'boolean') parsedJson.generate_captions = false;
             } else if (parsedJson.intent !== "none") {
                console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
                return { intent: "none", error: "Unknown intent from Scout." };
@@ -2838,6 +3055,59 @@ Ensure your entire response is ONLY the JSON object.`;
       console.error(`Unexpected response format from Nvidia NIM for describeImageWithScout:`, JSON.stringify(data));
       return null;
     } catch (error) { console.error(`Error in LlamaBot.describeImageWithScout:`, error); return null; }
+  }
+
+  async isImageSafeScout(imageBase64) {
+    const modelToUse = 'meta/llama-4-scout-17b-16e-instruct'; // Assuming this model can do visual safety
+    console.log(`[VisualSafetyCheck] NIM CALL START: isImageSafeScout for model ${modelToUse}`);
+    if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
+      console.error('[VisualSafetyCheck] imageBase64 data is invalid or empty.');
+      return false; // Treat as unsafe if no image data
+    }
+
+    // Determine MIME type (simple check, could be more robust if needed)
+    // For now, assuming PNG from our Flux generation and common web formats for Imgflip.
+    // If we consistently get a specific format from Imgflip, we can use that.
+    // Defaulting to image/jpeg as it's common.
+    const mimeType = 'image/jpeg'; // Or 'image/png' - Scout might be flexible
+    const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+
+    const systemPrompt = `You are an AI visual safety moderator. Analyze the provided image. If the image violates any safety guidelines (adult content, NSFW, depictions of real-world violence or gore, hate speech symbols or imagery, illegal activities, or specific copyrighted characters that are not generic meme templates), respond with ONLY the word 'unsafe'. Otherwise, respond with ONLY the word 'safe'. Do not provide any other explanation or commentary.`;
+    const userPromptText = "Please analyze this image for safety according to the guidelines.";
+
+    try {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelToUse,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] }
+          ],
+          temperature: 0.1, // Low temperature for classification
+          max_tokens: 10,   // Enough for "safe" or "unsafe"
+          stream: false
+        })
+      });
+      console.log(`[VisualSafetyCheck] NIM CALL END: isImageSafeScout - Status: ${response.status}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[VisualSafetyCheck] Nvidia NIM API error (${response.status}) for isImageSafeScout - Text: ${errorText}`);
+        return false; // Treat as unsafe on API error
+      }
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const decision = data.choices[0].message.content.trim().toLowerCase();
+        console.log(`[VisualSafetyCheck] AI decision for image safety: "${decision}"`);
+        return decision === 'safe';
+      }
+      console.error(`[VisualSafetyCheck] Unexpected response format from Nvidia NIM for isImageSafeScout:`, JSON.stringify(data));
+      return false; // Treat as unsafe on unexpected format
+    } catch (error) {
+      console.error(`[VisualSafetyCheck] Exception in LlamaBot.isImageSafeScout:`, error);
+      return false; // Treat as unsafe on exception
+    }
   }
 }
 

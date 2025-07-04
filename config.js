@@ -15,6 +15,8 @@ const validateConfig = (config) => {
     'ADMIN_BLUESKY_HANDLE',
     'GOOGLE_CUSTOM_SEARCH_API_KEY',
     'GOOGLE_CUSTOM_SEARCH_CX_ID',
+    'IMGFLIP_USERNAME',
+    'IMGFLIP_PASSWORD',
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -32,6 +34,8 @@ const config = {
   ADMIN_BLUESKY_HANDLE: process.env.ADMIN_BLUESKY_HANDLE,
   GOOGLE_CUSTOM_SEARCH_API_KEY: process.env.GOOGLE_CUSTOM_SEARCH_API_KEY,
   GOOGLE_CUSTOM_SEARCH_CX_ID: process.env.GOOGLE_CUSTOM_SEARCH_CX_ID,
+  IMGFLIP_USERNAME: process.env.IMGFLIP_USERNAME,
+  IMGFLIP_PASSWORD: process.env.IMGFLIP_PASSWORD,
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
@@ -68,6 +72,8 @@ console.log(`[Config] Loaded TOGETHER_AI_API_KEY: ${config.TOGETHER_AI_API_KEY ?
 console.log(`[Config] Loaded NVIDIA_NIM_API_KEY: ${config.NVIDIA_NIM_API_KEY ? 'Exists' : 'MISSING!'}`);
 console.log(`[Config] Loaded GOOGLE_CUSTOM_SEARCH_API_KEY: ${config.GOOGLE_CUSTOM_SEARCH_API_KEY ? 'Exists' : 'MISSING!'}`);
 console.log(`[Config] Loaded GOOGLE_CUSTOM_SEARCH_CX_ID: ${config.GOOGLE_CUSTOM_SEARCH_CX_ID ? 'Exists' : 'MISSING!'}`);
+console.log(`[Config] Loaded IMGFLIP_USERNAME: ${config.IMGFLIP_USERNAME ? 'Exists' : 'MISSING!'}`);
+console.log(`[Config] Loaded IMGFLIP_PASSWORD: ${config.IMGFLIP_PASSWORD ? 'Exists (presence will be checked)' : 'MISSING!'}`);
 
 
 export default config;
