@@ -3135,7 +3135,7 @@ Ensure your entire response is ONLY the JSON object.`;
     const mimeType = 'image/jpeg'; // Or 'image/png' - Scout might be flexible
     const dataUrl = `data:${mimeType};base64,${imageBase64}`;
 
-    const systemPrompt = `You are an AI visual safety moderator. Analyze the provided image. If the image violates any safety guidelines (adult content, NSFW, depictions of real-world violence or gore, hate speech symbols or imagery, illegal activities, or specific copyrighted characters that are not generic meme templates), respond with ONLY the word 'unsafe'. Otherwise, respond with ONLY the word 'safe'. Do not provide any other explanation or commentary.`;
+    const systemPrompt = `You are an AI visual safety moderator. For this image, which is a generated meme, focus primarily on identifying: adult content, NSFW, depictions of real-world violence or gore, hate speech symbols or imagery, and illegal activities. The use of recognizable characters or copyrighted elements, when clearly part of a known meme format or used in a transformative comedic way typical of internet memes, should generally be considered acceptable unless it directly promotes one of the aforementioned harmful categories. If strictly harmful content is present, respond with ONLY the word 'unsafe'. Otherwise, respond with ONLY the word 'safe'. Do not provide any other explanation or commentary.`;
     const userPromptText = "Please analyze this image for safety according to the guidelines.";
 
     try {
