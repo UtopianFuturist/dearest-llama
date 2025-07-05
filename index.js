@@ -3340,7 +3340,7 @@ Ensure your entire response is ONLY the JSON object.`;
       return []; // Return empty array on exception
     }
   }
-}
+} // End of LlamaBot class
 
 // Initialize and run the bot
 async function startBots() {
