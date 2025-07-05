@@ -114,7 +114,7 @@ The bot can perform web page and web image searches using the Google Custom Sear
 - **Behind the Scenes**:
     - Llama 4 Scout (`getSearchHistoryIntent`) identifies requests for YouTube video searches.
     - The bot calls the YouTube Data API v3 (`performYouTubeSearch`) using your `YOUTUBE_API_KEY`.
-    - Searches are performed with `safeSearch=strict` and results are filtered to include only videos.
+    - Searches are performed with `safeSearch=moderate` and results are filtered to include only videos.
     - The bot processes the top video result.
     - Textual content from the video (title, description) undergoes a safety check using `isTextSafeScout`.
 - **Output**:

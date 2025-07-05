@@ -3170,7 +3170,7 @@ Ensure your entire response is ONLY the JSON object.`;
     }
 
     const apiKey = this.config.YOUTUBE_API_KEY;
-    const safeSearchSetting = 'strict'; // Options: 'moderate', 'strict', 'none'
+    const safeSearchSetting = 'moderate'; // Options: 'moderate', 'strict', 'none'
 
     let url = `https://www.googleapis.com/youtube/v3/search?key=${apiKey}&part=snippet&type=video&safeSearch=${safeSearchSetting}&maxResults=${maxResults}&q=${encodeURIComponent(searchQuery)}`;
 
