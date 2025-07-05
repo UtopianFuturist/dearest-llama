@@ -1450,7 +1450,7 @@ class LlamaBot extends BaseBot {
         if (searchIntent.search_type === 'image') {
           const MAX_IMAGES_TO_POST = 4;
           let postedImageCount = 0;
-          let fluxImagesPostedInLoop = 0; // To track FLUX images specifically for the loop logic
+          // Removed fluxImagesPostedInLoop as FLUX logic is removed.
           let replyToForNextPost = {
             root: { uri: post.record?.reply?.root?.uri || post.uri, cid: post.record?.reply?.root?.cid || post.cid },
             parent: { uri: post.uri, cid: post.cid }
