@@ -632,7 +632,7 @@ class BaseBot {
     }
   }
 
-  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null) {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png') {
     try {
       RateLimit.check();
       RateLimit.check();
@@ -774,10 +774,10 @@ class BaseBot {
                     if (imageBytes.length === 0) {
                         console.error('[postReply] Image byte array is empty for last part. Skipping image upload.');
                     } else {
-                        const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+                        const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: imageMimeType });
                         if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
                             replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
-                            console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}"`);
+                            console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}" and mimeType: ${imageMimeType}`);
                         } else {
                             console.error('[postReply] Uploaded image data or blob is missing. Cannot embed image for last part.');
                         }
@@ -1461,7 +1461,7 @@ class LlamaBot extends BaseBot {
             // Also, good to provide the source page URL.
             responseText += `\n(Powered by GIPHY - Source: ${gif.pageUrl})`;
 
-            await this.postReply(post, responseText, imageBase64, gif.altText || gif.title || searchIntent.search_query);
+            await this.postReply(post, responseText, imageBase64, gif.altText || gif.title || searchIntent.search_query, null, null, gif.mimeType);
           } else {
             console.warn(`[GiphySearchFlow] Failed to download GIF from URL: ${gif.gifUrl}`);
             await this.postReply(post, `I found a GIF for "${searchIntent.search_query}" but had trouble displaying it. You can try here: ${gif.pageUrl}`);
@@ -3315,20 +3315,43 @@ Ensure your entire response is ONLY the JSON object.`;
 
       if (data.data && data.data.length > 0) {
         const results = data.data.map(gif => {
-          // Prefer original WebP, fallback to fixed_height WebP, then original GIF if WebP not found
-          const webpUrl = gif.images?.original?.webp || gif.images?.fixed_height?.webp;
-          const gifUrlToUse = webpUrl || gif.images?.original?.url || gif.images?.fixed_height?.url;
+          let gifUrlToUse = null;
+          let mimeType = null;
+
+          // Prioritize GIF formats for animation
+          if (gif.images?.downsized?.url) {
+            gifUrlToUse = gif.images.downsized.url;
+            mimeType = 'image/gif';
+          } else if (gif.images?.original?.url) {
+            // Check if original URL ends with .gif, Giphy sometimes returns non-gif in original.url
+            if (gif.images.original.url.endsWith('.gif')) {
+                gifUrlToUse = gif.images.original.url;
+                mimeType = 'image/gif';
+            }
+          }
+
+          // Fallback to WebP if no suitable GIF URL was found (might be static)
+          if (!gifUrlToUse) {
+            if (gif.images?.original?.webp) {
+              gifUrlToUse = gif.images.original.webp;
+              mimeType = 'image/webp';
+            } else if (gif.images?.fixed_height?.webp) {
+              gifUrlToUse = gif.images.fixed_height.webp;
+              mimeType = 'image/webp';
+            }
+          }
 
           return {
             id: gif.id,
-            gifUrl: gifUrlToUse, // URL of the GIF file itself (preferably WebP)
+            gifUrl: gifUrlToUse,
             pageUrl: gif.url || gif.bitly_url, // Giphy page URL for the GIF
             title: gif.title || query, // Use Giphy title or fallback to query
-            altText: gif.title || `GIF for ${query}` // Alt text for accessibility
+            altText: gif.title || `GIF for ${query}`, // Alt text for accessibility
+            mimeType: mimeType
           };
-        }).filter(gif => gif.gifUrl); // Ensure we have a URL to download
+        }).filter(gif => gif.gifUrl && gif.mimeType); // Ensure we have a URL and mimeType
 
-        console.log(`[GiphySearch] Found ${results.length} GIF(s) for query "${query}".`);
+        console.log(`[GiphySearch] Found ${results.length} GIF(s)/Image(s) for query "${query}".`);
         return results;
       } else {
         console.log(`[GiphySearch] No Giphy results found for query "${query}".`);
