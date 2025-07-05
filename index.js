@@ -1991,7 +1991,7 @@ ${baseInstruction}`;
               console.error("[LlamaBot.generateResponse] Failed to post summary. Falling back to sending full text.");
               return scoutFormattedText; // Fallback
             }
-          } else {
+      } else {
             console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Returning full Scout output.");
             return scoutFormattedText; // Fallback
           }
@@ -2002,8 +2002,7 @@ ${baseInstruction}`;
     } catch (error) { // This is line 1520 in Render's logs
       console.error('Error in LlamaBot.generateResponse:', error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
-    }
-  } // THIS IS THE NEW END OF THE `async generateResponse` METHOD
+    } // Correctly ends generateResponse
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
@@ -3333,7 +3332,7 @@ Ensure your entire response is ONLY the JSON object.`;
       return []; // Return empty array on exception
     }
   }
-} // End of LlamaBot class
+// } // End of LlamaBot class -- REMOVED EXTRA BRACE
 
 // Initialize and run the bot
 async function startBots() {
