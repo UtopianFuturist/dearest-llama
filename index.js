@@ -642,6 +642,7 @@ class BaseBot {
       const MAX_PARTS = 3;
       let textParts = [];
       let postedPartUris = []; // Initialize array to store URIs of posted parts
+      let lastSuccessfulCid = null; // Added to store the CID of the last successfully posted part
 
       let currentReplyTo = {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
@@ -798,8 +799,9 @@ class BaseBot {
 
           console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..." Embed type: ${replyObject.embed ? replyObject.embed.$type : 'none'}`);
           const result = await this.agent.post(replyObject);
-          console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}`);
+          console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}, CID: ${result.cid}`);
           postedPartUris.push(result.uri); // Add successfully posted URI
+          lastSuccessfulCid = result.cid; // Store the CID of the successfully posted part
 
           if (!isLastPart) { // For the next part, reply to the part just posted
               currentReplyTo = {
@@ -809,11 +811,12 @@ class BaseBot {
           }
       }
       this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
-      return postedPartUris; // Return the array of URIs
+      return { uris: postedPartUris, lastCid: lastSuccessfulCid }; // Return object with URIs and lastCid
     } catch (error) {
       console.error('Error posting multi-part reply:', error);
       this.repliedPosts.add(post.uri); // Still mark as replied to avoid loops on error
-      return postedPartUris; // Return any URIs that were successfully posted before the error
+      // Return any URIs that were successfully posted before the error, and the lastCid obtained
+      return { uris: postedPartUris, lastCid: lastSuccessfulCid };
     }
   }
 
@@ -954,38 +957,25 @@ class LlamaBot extends BaseBot {
           if (storedDataForFollowUp.points && storedDataForFollowUp.points.length > 0) {
             console.log(`[FollowUp] User requested details for original post ${keyForDeletion}. Posting ${storedDataForFollowUp.points.length} points.`);
 
-            let currentDetailReplyTarget = {
-              root: storedDataForFollowUp.replyToRootUri,
-              parent: { uri: summaryPostUriUserIsReplyingTo, cid: post.record.reply.parent.cid }
-            };
+            // Removed currentDetailReplyTarget initialization as it was unused.
 
             const detailImageBase64 = storedDataForFollowUp.imageBase64;
             const detailAltText = storedDataForFollowUp.altText;
 
             // The 'post' object here is the user's message like "yes, tell me more".
-            // We need to reply to the bot's summary message, which is storedDataForFollowUp.summaryPostUri
-            // And the root of the thread is storedDataForFollowUp.replyToRootUri
+            // We need to reply to the bot's summary message (parent),
+            // which is storedDataForFollowUp.summaryPostUri and summaryPostCid.
+            // The root of the thread is storedDataForFollowUp.replyToRootUri.
 
-            let replyTargetForThisSequence = { // This is what each detailed point will reply to initially.
-                root: { uri: storedDataForFollowUp.replyToRootUri, cid: null }, // CID of root is not critical here, URI is.
-                parent: { uri: storedDataForFollowUp.summaryPostUri, cid: null } // Replying to the bot's summary post.
+            let replyTargetForThisSequence = {
+                root: { uri: storedDataForFollowUp.replyToRootUri, cid: post.record?.reply?.root?.cid }, // Use original root's CID if available
+                parent: { uri: storedDataForFollowUp.summaryPostUri, cid: storedDataForFollowUp.summaryPostCid } // Reply to the bot's summary post using its URI and CID
             };
+
             // The `post` object that `this.postReply` needs should be a mock or minimal representation
             // of the post we are replying to, for constructing the replyRef.
-            // Let's construct a minimal 'parentPostForReply' object.
-             const parentPostForReply = {
-                uri: storedDataForFollowUp.summaryPostUri, // The summary post by the bot
-                cid: null, // CID might not be readily available here, but URI is key for reply parent ref
-                author: { did: this.agent.did, handle: this.config.BLUESKY_IDENTIFIER }, // Bot's identity
-                record: {
-                    // text: "summary text placeholder", // Not strictly needed for reply ref
-                    reply: { // The summary post itself was a reply to the original user query
-                        root: { uri: storedDataForFollowUp.replyToRootUri },
-                        parent: { uri: storedDataForFollowUp.replyToRootUri } // Simplified, could be more complex
-                    }
-                }
-            };
-
+            // For the first detailed point, it's the summary post.
+            // This is already captured in replyTargetForThisSequence.parent.
 
             for (let i = 0; i < storedDataForFollowUp.points.length; i++) {
               const pointText = storedDataForFollowUp.points[i]; // Already cleaned
@@ -1015,19 +1005,16 @@ class LlamaBot extends BaseBot {
                 altTextForThisPoint
               );
 
-              if (postedPartsUris && postedPartsUris.length > 0) {
+              if (postedPartsUris && postedPartsUris.uris.length > 0 && postedPartsUris.lastCid) {
                 // Update replyTargetForThisSequence for the *next* conceptual point
                 // It should reply to the *last part* of the current conceptual point.
                 replyTargetForThisSequence.parent = {
-                    uri: postedPartsUris[postedPartsUris.length - 1],
-                    // We don't easily get the CID back from postReply's agent.post,
-                    // but URI is the critical part for the reply parent reference.
-                    // The @atproto/api might handle CID resolution internally or it might be optional for reply refs.
-                    cid: null // Placeholder, as postReply doesn't return CIDs of new posts.
+                    uri: postedPartsUris.uris[postedPartsUris.uris.length - 1],
+                    cid: postedPartsUris.lastCid // Use the CID of the last posted part
                 };
-                console.log(`[FollowUp] Conceptual point ${i+1} posted. Next reply parent URI: ${replyTargetForThisSequence.parent.uri}`);
+                console.log(`[FollowUp] Conceptual point ${i+1} posted. Next reply parent URI: ${replyTargetForThisSequence.parent.uri}, CID: ${replyTargetForThisSequence.parent.cid}`);
               } else {
-                console.error(`[FollowUp] Failed to post conceptual detail point ${i+1}. Aborting further details.`);
+                console.error(`[FollowUp] Failed to post conceptual detail point ${i+1} or missing CID. Aborting further details.`);
                 break;
               }
 
@@ -1490,13 +1477,13 @@ class LlamaBot extends BaseBot {
                     record: { reply: { root: replyToForNextPost.root } }
                   };
 
-                  const postedPartUris = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
-                  if (postedPartUris && postedPartUris.length > 0) {
-                    replyToForNextPost.parent = { uri: postedPartUris[postedPartUris.length - 1], cid: null };
+                  const postReplyResult = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
+                  if (postReplyResult && postReplyResult.uris.length > 0 && postReplyResult.lastCid) {
+                    replyToForNextPost.parent = { uri: postReplyResult.uris[postReplyResult.uris.length - 1], cid: postReplyResult.lastCid };
                     postedImageCount++;
                     if (postedImageCount < MAX_IMAGES_TO_POST) await utils.sleep(2000);
                   } else {
-                    console.warn(`[WebSearchFlow] Failed to post Google image ${i + 1} (${imageResult.imageUrl}). Skipping.`);
+                    console.warn(`[WebSearchFlow] Failed to post Google image ${i + 1} (${imageResult.imageUrl}) or missing CID. Skipping.`);
                   }
                 } else {
                   console.warn(`[WebSearchFlow] Could not download/convert Google image ${i + 1}: ${imageResult.imageUrl}. Skipping.`);
@@ -1529,14 +1516,14 @@ class LlamaBot extends BaseBot {
                     record: { reply: { root: replyToForNextPost.root } }
                   };
 
-                  const postedPartUris = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
-                  if (postedPartUris && postedPartUris.length > 0) {
-                    replyToForNextPost.parent = { uri: postedPartUris[postedPartUris.length - 1], cid: null };
+                  const postReplyResult = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
+                  if (postReplyResult && postReplyResult.uris.length > 0 && postReplyResult.lastCid) {
+                    replyToForNextPost.parent = { uri: postReplyResult.uris[postReplyResult.uris.length - 1], cid: postReplyResult.lastCid };
                     postedImageCount++; // Increment total images posted
                     fluxImagesPostedInLoop++; // Increment FLUX images posted in this loop
                     if (postedImageCount < MAX_IMAGES_TO_POST) await utils.sleep(2000);
                   } else {
-                     console.warn(`[WebSearchFlow] Failed to post FLUX generated image ${j + 1}.`);
+                     console.warn(`[WebSearchFlow] Failed to post FLUX generated image ${j + 1} or missing CID.`);
                   }
                 } else {
                   console.warn(`[WebSearchFlow] FLUX image generation failed for prompt: "${scoutResult.image_prompt}". Posting text reply.`);
@@ -1837,16 +1824,18 @@ ${baseInstruction}`;
           if (summaryText) {
             // Store detailed points if any, then return only summary for initial post
             // Post the summary first. No image on summary.
-            const summaryPostUrisArray = await this.postReply(post, summaryText, null, null);
+            const summaryPostReplyResult = await this.postReply(post, summaryText, null, null);
 
-            if (summaryPostUrisArray && summaryPostUrisArray.length > 0) {
-              const summaryPostUri = summaryPostUrisArray[summaryPostUrisArray.length - 1]; // Get the last part's URI
-              console.log(`[LlamaBot.generateResponse] Summary posted successfully. Last part URI: ${summaryPostUri}. Total parts: ${summaryPostUrisArray.length}`);
+            if (summaryPostReplyResult && summaryPostReplyResult.uris.length > 0 && summaryPostReplyResult.lastCid) {
+              const summaryPostUri = summaryPostReplyResult.uris[summaryPostReplyResult.uris.length - 1]; // Get the last part's URI
+              const summaryPostCid = summaryPostReplyResult.lastCid; // Get the last part's CID
+              console.log(`[LlamaBot.generateResponse] Summary posted successfully. Last part URI: ${summaryPostUri}, CID: ${summaryPostCid}. Total parts: ${summaryPostReplyResult.uris.length}`);
               if (detailedPoints.length > 0) {
                 this.pendingDetailedAnalyses.set(post.uri, { // Keyed by original user post URI
                   points: detailedPoints,
                   timestamp: Date.now(),
                   summaryPostUri: summaryPostUri, // URI of the bot's summary post
+                  summaryPostCid: summaryPostCid, // CID of the bot's summary post
                   replyToRootUri: post.record?.reply?.root?.uri || post.uri, // Root for threading details
                   // imageBase64 and altText from the initial query, if any.
                   // These need to be passed into generateResponse if they existed.
