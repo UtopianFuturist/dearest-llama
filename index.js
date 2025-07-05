@@ -1546,10 +1546,46 @@ class LlamaBot extends BaseBot {
             return null; // Fallback handled.
           }
         }
+      else if (searchIntent.intent === "youtube_search") {
+        console.log(`[YouTubeFlow] YouTube Search intent detected. Query: "${searchIntent.search_query}"`);
 
-        // If not an image search, proceed with text synthesis for webpage results.
-        let nemotronWebServicePrompt = "";
-        const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
+        // Optional: Text safety check on the search query itself before sending to YouTube
+        if (!await this.isTextSafeScout(searchIntent.search_query)) {
+            await this.postReply(post, "I'm sorry, but I cannot search YouTube for that topic due to safety guidelines.");
+            return null;
+        }
+
+        const videoResults = await this.performYouTubeSearch(searchIntent.search_query, 1); // Get top 1 result
+
+        if (videoResults && videoResults.length > 0) {
+          const video = videoResults[0];
+          console.log(`[YouTubeFlow] Found video: ${video.title} (${video.videoUrl})`);
+
+          // Optional: Text safety check on video title and description
+          const titleSafe = await this.isTextSafeScout(video.title);
+          const descriptionSafe = await this.isTextSafeScout(video.description);
+
+          if (!titleSafe || !descriptionSafe) {
+            await this.postReply(post, `I found a YouTube video, but its title or description may not meet safety guidelines, so I can't share it.`);
+            return null;
+          }
+
+          const responseText = `Here's a YouTube video I found for "${searchIntent.search_query}":\n${video.title}`;
+          const externalEmbedDetails = {
+            uri: video.videoUrl,
+            title: video.title,
+            description: utils.truncateResponse(video.description, 150) // Card descriptions are usually short
+          };
+          await this.postReply(post, responseText, null, null, null, externalEmbedDetails);
+        } else {
+          await this.postReply(post, `Sorry, I couldn't find any relevant YouTube videos for "${searchIntent.search_query}".`);
+        }
+        return null; // YouTube search handling complete.
+      }
+
+      // If not an image search, proceed with text synthesis for webpage results.
+      let nemotronWebServicePrompt = "";
+      const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
 Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
 If the search results do not provide a clear answer, state that you couldn't find specific information from the web for their query.
@@ -2563,7 +2599,13 @@ Output a JSON object. Choose ONE of the following intent structures:
   "generate_captions": true | false // True if bot should generate captions. False if user provided them or none are needed.
 }
 
-5. If NEITHER of the above:
+5. If asking to search YouTube for videos:
+{
+  "intent": "youtube_search",
+  "search_query": "query for youtube video search" // The user's query, possibly rephrased for YouTube search.
+}
+
+6. If NEITHER of the above:
 {
   "intent": "none"
 }
@@ -2627,6 +2669,10 @@ Examples:
   Response: {"intent": "create_meme", "template_query": "181913649", "captions": ["one does not simply", "walk into mordor"], "generate_captions": false}
 - User query: "generate a meme about coffee using the expanding brain template"
   Response: {"intent": "create_meme", "template_query": "expanding brain", "captions": [], "generate_captions": true}
+- User query: "search youtube for cat videos"
+  Response: {"intent": "youtube_search", "search_query": "cat videos"}
+- User query: "find a youtube video about cooking pasta"
+  Response: {"intent": "youtube_search", "search_query": "cooking pasta tutorial"}
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
@@ -2731,6 +2777,12 @@ Examples:
               if (!Array.isArray(parsedJson.captions)) parsedJson.captions = [];
               parsedJson.captions = parsedJson.captions.slice(0, 2); // Limit to 2 captions for V1 (text0, text1)
               if (typeof parsedJson.generate_captions !== 'boolean') parsedJson.generate_captions = false;
+            } else if (parsedJson.intent === "youtube_search") {
+              if (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim()) {
+                console.warn(`[IntentClassifier] Scout 'youtube_search' response missing or empty 'search_query': ${jsonString}`);
+                // Fallback to using the original user query text if LLM fails to extract a good one
+                parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").trim();
+              }
             } else if (parsedJson.intent !== "none") {
                console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
                return { intent: "none", error: "Unknown intent from Scout." };
@@ -3107,6 +3159,60 @@ Ensure your entire response is ONLY the JSON object.`;
     } catch (error) {
       console.error(`[VisualSafetyCheck] Exception in LlamaBot.isImageSafeScout:`, error);
       return false; // Treat as unsafe on exception
+    }
+  }
+
+  async performYouTubeSearch(searchQuery, maxResults = 1) {
+    console.log(`[YouTubeSearch] Performing YouTube search for query: "${searchQuery}", maxResults: ${maxResults}`);
+    if (!this.config.YOUTUBE_API_KEY) {
+      console.error("[YouTubeSearch] YOUTUBE_API_KEY is not set. Cannot perform YouTube search.");
+      return [];
+    }
+
+    const apiKey = this.config.YOUTUBE_API_KEY;
+    const safeSearchSetting = 'strict'; // Options: 'moderate', 'strict', 'none'
+
+    let url = `https://www.googleapis.com/youtube/v3/search?key=${apiKey}&part=snippet&type=video&safeSearch=${safeSearchSetting}&maxResults=${maxResults}&q=${encodeURIComponent(searchQuery)}`;
+
+    try {
+      const response = await fetch(url, { method: 'GET' });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let detail = errorText;
+        try {
+            const errorJson = JSON.parse(errorText);
+            if (errorJson.error && errorJson.error.message) {
+                detail = errorJson.error.message;
+            }
+        } catch (e) { /* ignore parsing error if not json */ }
+        console.error(`[YouTubeSearch] API error: ${response.status} - ${detail}`);
+        return []; // Return empty array on error
+      }
+
+      const data = await response.json();
+
+      if (data.items && data.items.length > 0) {
+        const results = data.items
+          .filter(item => item.id && item.id.kind === "youtube#video" && item.id.videoId) // Ensure it's a video and has an ID
+          .map(item => ({
+            videoId: item.id.videoId,
+            title: item.snippet?.title || "No title",
+            description: item.snippet?.description || "No description",
+            thumbnailUrl: item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.default?.url || null,
+            channelTitle: item.snippet?.channelTitle || "Unknown channel",
+            videoUrl: `https://www.youtube.com/watch?v=${item.id.videoId}`
+          }));
+
+        console.log(`[YouTubeSearch] Found ${results.length} video results for query "${searchQuery}".`);
+        return results;
+      } else {
+        console.log(`[YouTubeSearch] No YouTube video results found for query "${searchQuery}".`);
+        return [];
+      }
+    } catch (error) {
+      console.error(`[YouTubeSearch] Exception during YouTube search for query "${searchQuery}":`, error);
+      return []; // Return empty array on exception
     }
   }
 }
