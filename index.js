@@ -1227,6 +1227,9 @@ class LlamaBot extends BaseBot {
           if (apodData.copyright) {
             responseText += `\n\n(Copyright: ${apodData.copyright})`;
           }
+          if (apodData.url) { // Add source URL
+            responseText += `\n(Source: ${apodData.url})`;
+          }
 
           let imageToPostBase64 = null;
           let altText = apodData.title;
@@ -1245,7 +1248,7 @@ class LlamaBot extends BaseBot {
                 externalEmbed = {
                   uri: apodData.url, // Link to the APOD page or image if page isn't distinct
                   title: apodData.title,
-                  description: utils.truncateResponse(apodData.explanation, 150) // Shorter desc for card
+                  description: utils.truncateResponse(apodData.explanation, 140) + ` (Source: ${apodData.url})` // Shorter desc for card, add source
                 };
               } else {
                 imageToPostBase64 = downloadedImageBase64;
@@ -1269,7 +1272,7 @@ class LlamaBot extends BaseBot {
             externalEmbed = {
               uri: apodData.url, // This should be the video URL (e.g., YouTube)
               title: apodData.title,
-              description: `Video: ${utils.truncateResponse(apodData.explanation, 150)}`
+              description: `Video: ${utils.truncateResponse(apodData.explanation, 140)} (Source: ${apodData.url})`
             };
             // We won't try to download and attach the video thumbnail if using a card,
             // as Bluesky's card service will try to generate one from the video page.
@@ -1279,7 +1282,7 @@ class LlamaBot extends BaseBot {
              externalEmbed = {
                 uri: apodData.url,
                 title: apodData.title,
-                description: utils.truncateResponse(apodData.explanation, 150)
+                description: utils.truncateResponse(apodData.explanation, 140) + ` (Source: ${apodData.url})`
              };
           }
 
@@ -1409,7 +1412,11 @@ class LlamaBot extends BaseBot {
         }
 
         const altText = `${foundTemplate.name} meme. Captions: ${captions.join(" - ")}`;
-        await this.postReply(post, `Here's your "${foundTemplate.name}" meme:`, finalMemeBase64, utils.truncateResponse(altText, 280));
+        let memeResponseText = `Here's your "${foundTemplate.name}" meme:`;
+        if (memeData.pageUrl) {
+          memeResponseText += `\n(Source: ${memeData.pageUrl})`;
+        }
+        await this.postReply(post, memeResponseText, finalMemeBase64, utils.truncateResponse(altText, 280));
         return null;
       }
       // If not a search history or other specific intent, proceed with web search or original logic
@@ -1467,6 +1474,9 @@ class LlamaBot extends BaseBot {
                   let responseText = `Image [${postedImageCount + 1}/${MAX_IMAGES_TO_POST}] for "${searchIntent.search_query}":`;
                   if (imageResult.title && imageResult.title !== "No title") {
                     responseText += `\n${imageResult.title}`;
+                  }
+                  if (imageResult.contextUrl) {
+                    responseText += `\n(Source: ${imageResult.contextUrl})`;
                   }
                   const altText = utils.truncateResponse(imageResult.title || imageResult.snippet || searchIntent.search_query, 280);
 
