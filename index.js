@@ -1447,6 +1447,31 @@ class LlamaBot extends BaseBot {
         }
         return null; // YouTube search handling complete
       }
+      else if (searchIntent.intent === "giphy_search" && searchIntent.search_query) {
+        console.log(`[GiphySearchFlow] Giphy search intent detected. Query: "${searchIntent.search_query}"`);
+        const giphyResults = await this.searchGiphy(searchIntent.search_query, 1);
+
+        if (giphyResults && giphyResults.length > 0) {
+          const gif = giphyResults[0];
+          const imageBase64 = await utils.imageUrlToBase64(gif.gifUrl);
+
+          if (imageBase64) {
+            let responseText = `Here's a GIF for "${searchIntent.search_query}":`;
+            // Giphy attribution requirement: "Powered By GIPHY"
+            // Also, good to provide the source page URL.
+            responseText += `\n(Powered by GIPHY - Source: ${gif.pageUrl})`;
+
+            await this.postReply(post, responseText, imageBase64, gif.altText || gif.title || searchIntent.search_query);
+          } else {
+            console.warn(`[GiphySearchFlow] Failed to download GIF from URL: ${gif.gifUrl}`);
+            await this.postReply(post, `I found a GIF for "${searchIntent.search_query}" but had trouble displaying it. You can try here: ${gif.pageUrl}`);
+          }
+        } else {
+          const noResultsText = `Sorry, I couldn't find a GIPHY GIF for "${searchIntent.search_query}".`;
+          await this.postReply(post, noResultsText);
+        }
+        return null; // Giphy search handling complete
+      }
       // If not a search history or other specific intent, proceed with web search or original logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Consolidated web search intent detected. Query: "${searchIntent.search_query}", Type: "${searchIntent.search_type}"`);
@@ -2627,7 +2652,13 @@ Output a JSON object. Choose ONE of the following intent structures:
   "search_query": "query for youtube video search" // The user's query, possibly rephrased for YouTube search.
 }
 
-6. If NEITHER of the above:
+6. If asking to search GIPHY for a GIF:
+{
+  "intent": "giphy_search",
+  "search_query": "keywords for GIPHY search" // The user's keywords for the GIF.
+}
+
+7. If NEITHER of the above:
 {
   "intent": "none"
 }
@@ -2695,6 +2726,10 @@ Examples:
   Response: {"intent": "youtube_search", "search_query": "cat videos"}
 - User query: "find a youtube video about cooking pasta"
   Response: {"intent": "youtube_search", "search_query": "cooking pasta tutorial"}
+- User query: "show me a funny dog gif"
+  Response: {"intent": "giphy_search", "search_query": "funny dog"}
+- User query: "giphy celebration"
+  Response: {"intent": "giphy_search", "search_query": "celebration"}
 - User query: "can you generate a new image of a forest?" // This is an image generation command, not a search
   Response: {"intent": "none"}
 `;
@@ -2804,6 +2839,12 @@ Examples:
                 console.warn(`[IntentClassifier] Scout 'youtube_search' response missing or empty 'search_query': ${jsonString}`);
                 // Fallback to using the original user query text if LLM fails to extract a good one
                 parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").trim();
+              }
+            } else if (parsedJson.intent === "giphy_search") {
+              if (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim()) {
+                console.warn(`[IntentClassifier] Scout 'giphy_search' response missing or empty 'search_query': ${jsonString}`);
+                // Fallback to using the original user query text for giphy if LLM fails to extract
+                parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").replace(/giphy|gif/gi, "").trim();
               }
             } else if (parsedJson.intent !== "none") {
                console.warn(`[IntentClassifier] Scout response has unknown intent: ${jsonString}`);
@@ -3235,6 +3276,67 @@ Ensure your entire response is ONLY the JSON object.`;
     } catch (error) {
       console.error(`[YouTubeSearch] Exception during YouTube search for query "${searchQuery}":`, error);
       return []; // Return empty array on exception
+    }
+  }
+
+  async searchGiphy(query, limit = 1) {
+    console.log(`[GiphySearch] Searching Giphy for query: "${query}", Limit: ${limit}`);
+    if (!this.config.GIPHY_API_KEY) {
+      console.error("[GiphySearch] GIPHY_API_KEY is not set. Cannot perform Giphy search.");
+      return [];
+    }
+
+    const apiKey = this.config.GIPHY_API_KEY;
+    // Using 'pg-13' as a general-purpose rating. This could be made configurable.
+    const rating = 'pg-13';
+    const lang = 'en'; // Defaulting to English, could also be configurable.
+
+    const params = new URLSearchParams({
+      api_key: apiKey,
+      q: query,
+      limit: limit.toString(),
+      offset: '0', // Starting from the first result
+      rating: rating,
+      lang: lang,
+      bundle: 'messaging_non_clips' // Recommended bundle for most integrations
+    });
+
+    const url = `https://api.giphy.com/v1/gifs/search?${params.toString()}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[GiphySearch] Giphy API error: ${response.status} - ${errorText}`);
+        return [];
+      }
+
+      const data = await response.json();
+
+      if (data.data && data.data.length > 0) {
+        const results = data.data.map(gif => {
+          // Prefer original WebP, fallback to fixed_height WebP, then original GIF if WebP not found
+          const webpUrl = gif.images?.original?.webp || gif.images?.fixed_height?.webp;
+          const gifUrlToUse = webpUrl || gif.images?.original?.url || gif.images?.fixed_height?.url;
+
+          return {
+            id: gif.id,
+            gifUrl: gifUrlToUse, // URL of the GIF file itself (preferably WebP)
+            pageUrl: gif.url || gif.bitly_url, // Giphy page URL for the GIF
+            title: gif.title || query, // Use Giphy title or fallback to query
+            altText: gif.title || `GIF for ${query}` // Alt text for accessibility
+          };
+        }).filter(gif => gif.gifUrl); // Ensure we have a URL to download
+
+        console.log(`[GiphySearch] Found ${results.length} GIF(s) for query "${query}".`);
+        return results;
+      } else {
+        console.log(`[GiphySearch] No Giphy results found for query "${query}".`);
+        return [];
+      }
+    } catch (error) {
+      console.error(`[GiphySearch] Exception during Giphy search for query "${query}":`, error);
+      return [];
     }
   }
 } // Closes the LlamaBot class
