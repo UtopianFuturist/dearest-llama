@@ -1425,55 +1425,48 @@ class LlamaBot extends BaseBot {
         await this.postReply(post, `Here's your "${foundTemplate.name}" meme:`, finalMemeBase64, utils.truncateResponse(altText, 280));
         return null;
       }
-      // If not a search history or web_search intent, proceed with existing logic
+      // If not a search history or other specific intent, proceed with web search or original logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
-        console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
+        console.log(`[WebSearchFlow] Consolidated web search intent detected. Query: "${searchIntent.search_query}", Type: "${searchIntent.search_type}"`);
 
         const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
         if (!isQuerySafe) {
           console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
           const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
-          // No LLM call needed for this fixed response, but Scout formatting is good practice
-           const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-                body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
-                  messages: [
-                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
-                    { role: "user", content: unsafeQueryResponse }
-                  ],
-                  temperature: 0.1, max_tokens: 100, stream: false
-                })
-            });
-             if (filterResponse.ok) {
-                const filterData = await filterResponse.json();
-                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
-                    await this.postReply(post, filterData.choices[0].message.content.trim());
-                } else {
-                     await this.postReply(post, unsafeQueryResponse);
-                }
+          const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+              model: 'meta/llama-4-scout-17b-16e-instruct',
+              messages: [
+                { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                { role: "user", content: unsafeQueryResponse }
+              ],
+              temperature: 0.1, max_tokens: 100, stream: false
+            })
+          });
+          if (filterResponse.ok) {
+            const filterData = await filterResponse.json();
+            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+              await this.postReply(post, filterData.choices[0].message.content.trim());
             } else {
-               await this.postReply(post, unsafeQueryResponse);
+              await this.postReply(post, unsafeQueryResponse);
             }
+          } else {
+            await this.postReply(post, unsafeQueryResponse);
+          }
           return null;
         }
 
-        // const searchResults = await this.performWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
-        // Switch to Google Search. Pass search_type from intent.
         const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null, searchIntent.search_type || 'webpage');
 
         if (searchIntent.search_type === 'image') {
+          // Image search logic (previously the first web_search block)
           if (searchResults && searchResults.length > 0 && searchResults.every(r => r.type === 'image')) {
             let postedImageCount = 0;
-            let lastPostUri = post.uri; // Initial parent is the user's post
-            let lastPostCid = post.cid; // Initial parent CID
-            const rootUri = post.record?.reply?.root?.uri || post.uri;
-            const rootCid = post.record?.reply?.root?.cid || post.cid;
-
-            let replyToForNextPost = { // Structure for the first image post
-                root: { uri: rootUri, cid: rootCid },
-                parent: { uri: lastPostUri, cid: lastPostCid }
+            let replyToForNextPost = {
+              root: { uri: post.record?.reply?.root?.uri || post.uri, cid: post.record?.reply?.root?.cid || post.cid },
+              parent: { uri: post.uri, cid: post.cid }
             };
 
             for (let i = 0; i < Math.min(searchResults.length, 4); i++) {
@@ -1487,195 +1480,19 @@ class LlamaBot extends BaseBot {
                     responseText += `\n${imageResult.title}`;
                   }
                   const altText = utils.truncateResponse(imageResult.title || imageResult.snippet || searchIntent.search_query, 280);
-
-                  // Construct a minimal 'parentPostForReply' object for postReply
                   const parentPostForReply = {
-                      uri: replyToForNextPost.parent.uri,
-                      cid: replyToForNextPost.parent.cid, // May be null if from initial user post if CID not available
-                      author: { did: (i === 0 ? post.author.did : this.agent.did) }, // User's DID for first, then bot's DID
-                      record: { reply: { root: replyToForNextPost.root } }
+                    uri: replyToForNextPost.parent.uri,
+                    cid: replyToForNextPost.parent.cid,
+                    author: { did: (i === 0 ? post.author.did : this.agent.did) },
+                    record: { reply: { root: replyToForNextPost.root } }
                   };
-
                   const postedPartUris = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
-
                   if (postedPartUris && postedPartUris.length > 0) {
-                    // Update replyToForNextPost for the *next* image. It should reply to the last part of the current image's post.
-                    // We need the URI and CID of the post just made.
-                    // This is tricky because postReply itself calls agent.post and doesn't directly return the CID of the new post.
-                    // For simplicity, we'll assume the URI is enough and Bluesky handles CID resolution for parent.
-                    // A more robust way would be to fetch the post we just made to get its CID.
-                    // However, the `postReply` method itself handles threading for multi-part text posts.
-                    // Here, each image is a *conceptually separate reply* in a thread.
-                    // The last URI from `postedPartUris` is the one to reply to for the next image.
-                    replyToForNextPost.parent = { uri: postedPartUris[postedPartUris.length - 1], cid: null /* CID not easily available here */ };
+                    replyToForNextPost.parent = { uri: postedPartUris[postedPartUris.length - 1], cid: null };
                     postedImageCount++;
-                    if (i < Math.min(searchResults.length, 4) - 1) { // Don't sleep after the last image
-                        await utils.sleep(2000); // 2-second delay between image posts
-                    }
+                    if (i < Math.min(searchResults.length, 4) - 1) await utils.sleep(2000);
                   } else {
-                     console.warn(`[WebSearchFlow] Failed to post image ${i+1} (${imageResult.imageUrl}). Skipping.`);
-                  }
-                } else {
-                  console.warn(`[WebSearchFlow] Could not download/convert image ${i+1}: ${imageResult.imageUrl}. Skipping.`);
-                }
-              } catch (error) {
-                console.error(`[WebSearchFlow] Error processing image ${i+1} (${imageResult.imageUrl}):`, error);
-                // Optionally post a text message about the error for this specific image
-              }
-            } // end for loop
-
-            if (postedImageCount > 0) {
-              return null; // Successfully posted at least one Google image.
-            }
-            // If postedImageCount is 0, it means web image search found results but failed to post any,
-            // OR web image search found no results initially (covered by the 'else' below this 'if' block).
-            // Proceed to Flux fallback.
-            console.log(`[WebSearchFlow] No Google images posted for "${searchIntent.search_query}". Initiating FLUX fallback.`);
-          }
-          // This 'else' covers:
-          // 1. searchResults was empty from performGoogleWebSearch.
-          // 2. searchResults had items, but they were not of type 'image'.
-          // 3. postedImageCount was 0 after trying to post (handled by falling through the above 'if').
-          // In all these cases for an image search intent, try Flux fallback.
-          if (!searchResults || searchResults.length === 0 || postedImageCount === 0) { // Condition simplified to catch all scenarios needing Flux fallback.
-            console.log(`[WebSearchFlow] Web image search for "${searchIntent.search_query}" yielded no displayable results. Attempting FLUX generation.`);
-            const fluxPrompt = searchIntent.search_query;
-            const scoutResult = await this.processImagePromptWithScout(fluxPrompt);
-
-            if (scoutResult.safe) {
-              const imageBase64 = await this.generateImage(scoutResult.image_prompt);
-              if (imageBase64) {
-                const altText = await this.describeImageWithScout(imageBase64) || `Generated image for: ${fluxPrompt}`;
-                const responseText = `I couldn't find any images for "${fluxPrompt}" with a web search, so I've generated one for you with FLUX.1-Schnell instead.`;
-                await this.postReply(post, responseText, imageBase64, altText);
-              } else {
-                await this.postReply(post, `I couldn't find any images for "${fluxPrompt}" with a web search, and I also had trouble generating one for you right now.`);
-              }
-            } else {
-              const unsafeFluxReply = scoutResult.reply_text || `I couldn't find any images for "${fluxPrompt}" with a web search. Your query was also evaluated for image generation but was not suitable due to safety guidelines.`;
-              await this.postReply(post, unsafeFluxReply);
-            }
-            return null; // Fallback handled.
-          }
-        }
-      // NOTE: The youtube_search block was moved before the web_search block to ensure correct routing.
-      else if (searchIntent.intent === "youtube_search") {
-        console.log(`[YouTubeFlow] YouTube Search intent detected. Query: "${searchIntent.search_query}"`);
-
-        // Optional: Text safety check on the search query itself before sending to YouTube
-        if (!await this.isTextSafeScout(searchIntent.search_query)) {
-            await this.postReply(post, "I'm sorry, but I cannot search YouTube for that topic due to safety guidelines.");
-            return null;
-        }
-
-        const videoResults = await this.performYouTubeSearch(searchIntent.search_query, 1); // Get top 1 result
-
-        if (videoResults && videoResults.length > 0) {
-          const video = videoResults[0];
-          console.log(`[YouTubeFlow] Found video: ${video.title} (${video.videoUrl})`);
-
-          // Optional: Text safety check on video title and description
-          const titleSafe = await this.isTextSafeScout(video.title);
-          const descriptionSafe = await this.isTextSafeScout(video.description);
-
-          if (!titleSafe || !descriptionSafe) {
-            await this.postReply(post, `I found a YouTube video, but its title or description may not meet safety guidelines, so I can't share it.`);
-            return null;
-          }
-
-          const responseText = `Here's a YouTube video I found for "${searchIntent.search_query}":\n${video.title}`;
-          const externalEmbedDetails = {
-            uri: video.videoUrl,
-            title: video.title,
-            description: utils.truncateResponse(video.description, 150) // Card descriptions are usually short
-          };
-          await this.postReply(post, responseText, null, null, null, externalEmbedDetails);
-        } else {
-          await this.postReply(post, `Sorry, I couldn't find any relevant YouTube videos for "${searchIntent.search_query}".`);
-        }
-        return null; // YouTube search handling complete.
-      }
-      // If not an image search, proceed with text synthesis for webpage results.
-      else if (searchIntent.intent === "web_search" && searchIntent.search_query) { // This is the general web_search block
-        console.log(`[WebSearchFlow] Web search intent detected. Query: "${searchIntent.search_query}"`);
-        // ... (rest of web_search logic remains the same)
-        const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
-        if (!isQuerySafe) {
-          console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
-          const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
-          // No LLM call needed for this fixed response, but Scout formatting is good practice
-           const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-                body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
-                  messages: [
-                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
-                    { role: "user", content: unsafeQueryResponse }
-                  ],
-                  temperature: 0.1, max_tokens: 100, stream: false
-                })
-            });
-             if (filterResponse.ok) {
-                const filterData = await filterResponse.json();
-                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
-                    await this.postReply(post, filterData.choices[0].message.content.trim());
-                } else {
-                     await this.postReply(post, unsafeQueryResponse);
-                }
-            } else {
-               await this.postReply(post, unsafeQueryResponse);
-            }
-          return null;
-        }
-
-        // const searchResults = await this.performWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null);
-        // Switch to Google Search. Pass search_type from intent.
-        const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, searchIntent.freshness_suggestion || null, searchIntent.search_type || 'webpage');
-
-        if (searchIntent.search_type === 'image') {
-          if (searchResults && searchResults.length > 0 && searchResults.every(r => r.type === 'image')) {
-            let postedImageCount = 0;
-            let lastPostUri = post.uri; // Initial parent is the user's post
-            let lastPostCid = post.cid; // Initial parent CID
-            const rootUri = post.record?.reply?.root?.uri || post.uri;
-            const rootCid = post.record?.reply?.root?.cid || post.cid;
-
-            let replyToForNextPost = { // Structure for the first image post
-                root: { uri: rootUri, cid: rootCid },
-                parent: { uri: lastPostUri, cid: lastPostCid }
-            };
-
-            for (let i = 0; i < Math.min(searchResults.length, 4); i++) {
-              const imageResult = searchResults[i];
-              console.log(`[WebSearchFlow] Processing image ${i+1}/${searchResults.length}: ${imageResult.imageUrl}`);
-              try {
-                const imageBase64 = await utils.imageUrlToBase64(imageResult.imageUrl);
-                if (imageBase64) {
-                  let responseText = `Image [${i + 1}/${Math.min(searchResults.length, 4)}] for "${searchIntent.search_query}":`;
-                  if (imageResult.title && imageResult.title !== "No title") {
-                    responseText += `\n${imageResult.title}`;
-                  }
-                  const altText = utils.truncateResponse(imageResult.title || imageResult.snippet || searchIntent.search_query, 280);
-
-                  // Construct a minimal 'parentPostForReply' object for postReply
-                  const parentPostForReply = {
-                      uri: replyToForNextPost.parent.uri,
-                      cid: replyToForNextPost.parent.cid, // May be null if from initial user post if CID not available
-                      author: { did: (i === 0 ? post.author.did : this.agent.did) }, // User's DID for first, then bot's DID
-                      record: { reply: { root: replyToForNextPost.root } }
-                  };
-
-                  const postedPartUris = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
-
-                  if (postedPartUris && postedPartUris.length > 0) {
-                    replyToForNextPost.parent = { uri: postedPartUris[postedPartUris.length - 1], cid: null /* CID not easily available here */ };
-                    postedImageCount++;
-                    if (i < Math.min(searchResults.length, 4) - 1) { // Don't sleep after the last image
-                        await utils.sleep(2000); // 2-second delay between image posts
-                    }
-                  } else {
-                     console.warn(`[WebSearchFlow] Failed to post image ${i+1} (${imageResult.imageUrl}). Skipping.`);
+                    console.warn(`[WebSearchFlow] Failed to post image ${i+1} (${imageResult.imageUrl}). Skipping.`);
                   }
                 } else {
                   console.warn(`[WebSearchFlow] Could not download/convert image ${i+1}: ${imageResult.imageUrl}. Skipping.`);
@@ -1683,18 +1500,15 @@ class LlamaBot extends BaseBot {
               } catch (error) {
                 console.error(`[WebSearchFlow] Error processing image ${i+1} (${imageResult.imageUrl}):`, error);
               }
-            } // end for loop
-
-            if (postedImageCount > 0) {
-              return null;
             }
+            if (postedImageCount > 0) return null;
             console.log(`[WebSearchFlow] No Google images posted for "${searchIntent.search_query}". Initiating FLUX fallback.`);
           }
-          if (!searchResults || searchResults.length === 0 || postedImageCount === 0) {
-            console.log(`[WebSearchFlow] Web image search for "${searchIntent.search_query}" yielded no displayable results. Attempting FLUX generation.`);
+
+          if (!searchResults || searchResults.length === 0 || (searchResults.every(r => r.type === 'image') && postedImageCount === 0) ) {
+            console.log(`[WebSearchFlow] Web image search for "${searchIntent.search_query}" yielded no displayable results or failed to post. Attempting FLUX generation.`);
             const fluxPrompt = searchIntent.search_query;
             const scoutResult = await this.processImagePromptWithScout(fluxPrompt);
-
             if (scoutResult.safe) {
               const imageBase64 = await this.generateImage(scoutResult.image_prompt);
               if (imageBase64) {
@@ -1710,45 +1524,42 @@ class LlamaBot extends BaseBot {
             }
             return null;
           }
-        }
-        let nemotronWebServicePrompt = "";
-        const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
+        } else { // Standard text/webpage search logic (previously the second web_search block)
+          let nemotronWebServicePrompt = "";
+          const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
 Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
 If the search results do not provide a clear answer, state that you couldn't find specific information from the web for their query.
 Do not make up information not present in the search results. Keep the response suitable for a social media post.`;
 
-        if (searchResults && searchResults.length > 0) {
-          const resultsText = searchResults.map((res, idx) =>
-            `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`
-          ).join("\n\n---\n");
-          nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nWeb Search Results:\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
-        } else {
-          nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nNo clear results were found from the web search. Please inform the user politely that you couldn't find information for their query via web search and suggest they rephrase or try a search engine directly.`;
-        }
+          if (searchResults && searchResults.length > 0) {
+            const resultsText = searchResults.map((res, idx) =>
+              `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`
+            ).join("\n\n---\n");
+            nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nWeb Search Results:\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
+          } else {
+            nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nNo clear results were found from the web search. Please inform the user politely that you couldn't find information for their query via web search and suggest they rephrase or try a search engine directly.`;
+          }
 
-        console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
-        const nimWebResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-          body: JSON.stringify({
-            model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or another suitable model for synthesis
-            messages: [
-              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${webSearchSystemPrompt}` },
-              { role: "user", content: nemotronWebServicePrompt }
-            ],
-            temperature: 0.6,
-            max_tokens: 250, // Allow for a slightly longer synthesized answer
-            stream: false
-          })
-        });
+          console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
+          const nimWebResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+              model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+              messages: [
+                { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${webSearchSystemPrompt}` },
+                { role: "user", content: nemotronWebServicePrompt }
+              ],
+              temperature: 0.6, max_tokens: 250, stream: false
+            })
+          });
 
-        if (nimWebResponse.ok) {
-          const nimWebData = await nimWebResponse.json();
-          if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
-            const synthesizedResponse = nimWebData.choices[0].message.content.trim();
-            // Scout formatting
-            const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          if (nimWebResponse.ok) {
+            const nimWebData = await nimWebResponse.json();
+            if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
+              const synthesizedResponse = nimWebData.choices[0].message.content.trim();
+              const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
@@ -1759,26 +1570,27 @@ Do not make up information not present in the search results. Keep the response 
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
                 })
-            });
-            if (filterResponse.ok) {
+              });
+              if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
                 if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
-                    await this.postReply(post, filterData.choices[0].message.content.trim());
+                  await this.postReply(post, filterData.choices[0].message.content.trim());
                 } else {
-                    await this.postReply(post, synthesizedResponse);
+                  await this.postReply(post, synthesizedResponse);
                 }
+              } else {
+                await this.postReply(post, synthesizedResponse);
+              }
             } else {
-               await this.postReply(post, synthesizedResponse);
+              await this.postReply(post, "I searched the web but had a little trouble putting together an answer. You could try rephrasing your question!");
             }
           } else {
-            await this.postReply(post, "I searched the web but had a little trouble putting together an answer. You could try rephrasing your question!");
+            const errorText = await nimWebResponse.text();
+            console.error(`[WebSearchFlow] Nvidia NIM API error for web synthesis (${nimWebResponse.status}) - Text: ${errorText}`);
+            await this.postReply(post, "I encountered an issue while trying to process information from the web. Please try again later.");
           }
-        } else {
-          const errorText = await nimWebResponse.text();
-          console.error(`[WebSearchFlow] Nvidia NIM API error for web synthesis (${nimWebResponse.status}) - Text: ${errorText}`);
-          await this.postReply(post, "I encountered an issue while trying to process information from the web. Please try again later.");
+          return null;
         }
-        return null; // End processing for this interaction
       } else { // Neither search_history nor web_search: proceed with original logic (profile analysis / standard reply)
         let conversationHistory = '';
         if (context && context.length > 0) {
@@ -3340,7 +3152,7 @@ Ensure your entire response is ONLY the JSON object.`;
       return []; // Return empty array on exception
     }
   }
-// } // End of LlamaBot class -- REMOVED EXTRA BRACE
+} // Closes the LlamaBot class
 
 // Initialize and run the bot
 async function startBots() {
