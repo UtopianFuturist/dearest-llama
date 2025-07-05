@@ -2006,6 +2006,7 @@ ${baseInstruction}`;
         // Return scoutFormattedText directly without parsing for summary/details.
         return scoutFormattedText;
       } // Closes else for if (fetchContextDecision)
+    } // Closes the main 'else' block starting at L1390
     } catch (error) { // This is line 1520 in Render's logs
       console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
