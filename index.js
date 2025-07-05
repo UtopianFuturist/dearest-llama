@@ -1419,6 +1419,34 @@ class LlamaBot extends BaseBot {
         await this.postReply(post, memeResponseText, finalMemeBase64, utils.truncateResponse(altText, 280));
         return null;
       }
+      else if (searchIntent.intent === "youtube_search" && searchIntent.search_query) {
+        console.log(`[YouTubeSearchFlow] YouTube search intent detected. Query: "${searchIntent.search_query}"`);
+        const videoResults = await this.performYouTubeSearch(searchIntent.search_query, 1); // Get top 1 result
+
+        if (videoResults && videoResults.length > 0) {
+          const video = videoResults[0];
+          let responseText = `I found this YouTube video for "${searchIntent.search_query}":\n${video.title}`;
+
+          const externalEmbed = {
+            uri: video.videoUrl,
+            title: video.title,
+            description: utils.truncateResponse(video.description, 150) // Keep description concise for the card
+          };
+          if (video.thumbnailUrl) {
+            // Note: Bluesky's link card fetcher will try to get a thumbnail.
+            // Explicitly providing `thumb` is not directly supported in app.bsky.embed.external.
+            // We could download it and try to attach as an image alongside the card, but that's more complex.
+            // For now, rely on Bluesky's card service.
+            console.log(`[YouTubeSearchFlow] Video thumbnail available: ${video.thumbnailUrl} (will be fetched by Bluesky card service)`);
+          }
+
+          await this.postReply(post, responseText, null, null, null, externalEmbed);
+        } else {
+          const noResultsText = `Sorry, I couldn't find any YouTube videos for "${searchIntent.search_query}".`;
+          await this.postReply(post, noResultsText);
+        }
+        return null; // YouTube search handling complete
+      }
       // If not a search history or other specific intent, proceed with web search or original logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Consolidated web search intent detected. Query: "${searchIntent.search_query}", Type: "${searchIntent.search_type}"`);
