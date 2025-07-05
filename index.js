@@ -1047,6 +1047,7 @@ class LlamaBot extends BaseBot {
 
     // If not a follow-up or follow-up not actioned, proceed with normal response generation
     try { // START OF MAIN TRY BLOCK
+      console.log(`[LlamaBot.generateResponse] Entering try block for post URI: ${post.uri}, Text: "${post.record.text ? post.record.text.substring(0, 50) + '...' : 'N/A'}"`);
       const userQueryText = post.record.text; // The current user's message text
 
       // 1. Check for search history intent first
@@ -1987,20 +1988,26 @@ ${baseInstruction}`;
                 console.log(`[LlamaBot.generateResponse] Stored ${detailedPoints.length} detailed points, pending for original post URI: ${post.uri}, summary URI: ${summaryPostUri}`);
               }
               return null; // Signal that response (summary) has been handled, and details are pending.
-            } else {
+            } else { // else for if (summaryPostUrisArray && summaryPostUrisArray.length > 0)
               console.error("[LlamaBot.generateResponse] Failed to post summary. Falling back to sending full text.");
               return scoutFormattedText; // Fallback
             }
-      } else {
+          } else { // else for if (summaryText)
             console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Returning full Scout output.");
             return scoutFormattedText; // Fallback
-          }
-        } else {
+          } // Closes else for if (summaryText)
+        } else { // else for if (summaryStartIndex !== -1)
           console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
           return scoutFormattedText; // Fallback
-        
+        } // Closes else for if (summaryStartIndex !== -1)
+      } else { // else for if (fetchContextDecision)
+        // This path is taken if fetchContextDecision is false.
+        // nemotronUserPrompt was set, shared API calls produced scoutFormattedText.
+        // Return scoutFormattedText directly without parsing for summary/details.
+        return scoutFormattedText;
+      } // Closes else for if (fetchContextDecision)
     } catch (error) { // This is line 1520 in Render's logs
-      console.error('Error in LlamaBot.generateResponse:', error);
+      console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
     } // Correctly ends generateResponse
 
