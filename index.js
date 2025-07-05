@@ -1822,7 +1822,8 @@ ${baseInstruction}`;
     } catch (error) { // This is line 1520 in Render's logs
       console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
-    } // Correctly ends generateResponse
+    } // Closes the catch block of generateResponse
+  } // Closes the generateResponse method async generateResponse(post, context) {
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
