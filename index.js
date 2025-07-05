@@ -1403,8 +1403,19 @@ class LlamaBot extends BaseBot {
           return null;
         }
 
-        const isVisuallySafe = await this.isImageSafeScout(finalMemeBase64);
+        let isVisuallySafe = false;
+        if (post.author.handle === this.config.ADMIN_BLUESKY_HANDLE) {
+          console.log(`[MemeFlow] Admin user ${post.author.handle} initiated meme generation. Bypassing visual safety check for the final meme.`);
+          isVisuallySafe = true;
+        } else {
+          isVisuallySafe = await this.isImageSafeScout(finalMemeBase64);
+        }
+
         if (!isVisuallySafe) {
+          // For non-admins, this message is appropriate.
+          // For admins, this path should not be hit if override sets isVisuallySafe = true.
+          // However, if an admin *wanted* to test the safety check, this logic doesn't currently allow it.
+          // For now, sticking to direct override.
           await this.postReply(post, `I created a meme, but it didn't pass the final visual safety check. I cannot post it. You can try viewing it on Imgflip if you wish: ${memeData.pageUrl}`);
           return null;
         }
