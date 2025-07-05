@@ -1999,7 +1999,7 @@ ${baseInstruction}`;
           console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
           return scoutFormattedText; // Fallback
         }
-} else {
+        else { // Fix alignment: must follow a valid 'if' block
         // Standard response, not profile analysis. Return the text for monitor to post.
         // If there was an image for this standard response, it should be on `post.generatedImageForThisInteraction`
         // and `monitor` loop will pass it to `postReply`.
