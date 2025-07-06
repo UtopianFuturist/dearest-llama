@@ -2749,11 +2749,12 @@ Output a JSON object. Choose ONE of the following intent structures:
 }
 // IMPORTANT: Do NOT use 'youtube_search' for general mentions of YouTube or questions about its features. Only for direct search requests.
 
-6. If asking to search GIPHY for a GIF:
+6. If the user explicitly asks you to SEARCH or FIND a GIF from GIPHY on a topic (e.g., using terms like "gif of", "giphy", "find a gif"):
 {
   "intent": "giphy_search",
-  "search_query": "keywords for GIPHY search" // The user's keywords for the GIF.
+  "search_query": "keywords for GIPHY search" // The user's specific keywords for the GIF.
 }
+// IMPORTANT: Do NOT use 'giphy_search' for general mentions of "gif" or "giphy" if not a direct search request.
 
 7. If NEITHER of the above:
 {
