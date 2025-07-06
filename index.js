@@ -1953,10 +1953,16 @@ ${baseInstruction}`;
             }
 
             // Clean any leading list-like markers from Nemotron/Scout
-            pointTextContent = pointTextContent.replace(/^(\s*(\d+\.|\d+\)|\*|-)\s*)+/, '').trim();
+    // Clean known tags from pointTextContent
+    let cleanPointText = pointTextContent
+        .replace(/\[SUMMARY FINDING WITH INVITATION\]/g, "")
+        .replace(/\[DETAILED ANALYSIS POINT \d+\]/g, "")
+        .trim();
+    // Also keep existing list marker cleaning
+    cleanPointText = cleanPointText.replace(/^(\s*(\d+\.|\d+\)|\*|-)\s*)+/, '').trim();
 
-            if (pointTextContent) {
-                detailedPoints.push(pointTextContent);
+    if (cleanPointText) {
+        detailedPoints.push(cleanPointText);
             }
 
             if (endOfCurrentPoint === -1) break; // Last point processed
@@ -1965,12 +1971,19 @@ ${baseInstruction}`;
           }
 
           console.log(`[LlamaBot.generateResponse] Parsed Summary: "${summaryText}"`);
-          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1} (cleaned): "${p.substring(0,100)}..."`));
+          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1} (already cleaned of tags): "${p.substring(0,100)}..."`));
 
-          if (summaryText) {
+          // Defensively clean summaryText again, though initial parsing should handle it.
+          const cleanSummaryText = summaryText
+            .replace(/\[SUMMARY FINDING WITH INVITATION\]/g, "")
+            .replace(/\[DETAILED ANALYSIS POINT \d+\]/g, "") // Should not be in summary, but defensive
+            .trim();
+
+          if (cleanSummaryText) {
             // Store detailed points if any, then return only summary for initial post
             // Post the summary first. No image on summary.
-            const summaryPostReplyResult = await this.postReply(post, summaryText, null, null);
+            // detailedPoints array already contains cleaned points.
+            const summaryPostReplyResult = await this.postReply(post, cleanSummaryText, null, null);
 
             if (summaryPostReplyResult && summaryPostReplyResult.uris.length > 0 && summaryPostReplyResult.lastCid) {
               const summaryPostUri = summaryPostReplyResult.uris[summaryPostReplyResult.uris.length - 1]; // Get the last part's URI
