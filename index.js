@@ -797,10 +797,17 @@ class BaseBot {
                   imageUrl = img.fullsize;
                 } else if (img.thumb) {
                   imageUrl = img.thumb;
-                } else if (img.image && typeof img.image?.ref?.$link === 'string') {
+                } else if (img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
+                  // Most specific path first
+                  console.log(`[getReplyContext Map Detail] Accessing img.image.ref.$link. img.image.ref object:`, JSON.stringify(img.image.ref));
                   imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.ref.$link}`;
-                } else if (img.image && typeof img.image?.cid === 'string') {
+                } else if (img.image && typeof img.image.cid === 'string') {
+                  console.log(`[getReplyContext Map Detail] Accessing img.image.cid. img.image object:`, JSON.stringify(img.image));
                    imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.cid}`;
+                } else if (img.image) {
+                  console.warn(`[getReplyContext Map Detail] img.image exists for ${parentPostInThread.uri}, but expected CID paths (.ref.$link or .cid) not found. img.image:`, JSON.stringify(img.image));
+                } else {
+                  console.warn(`[getReplyContext Map Detail] img.image is missing for an image object in ${parentPostInThread.uri}. Img object:`, JSON.stringify(img));
                 }
                 console.log(`[getReplyContext Map] Img obj for ${parentPostInThread.uri}: CID via $link: ${img.image?.ref?.$link}, CID via .cid: ${img.image?.cid}, Author DID: ${parentPostInThread.author.did}, Constructed URL: ${imageUrl}`);
                 return {
