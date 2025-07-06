@@ -97,17 +97,31 @@ async function fetchWithRetries(url, options, maxRetries = 3, initialDelay = 200
 const utils = {
   sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
   
-  async imageUrlToBase64(imageUrl) {
+  async imageUrlToBase64(imageUrl, timeoutMs = 15000) { // Added 15s timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn(`[imageUrlToBase64] Timeout triggered for ${imageUrl} after ${timeoutMs / 1000}s`);
+      controller.abort();
+    }, timeoutMs);
+
     try {
-      const response = await fetch(imageUrl);
+      console.log(`[imageUrlToBase64] Fetching image from URL: ${imageUrl} with timeout ${timeoutMs/1000}s`);
+      const response = await fetch(imageUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
-        console.error(`Error fetching image from URL: ${response.status} ${response.statusText}. URL: ${imageUrl}`);
+        console.error(`[imageUrlToBase64] Error fetching image from URL: ${response.status} ${response.statusText}. URL: ${imageUrl}`);
         return null;
       }
       const arrayBuffer = await response.arrayBuffer();
       return Buffer.from(arrayBuffer).toString('base64');
     } catch (error) {
-      console.error(`Error converting image to base64 (URL: ${imageUrl}):`, error);
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        console.error(`[imageUrlToBase64] Timeout fetching image from URL: ${imageUrl}`);
+      } else {
+        console.error(`[imageUrlToBase64] Error converting image to base64 (URL: ${imageUrl}):`, error);
+      }
       return null;
     }
   },
@@ -1278,21 +1292,50 @@ class LlamaBot extends BaseBot {
       const lowerUserQueryText = userQueryText.toLowerCase();
       const isImageArticleQuery = imageArticleSearchKeywords.some(keyword => lowerUserQueryText.includes(keyword));
 
-      let imageEmbed = null;
+      let imageToProcess = null;
+      let sourcePostForImage = post; // Default to current post
+
       if (post.record?.embed && (post.record.embed.$type === 'app.bsky.embed.images' || post.record.embed.$type === 'app.bsky.embed.images#view')) {
         if (post.record.embed.images && post.record.embed.images.length > 0) {
-          imageEmbed = post.record.embed.images[0]; // Take the first image
+          imageToProcess = post.record.embed.images[0];
+          console.log(`[ImageArticleSearch] Image found directly in current post ${post.uri}`);
+        }
+      }
+
+      // If no image in current post AND query implies looking for one (e.g. "above screenshot")
+      // AND there's a reply context indicating a parent post
+      if (!imageToProcess && isImageArticleQuery && post.record?.reply?.parent && context && context.length > 1) {
+        // The `context` is built by getReplyContext. It's an array of {author, text, images}.
+        // `images` in context items are {alt, url}. `url` here is `fullsize` or `thumb`.
+        // The last item in `context` is the current post. The one before it is the parent.
+        const parentContextPost = context[context.length - 2];
+        if (parentContextPost && parentContextPost.images && parentContextPost.images.length > 0) {
+          const parentImage = parentContextPost.images[0]; // Take first image from parent
+          if (parentImage.url) { // parentImage.url should be the fullsize or thumb from getReplyContext
+            imageToProcess = { fullsize: parentImage.url, alt: parentImage.alt || "" }; // Construct an object similar to what imageEmbed expects
+            // We need the original parent post's URI for context if we reply about it.
+            // `getReplyContext` currently doesn't return the full parent post object, just parts.
+            // For now, we'll use the current `post` for replies, but acknowledge the image source.
+            console.log(`[ImageArticleSearch] Image not in current post. Found image in parent post (via context) to process: ${parentImage.url}`);
+            // We don't have the original parent post's URI easily here to change `sourcePostForImage`
+            // This might be a limitation if we need to reply directly to the parent image post.
+            // For now, all replies go to the current `post` that triggered the bot.
+          }
         }
       }
 
       // ===== Image-based Article Search Flow =====
-      if (imageEmbed && imageEmbed.fullsize && isImageArticleQuery) {
-        console.log(`[ImageArticleSearch] Image found in post ${post.uri} with query "${userQueryText}". Attempting OCR and web search.`);
-        await this.postReply(post, "I see an image and you're asking about an article. Let me try to read the image and search for it..."); // Inform user
+      if (imageToProcess && imageToProcess.fullsize && isImageArticleQuery) {
+        console.log(`[ImageArticleSearch] Processing image ${imageToProcess.fullsize} for post ${post.uri} with query "${userQueryText}".`);
 
-        const imageBase64 = await utils.imageUrlToBase64(imageEmbed.fullsize);
+        // It's better to reply to the post that *asked* the question, which is `post`.
+        // The "I see an image..." message should also be a reply to `post`.
+        await this.postReply(post, "I see you're asking about an article related to an image. Let me try to read the image and search for it...");
+
+
+        const imageBase64 = await utils.imageUrlToBase64(imageToProcess.fullsize);
         if (!imageBase64) {
-          console.error(`[ImageArticleSearch] Failed to download image ${imageEmbed.fullsize} for OCR.`);
+          console.error(`[ImageArticleSearch] Failed to download image ${imageToProcess.fullsize} for OCR.`);
           await this.postReply(post, "I couldn't download the image to analyze it. Sorry about that!");
           return null;
         }
