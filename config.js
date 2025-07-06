@@ -18,6 +18,7 @@ const validateConfig = (config) => {
     'IMGFLIP_USERNAME',
     'IMGFLIP_PASSWORD',
     'YOUTUBE_API_KEY',
+    'GIPHY_API_KEY',
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -38,6 +39,7 @@ const config = {
   IMGFLIP_USERNAME: process.env.IMGFLIP_USERNAME,
   IMGFLIP_PASSWORD: process.env.IMGFLIP_PASSWORD,
   YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY,
+  GIPHY_API_KEY: process.env.GIPHY_API_KEY,
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
@@ -77,6 +79,7 @@ console.log(`[Config] Loaded GOOGLE_CUSTOM_SEARCH_CX_ID: ${config.GOOGLE_CUSTOM_
 console.log(`[Config] Loaded IMGFLIP_USERNAME: ${config.IMGFLIP_USERNAME ? 'Exists' : 'MISSING!'}`);
 console.log(`[Config] Loaded IMGFLIP_PASSWORD: ${config.IMGFLIP_PASSWORD ? 'Exists (presence will be checked)' : 'MISSING!'}`);
 console.log(`[Config] Loaded YOUTUBE_API_KEY: ${config.YOUTUBE_API_KEY ? 'Exists' : 'MISSING!'}`);
+console.log(`[Config] Loaded GIPHY_API_KEY: ${config.GIPHY_API_KEY ? 'Exists' : 'MISSING!'}`);
 
 
 export default config;
