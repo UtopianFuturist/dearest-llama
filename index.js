@@ -773,23 +773,52 @@ class BaseBot {
         } catch (error) { console.error('Error fetching quoted post:', error); }
       }
       if (post.record?.reply) {
-        let currentUri = post.uri;
-        while (currentUri) {
-          const { data: thread } = await this.agent.getPostThread({ uri: currentUri, depth: 0, parentHeight: 1 });
-          if (!thread.thread.post) break;
-          const images = thread.thread.post.record.embed?.images || thread.thread.post.record.embed?.media?.images || [];
-          conversation.unshift({
-            author: thread.thread.post.author.handle,
-            text: thread.thread.post.record.text,
-            images: images.map(img => ({ alt: img.alt, url: thread.thread.post.embed?.images?.[0]?.fullsize || thread.thread.post.embed?.images?.[0]?.thumb || img.image?.fullsize || img.image?.thumb }))
-          });
-          currentUri = thread.thread.parent?.post?.uri;
+        let currentUri = post.record.reply.parent?.uri; // Start with the parent's URI
+        let safetyCount = 0; // Prevent infinite loops
+
+        while (currentUri && safetyCount < 5) { // Limit depth
+          safetyCount++;
+          try {
+            const { data: thread } = await this.agent.getPostThread({ uri: currentUri, depth: 0, parentHeight: 0 }); // Fetch only the specific post
+            const parentPostInThread = thread?.thread?.post;
+
+            if (!parentPostInThread) break;
+
+            const parentImages = (parentPostInThread.record?.embed?.images || parentPostInThread.record?.embed?.media?.images || []).map(img => ({
+              alt: img.alt || '',
+              url: img.fullsize || img.thumb || (img.image ? (img.image.fullsize || img.image.thumb) : null)
+            })).filter(img => img.url);
+
+            conversation.unshift({ // Add parent to the beginning of the array
+              uri: parentPostInThread.uri,
+              author: parentPostInThread.author.handle,
+              text: parentPostInThread.record.text,
+              images: parentImages
+            });
+
+            currentUri = parentPostInThread.record?.reply?.parent?.uri; // Move to next parent
+          } catch (fetchParentError) {
+            console.error(`[getReplyContext] Error fetching parent post ${currentUri}:`, fetchParentError);
+            break;
+          }
         }
       }
+
+      console.log('[getReplyContext] Final conversation context structure (oldest to newest):');
+      conversation.forEach((item, index) => {
+        console.log(`[getReplyContext] Context[${index}]: PostURI: ${item.uri}, Author: ${item.author}, Text: "${item.text?.substring(0,70)}...", Images: ${item.images?.length || 0}`);
+        if (item.images?.length > 0) {
+          item.images.forEach((img, imgIdx) => {
+            console.log(`[getReplyContext] Context[${index}] Image[${imgIdx}]: URL: ${img.url}, Alt: ${img.alt}`);
+          });
+        }
+      });
       return conversation;
     } catch (error) {
-      console.error('Error fetching reply context:', error);
-      return [];
+      console.error('[getReplyContext] Fatal error in getReplyContext:', error);
+      // Fallback with current post only, ensuring 'uri' is present for safety
+      const extractImages = (record) => (record?.embed?.images || record?.embed?.media?.images || []).map(img => ({ alt: img.alt, url: img.fullsize || img.thumb }));
+      return [{ uri: post.uri, author: post.author.handle, text: post.record.text, images: extractImages(post.record) }];
     }
   }
 
