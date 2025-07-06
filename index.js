@@ -2646,11 +2646,12 @@ Output a JSON object. Choose ONE of the following intent structures:
   "generate_captions": true | false // True if bot should generate captions. False if user provided them or none are needed.
 }
 
-5. If asking to search YouTube for videos:
+5. If the user explicitly asks you to SEARCH or FIND a YouTube video on a topic:
 {
   "intent": "youtube_search",
-  "search_query": "query for youtube video search" // The user's query, possibly rephrased for YouTube search.
+  "search_query": "optimized query for YouTube video search" // The user's specific search term.
 }
+// IMPORTANT: Do NOT use 'youtube_search' for general mentions of YouTube or questions about its features. Only for direct search requests.
 
 6. If asking to search GIPHY for a GIF:
 {
@@ -2726,6 +2727,14 @@ Examples:
   Response: {"intent": "youtube_search", "search_query": "cat videos"}
 - User query: "find a youtube video about cooking pasta"
   Response: {"intent": "youtube_search", "search_query": "cooking pasta tutorial"}
+- User query: "Can you search YouTube for the latest tech reviews?"
+  Response: {"intent": "youtube_search", "search_query": "latest tech reviews"}
+- User query: "I was watching YouTube yesterday."
+  Response: {"intent": "none"}
+- User query: "What's your favorite YouTube channel?"
+  Response: {"intent": "none"}
+- User query: "How does your YouTube search feature work?"
+  Response: {"intent": "none"}
 - User query: "show me a funny dog gif"
   Response: {"intent": "giphy_search", "search_query": "funny dog"}
 - User query: "giphy celebration"
