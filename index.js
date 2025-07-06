@@ -785,13 +785,30 @@ class BaseBot {
             if (!parentPostInThread) break;
 
             if (parentPostInThread.record) {
-              console.log(`[getReplyContext] Parent Loop: Processing parent URI ${parentPostInThread.uri}. Embed object:`, JSON.stringify(parentPostInThread.record.embed, null, 2));
+              console.log(`[getReplyContext] Parent Loop: Processing parent URI ${parentPostInThread.uri}. Author DID: ${parentPostInThread.author.did}. Embed object:`, JSON.stringify(parentPostInThread.record.embed, null, 2));
             }
 
-            const parentImages = (parentPostInThread.record?.embed?.images || parentPostInThread.record?.embed?.media?.images || []).map(img => ({
-              alt: img.alt || '',
-              url: img.fullsize || img.thumb || (img.image ? (img.image.fullsize || img.image.thumb) : null)
-            })).filter(img => img.url);
+            let parentImages = [];
+            const embed = parentPostInThread.record?.embed;
+            if (embed && (embed.$type === 'app.bsky.embed.images' || embed.$type === 'app.bsky.embed.images#view') && embed.images) {
+              parentImages = embed.images.map(img => {
+                let imageUrl = null;
+                if (img.fullsize) {
+                  imageUrl = img.fullsize;
+                } else if (img.thumb) {
+                  imageUrl = img.thumb;
+                } else if (img.image && typeof img.image.ref?.$link === 'string') { // For blob CIDs
+                  imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.ref.$link}`;
+                } else if (img.image && typeof img.image.cid === 'string') { // Alternative CID location
+                   imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.cid}`;
+                }
+                // Add more fallbacks if other structures for image URLs/CIDs are found
+                return {
+                  alt: img.alt || '',
+                  url: imageUrl
+                };
+              }).filter(img => img.url); // Only keep images where a URL could be constructed
+            }
 
             conversation.unshift({ // Add parent to the beginning of the array
               uri: parentPostInThread.uri,
@@ -1348,9 +1365,32 @@ class LlamaBot extends BaseBot {
       const userQueryText = post.record.text || ""; // The current user's message text, ensure it's a string
 
       // Keywords for image-based article search
-      const imageArticleSearchKeywords = ['is this true', 'find this article', 'verify this', 'source for this', 'article for this', 'what is this from'];
+      const imageArticleSearchKeywords = [
+        'is this true', 'find this article', 'verify this', 'source for this',
+        'article for this', 'what is this from', 'screenshot', 'image above',
+        'this image', 'this picture', 'this photo', 'the image', 'the picture', 'the photo',
+        'the screenshot'
+      ];
       const lowerUserQueryText = userQueryText.toLowerCase();
-      const isImageArticleQuery = imageArticleSearchKeywords.some(keyword => lowerUserQueryText.includes(keyword));
+      // More robust check: look for article/truth query + image reference
+      const hasTruthQuery = imageArticleSearchKeywords.some(kw => ['true', 'article', 'verify', 'source', 'what is this from'].includes(kw) && lowerUserQueryText.includes(kw));
+      const hasImageReference = imageArticleSearchKeywords.some(kw => ['screenshot', 'image', 'picture', 'photo'].includes(kw) && lowerUserQueryText.includes(kw));
+
+      let isImageArticleQuery = false;
+      if (lowerUserQueryText.includes('is this true') ||
+          lowerUserQueryText.includes('find this article') ||
+          lowerUserQueryText.includes('verify this') ||
+          lowerUserQueryText.includes('source for this') ||
+          lowerUserQueryText.includes('article for this') ||
+          lowerUserQueryText.includes('what is this from')) {
+        isImageArticleQuery = true;
+      } else if (hasTruthQuery && hasImageReference) {
+        // Catches phrases like "Is the claim in this screenshot true?"
+        // or "Can you find the article for the image above?"
+        // This is a basic combination, could be more NLP-driven if needed
+        isImageArticleQuery = true;
+      }
+
 
       let imageToProcess = null;
       let sourcePostForImage = post; // Default to current post
@@ -1417,6 +1457,48 @@ class LlamaBot extends BaseBot {
       }
 
       // ===== Image-based Article Search Flow =====
+      // Check direct parent first
+      if (!imageToProcess && isImageArticleQuery && post.record?.reply?.parent && context && context.length > 1) {
+        const parentContextPost = context[context.length - 2]; // Direct parent from context
+        console.log(`[ImageCheck] (Parent Check) Attempting to find image in parent post. Parent context text (first 50): "${parentContextPost?.text?.substring(0,50)}..."`);
+        if (parentContextPost && parentContextPost.images && parentContextPost.images.length > 0) {
+          const parentImage = parentContextPost.images[0];
+          console.log(`[ImageCheck] (Parent Check) Parent context has image. URL: ${parentImage?.url}, Alt: ${parentImage?.alt}`);
+          if (parentImage?.url) {
+            imageToProcess = { fullsize: parentImage.url, alt: parentImage.alt || "" };
+            console.log(`[ImageCheck] (Parent Check) Set imageToProcess from parent context's image URL: ${parentImage.url}`);
+          } else {
+            console.log(`[ImageCheck] (Parent Check) Parent context image found, but URL is missing.`);
+          }
+        } else {
+          console.log(`[ImageCheck] (Parent Check) Parent context post or its images not found or empty.`);
+        }
+      }
+
+      // If still no image, and it's an image query, check grandparent if context allows
+      if (!imageToProcess && isImageArticleQuery && post.record?.reply?.parent && context && context.length > 2) {
+        // Check if the parent itself was a reply to find the grandparent
+        const parentPostRecord = context[context.length - 2]; // This is the representation of the parent post in our context array
+        // We need to ensure this parentPostRecord itself implies it's a reply to the grandparent we want to check.
+        // The structure of `context` is [oldest, ..., grandparent, parent, current].
+        // So, context[context.length - 3] is the grandparent.
+        const grandParentContextPost = context[context.length - 3];
+        console.log(`[ImageCheck] (Grandparent Check) Attempting to find image in grandparent post. Grandparent context text (first 50): "${grandParentContextPost?.text?.substring(0,50)}..."`);
+        if (grandParentContextPost && grandParentContextPost.images && grandParentContextPost.images.length > 0) {
+          const grandParentImage = grandParentContextPost.images[0];
+          console.log(`[ImageCheck] (Grandparent Check) Grandparent context has image. URL: ${grandParentImage?.url}, Alt: ${grandParentImage?.alt}`);
+          if (grandParentImage?.url) {
+            imageToProcess = { fullsize: grandParentImage.url, alt: grandParentImage.alt || "" };
+            console.log(`[ImageCheck] (Grandparent Check) Set imageToProcess from grandparent context's image URL: ${grandParentImage.url}`);
+          } else {
+            console.log(`[ImageCheck] (Grandparent Check) Grandparent context image found, but URL is missing.`);
+          }
+        } else {
+          console.log(`[ImageCheck] (Grandparent Check) Grandparent context post or its images not found or empty.`);
+        }
+      }
+
+
       if (imageToProcess && imageToProcess.fullsize && isImageArticleQuery) {
         console.log(`[ImageArticleSearch] ENTERING FLOW. Image URL: ${imageToProcess.fullsize} for post ${post.uri} with query "${userQueryText}".`);
 
