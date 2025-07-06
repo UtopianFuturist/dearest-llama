@@ -784,6 +784,10 @@ class BaseBot {
 
             if (!parentPostInThread) break;
 
+            if (parentPostInThread.record) {
+              console.log(`[getReplyContext] Parent Loop: Processing parent URI ${parentPostInThread.uri}. Embed object:`, JSON.stringify(parentPostInThread.record.embed, null, 2));
+            }
+
             const parentImages = (parentPostInThread.record?.embed?.images || parentPostInThread.record?.embed?.media?.images || []).map(img => ({
               alt: img.alt || '',
               url: img.fullsize || img.thumb || (img.image ? (img.image.fullsize || img.image.thumb) : null)
