@@ -1594,6 +1594,132 @@ Do not make up information not present in the search results. Keep the response 
         }
         return null; // End of image-based article search flow
       }
+      // ===== Image-based Article Search Flow (Revised: OCR is primary if image found) =====
+      if (isImageArticleQuery) {
+        console.log(`[ImageArticleFlow] 'isImageArticleQuery' is true. Attempting to find and OCR image.`);
+        let textForSearch = null;
+        let ocrAttempted = false;
+        let imageUriForContext = null; // For logging/prompting if OCR fails but image was found
+        let sourcePostTextForContext = null; // Text of the post where image was found, for context
+
+        // imageToProcess should have { fullsize, alt, sourcePostUri } if an image was found by prior logic
+        if (imageToProcess && imageToProcess.fullsize) {
+          imageUriForContext = imageToProcess.fullsize;
+          const imageSourcePostInContext = context.find(p => p.uri === imageToProcess.sourcePostUri);
+          if (imageSourcePostInContext) {
+            sourcePostTextForContext = imageSourcePostInContext.text;
+          }
+
+          await this.postReply(post, "I see an image you might be asking about. Let me try to read its content and search for an article...");
+          ocrAttempted = true;
+          const imageBase64 = await utils.imageUrlToBase64(imageToProcess.fullsize);
+
+          if (imageBase64) {
+            textForSearch = await this.extractTextFromImageWithScout(imageBase64);
+            if (!textForSearch || textForSearch.trim().length < 5) {
+              console.log(`[ImageArticleFlow] OCR extracted no significant text from ${imageToProcess.fullsize}.`);
+              await this.postReply(post, "I found an image but couldn't read enough text from it to search. If there's a headline, could you type it out for me?");
+              return null; // Stop this flow
+            }
+            console.log(`[ImageArticleFlow] OCR successful for ${imageToProcess.fullsize}. Extracted text: "${textForSearch.substring(0,100)}"`);
+          } else {
+            console.error(`[ImageArticleFlow] Failed to download image ${imageToProcess.fullsize} for OCR.`);
+            await this.postReply(post, "I found an image but couldn't download it to analyze. Sorry about that!");
+            return null; // Stop this flow
+          }
+        } else {
+          // No image context found by imageToProcess logic, but isImageArticleQuery is true.
+          // This implies the user might have typed the headline or is referring to an image the bot can't see.
+          console.log(`[ImageArticleFlow] 'isImageArticleQuery' is true, but no specific image was identified in context. Using user's query text for search.`);
+          textForSearch = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").trim();
+          if (!textForSearch.trim()) {
+             await this.postReply(post, "I understand you're asking about an article, but I need some text to search for (either from an image or your message).");
+             return null;
+          }
+        }
+
+        // If we have text (either from OCR or user's query directly because no image was processed for OCR)
+        if (textForSearch && textForSearch.trim()) {
+          console.log(`[ImageArticleFlow] Proceeding to web search with text: "${textForSearch.substring(0,100)}"`);
+
+          const searchResults = await this.performGoogleWebSearch(textForSearch, null, 'webpage');
+          let nemotronWebServicePrompt = "";
+          let systemPromptContext = `The user asked a question like "${userQueryText}"`;
+          if (ocrAttempted && imageUriForContext) {
+            systemPromptContext += ` related to an image (source: ${imageUriForContext}). Text was extracted from this image via OCR: "${textForSearch.substring(0, 200)}...".`;
+            if (sourcePostTextForContext) {
+                systemPromptContext += ` The post containing the image had text: "${sourcePostTextForContext.substring(0,100)}..."`;
+            }
+          } else {
+            systemPromptContext += `. The key information to verify or find, based on their query, is: "${textForSearch.substring(0, 200)}...".`;
+          }
+          systemPromptContext += "\nYou have performed a web search based on this key information. Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer. Synthesize the information. If appropriate, cite source URL(s) (e.g., \"According to [URL], ...\"). If results confirm the information, state that. If they debunk it, state that. If inconclusive, say so. Keep the response suitable for a social media post.";
+
+          const webSearchSystemPrompt = `You are an AI assistant. ${systemPromptContext}`;
+
+          if (searchResults && searchResults.length > 0) {
+            const resultsText = searchResults.map((res, idx) => `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`).join("\n\n---\n");
+            nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nEffective search query used: "${textForSearch.substring(0,200)}..."\n\nWeb Search Results:\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
+          } else {
+            nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nEffective search query used: "${textForSearch.substring(0,200)}..."\n\nNo clear results were found from the web search. Please inform the user politely that you couldn't find specific information and suggest they rephrase or try a search engine directly.`;
+          }
+
+          console.log(`[ImageArticleFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
+          const nimWebResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+              model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+              messages: [
+                { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${webSearchSystemPrompt}` },
+                { role: "user", content: nemotronWebServicePrompt }
+              ],
+              temperature: 0.6, max_tokens: 250, stream: false
+            }),
+            customTimeout: 60000 // 60s
+          });
+
+          if (nimWebResponse.ok) {
+            const nimWebData = await nimWebResponse.json();
+            if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
+              const synthesizedResponse = nimWebData.choices[0].message.content.trim();
+              const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  messages: [
+                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "user", content: synthesizedResponse }
+                  ],
+                  temperature: 0.1, max_tokens: 100, stream: false
+                }),
+                customTimeout: 60000 // 60s
+              });
+              if (filterResponse.ok) {
+                const filterData = await filterResponse.json();
+                if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                  await this.postReply(post, filterData.choices[0].message.content.trim());
+                } else {
+                  await this.postReply(post, this.basicFormatFallback(synthesizedResponse));
+                }
+              } else {
+                await this.postReply(post, this.basicFormatFallback(synthesizedResponse));
+              }
+            } else {
+              await this.postReply(post, "I searched the web based on the information but had trouble formulating an answer. You could try rephrasing!");
+            }
+          } else {
+            const errorText = await nimWebResponse.text();
+            console.error(`[ImageArticleLogic] Nvidia NIM API error for web synthesis (${nimWebResponse.status}) - Text: ${errorText}`);
+            await this.postReply(post, "I encountered an issue while trying to process information from the web. Please try again later.");
+          }
+        } else {
+          console.log(`[ImageArticleLogic] No textForSearch could be determined after image/text evaluation. Replying to user.`);
+          await this.postReply(post, "I'm having trouble understanding what to search for, even after looking at the context. Could you please provide the headline or key details, or make sure the image is clear?");
+        }
+        return null; // End of image-based article search flow
+      }
       // ===== End of Image-based Article Search Flow =====
 
 
