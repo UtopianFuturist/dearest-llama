@@ -1133,6 +1133,17 @@ class LlamaBot extends BaseBot {
       console.error('[OCR] extractTextFromImageWithScout: imageBase64 data is invalid or empty.');
       return null;
     }
+    console.log(`[OCR] Image base64 length: ${imageBase64.length}`);
+    if (imageBase64.length > 2 * 1024 * 1024 * (4/3)) { // Check if original was > ~2MB (Bluesky limit 1MB, base64 is ~1.33x that)
+        // Increased limit slightly to 2MB original to be safe with base64 inflation.
+        console.warn(`[OCR] Image base64 data is very large (${imageBase64.length} chars), potentially problematic and larger than typical Bluesky limits after base64 encoding.`);
+        // We might even return null here if it's excessively large, e.g. > 4MB base64
+        if (imageBase64.length > 4 * 1024 * 1024) {
+            console.error(`[OCR] Image base64 data is excessively large (${imageBase64.length} chars / ~3MB+). Aborting OCR.`);
+            return null;
+        }
+    }
+
     // Determine MIME type (simple check, could be more robust if needed)
     let mimeType = 'image/jpeg'; // Default
     if (imageBase64.startsWith('iVBORw0KGgo=')) mimeType = 'image/png';
@@ -1324,9 +1335,41 @@ class LlamaBot extends BaseBot {
         }
       }
 
+      // In LlamaBot.generateResponse, before the image processing block:
+      console.log(`[ImageCheck] Current post URI: ${post.uri}, Text: "${userQueryText.substring(0,100)}"`);
+      console.log(`[ImageCheck] isImageArticleQuery: ${isImageArticleQuery}`);
+      if (post.record?.embed?.images?.length > 0) {
+        console.log(`[ImageCheck] Current post has ${post.record.embed.images.length} image(s). Fullsize of first: ${post.record.embed.images[0]?.fullsize}`);
+      } else {
+        console.log(`[ImageCheck] Current post has no direct image embeds.`);
+      }
+
+      if (!imageToProcess && isImageArticleQuery && post.record?.reply?.parent && context && context.length > 1) {
+        const parentContextPost = context[context.length - 2]; // Direct parent from context
+        console.log(`[ImageCheck] Attempting to find image in parent post. Parent context text (first 50): "${parentContextPost?.text?.substring(0,50)}..."`);
+        if (parentContextPost && parentContextPost.images && parentContextPost.images.length > 0) {
+          const parentImage = parentContextPost.images[0];
+          console.log(`[ImageCheck] Parent context has image. URL: ${parentImage?.url}, Alt: ${parentImage?.alt}`);
+          if (parentImage?.url) { // Check if URL exists
+            imageToProcess = { fullsize: parentImage.url, alt: parentImage.alt || "" };
+            console.log(`[ImageCheck] Set imageToProcess from parent context's image URL: ${parentImage.url}`);
+          } else {
+            console.log(`[ImageCheck] Parent context image found, but URL is missing.`);
+          }
+        } else {
+          console.log(`[ImageCheck] Parent context post or its images not found or empty.`);
+        }
+      } else if (!imageToProcess && isImageArticleQuery) {
+        console.log(`[ImageCheck] Image query, no image in current post, and no suitable parent context to check (or already checked).`);
+      } else if (imageToProcess) {
+        console.log(`[ImageCheck] Image to process was already identified from current post.`);
+      } else {
+        console.log(`[ImageCheck] No image to process based on current logic paths.`);
+      }
+
       // ===== Image-based Article Search Flow =====
       if (imageToProcess && imageToProcess.fullsize && isImageArticleQuery) {
-        console.log(`[ImageArticleSearch] Processing image ${imageToProcess.fullsize} for post ${post.uri} with query "${userQueryText}".`);
+        console.log(`[ImageArticleSearch] ENTERING FLOW. Image URL: ${imageToProcess.fullsize} for post ${post.uri} with query "${userQueryText}".`);
 
         // It's better to reply to the post that *asked* the question, which is `post`.
         // The "I see an image..." message should also be a reply to `post`.
