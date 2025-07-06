@@ -1192,6 +1192,22 @@ class LlamaBot extends BaseBot {
   }
 
   async generateResponse(post, context) {
+    // At the very start of LlamaBot.generateResponse, before any other logic
+    console.log(`[EmbedCheck] Post URI: ${post.uri} - Full Embed Object:`, JSON.stringify(post.record?.embed, null, 2));
+    if (post.record?.embed) {
+      console.log(`[EmbedCheck] Embed type: ${post.record.embed.$type}`);
+      if (post.record.embed.images) {
+        console.log(`[EmbedCheck] Embed images count: ${post.record.embed.images.length}`);
+        if (post.record.embed.images.length > 0) {
+          console.log(`[EmbedCheck] First image object:`, JSON.stringify(post.record.embed.images[0], null, 2));
+        }
+      } else {
+        console.log(`[EmbedCheck] post.record.embed.images is undefined or null.`);
+      }
+    } else {
+      console.log(`[EmbedCheck] post.record.embed is undefined or null.`);
+    }
+
     this._cleanupExpiredDetailedAnalyses(); // Cleanup cache at the start of processing a new response
 
     // Check if this interaction is a follow-up to a summary invitation
