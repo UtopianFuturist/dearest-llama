@@ -27,6 +27,73 @@ const agent = new AtpAgent({
 });
 
 // ===== Utility Functions =====
+
+// Helper for fetch with retries and timeout
+async function fetchWithRetries(url, options, maxRetries = 3, initialDelay = 2000, timeout = 30000) {
+  let attempt = 0;
+  let currentDelay = initialDelay;
+
+  // Note: 'options.timeout' is a custom parameter for this function, not a standard fetch option.
+  // It's used to control the AbortController.
+  const effectiveTimeout = options.customTimeout || timeout; // Allow per-call override
+  if (options.customTimeout) delete options.customTimeout;
+
+
+  while (attempt < maxRetries) {
+    attempt++;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn(`[fetchWithRetries] Timeout triggered for ${url} on attempt ${attempt} after ${effectiveTimeout / 1000}s`);
+      controller.abort();
+    }, effectiveTimeout);
+
+    try {
+      console.log(`[fetchWithRetries] Attempt ${attempt}/${maxRetries} to fetch ${url}. Timeout set to ${effectiveTimeout / 1000}s.`);
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeoutId); // Clear the timeout if the request completes (successfully or with HTTP error)
+
+      if (response.ok) {
+        console.log(`[fetchWithRetries] Successfully fetched ${url} on attempt ${attempt}.`);
+        return response;
+      }
+
+      // Retry on specific server errors or rate limits
+      if ([429, 500, 502, 503, 504].includes(response.status)) {
+        console.warn(`[fetchWithRetries] API call to ${url} failed with status ${response.status}. Attempt ${attempt}/${maxRetries}. Retrying in ${currentDelay / 1000}s...`);
+        if (attempt >= maxRetries) {
+          console.error(`[fetchWithRetries] Maximum retries reached for ${url} after status ${response.status}.`);
+          return response; // Return the last error response if max retries reached
+        }
+        await utils.sleep(currentDelay);
+        currentDelay *= 2; // Exponential backoff
+      } else {
+        // Don't retry on other client errors (e.g., 400, 401, 403)
+        console.error(`[fetchWithRetries] API call to ${url} failed with status ${response.status}. Not retrying.`);
+        return response; // Return the error response
+      }
+    } catch (error) {
+      clearTimeout(timeoutId); // Clear timeout on any error
+      if (error.name === 'AbortError') {
+        // This is our timeout
+        console.warn(`[fetchWithRetries] API call to ${url} timed out (aborted) on attempt ${attempt}/${maxRetries}.`);
+      } else {
+        // Other network errors
+        console.warn(`[fetchWithRetries] API call to ${url} threw an error: ${error.message}. Attempt ${attempt}/${maxRetries}.`);
+      }
+
+      if (attempt >= maxRetries) {
+        console.error(`[fetchWithRetries] Maximum retries reached for ${url}. Last error: ${error.message}`);
+        throw error; // Re-throw the last error if all attempts fail
+      }
+      await utils.sleep(currentDelay);
+      currentDelay *= 2;
+    }
+  }
+  // This line should ideally not be reached if logic is correct, but as a fallback:
+  throw new Error(`[fetchWithRetries] API call to ${url} failed after ${maxRetries} attempts (exhausted retries).`);
+}
+
+
 const utils = {
   sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
   
@@ -952,14 +1019,15 @@ class LlamaBot extends BaseBot {
       }
 
       console.log(`NIM CALL START: generateStandalonePostFromContext for model nvidia/llama-3.3-nemotron-super-49b-v1 with prompt length: ${userPrompt.length}`);
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
           model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
           messages: [ { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` }, { role: "user", content: userPrompt } ],
           temperature: 0.90, max_tokens: 100, stream: false
-        })
+        }),
+        customTimeout: 60000 // 60s timeout
       });
       console.log(`NIM CALL END: generateStandalonePostFromContext for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
       if (!response.ok) {
@@ -976,7 +1044,7 @@ class LlamaBot extends BaseBot {
       console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
 
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext`);
-      const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -985,27 +1053,115 @@ class LlamaBot extends BaseBot {
             { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.1, // Temperature for formatting (already lowered)
+          temperature: 0.1,
           max_tokens: 100,
           stream: false
-        })
+        }),
+        customTimeout: 60000 // 60s timeout
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct in generateStandalonePostFromContext - Status: ${filterResponse.status}`);
       if (!filterResponse.ok) {
         const errorText = await filterResponse.text();
         console.error(`Nvidia NIM API error (filter model) in generateStandalonePostFromContext (${filterResponse.status}) - Text: ${errorText}`);
-        return initialResponse;
+        return initialResponse; // Fallback to initial response
       }
       const filterData = await filterResponse.json();
       if (!filterData.choices || !Array.isArray(filterData.choices) || filterData.choices.length === 0 || !filterData.choices[0].message) {
         console.error('Unexpected response format from Nvidia NIM (filter model) in generateStandalonePostFromContext:', JSON.stringify(filterData));
-        return initialResponse;
+        return initialResponse; // Fallback to initial response
       }
       const finalResponse = filterData.choices[0].message.content.trim();
       console.log(`[LlamaBot.generateStandalonePostFromContext] Final response from meta/llama-4-scout-17b-16e-instruct: "${finalResponse}"`);
       return finalResponse;
     } catch (error) {
       console.error('Error in LlamaBot.generateStandalonePostFromContext:', error);
+      return null;
+    }
+  }
+
+  basicFormatFallback(text, maxLength = 290) {
+    let formattedText = text;
+    if (!formattedText) return "";
+
+    // Remove common AI prefixes
+    const prefixes = ["Bot:", "Nemotron says:", "Assistant:", "User:", "Llama:", "Scout:"];
+    for (const prefix of prefixes) {
+        if (formattedText.toLowerCase().startsWith(prefix.toLowerCase())) {
+            formattedText = formattedText.substring(prefix.length).trim();
+            break;
+        }
+    }
+
+    // Remove surrounding quotes if the whole thing is a quote
+    if ((formattedText.startsWith('"') && formattedText.endsWith('"')) ||
+        (formattedText.startsWith("'") && formattedText.endsWith("'"))) {
+        formattedText = formattedText.substring(1, formattedText.length - 1);
+    }
+
+    formattedText = formattedText.replace(/\*\*/g, ""); // Remove double asterisks
+
+    // Truncate more intelligently (similar to utils.truncateResponse but simplified)
+    if (formattedText.length > maxLength) {
+        let truncated = formattedText.substring(0, maxLength - 3);
+        const lastSpace = truncated.lastIndexOf(' ');
+        if (lastSpace > maxLength / 2) { // Only truncate at space if it's reasonably far in
+            truncated = truncated.substring(0, lastSpace);
+        }
+        formattedText = truncated + "...";
+    }
+    return formattedText.trim();
+  }
+
+  async extractTextFromImageWithScout(imageBase64) {
+    const modelToUse = 'meta/llama-4-scout-17b-16e-instruct'; // Multimodal Scout
+    console.log(`[OCR] NIM CALL START: extractTextFromImageWithScout for model ${modelToUse}`);
+    if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
+      console.error('[OCR] extractTextFromImageWithScout: imageBase64 data is invalid or empty.');
+      return null;
+    }
+    // Determine MIME type (simple check, could be more robust if needed)
+    let mimeType = 'image/jpeg'; // Default
+    if (imageBase64.startsWith('iVBORw0KGgo=')) mimeType = 'image/png';
+    else if (imageBase64.startsWith('/9j/')) mimeType = 'image/jpeg';
+
+    const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+
+    const systemPrompt = "You are an Optical Character Recognition (OCR) AI. Your task is to extract all visible text from the provided image. Output ONLY the extracted text. If no text is visible, output an empty string. Do not add any commentary or explanation. Be as accurate as possible.";
+    const userPromptText = "Extract all text from this image.";
+
+    try {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelToUse,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] }
+          ],
+          temperature: 0.1,
+          max_tokens: 1024, // Increased for potentially a lot of text
+          stream: false
+        }),
+        customTimeout: 90000 // 90s for OCR
+      });
+
+      console.log(`[OCR] NIM CALL END: extractTextFromImageWithScout - Status: ${response.status}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[OCR] Nvidia NIM API error (${response.status}) for extractTextFromImageWithScout - Text: ${errorText}`);
+        return null;
+      }
+      const data = await response.json();
+      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+        const extractedText = data.choices[0].message.content.trim();
+        console.log(`[OCR] NIM CALL RESPONSE: extractTextFromImageWithScout - Extracted Text (first 100 chars): "${extractedText.substring(0,100)}"`);
+        return extractedText;
+      }
+      console.error(`[OCR] Unexpected response format from Nvidia NIM for extractTextFromImageWithScout:`, JSON.stringify(data));
+      return null;
+    } catch (error) {
+      console.error(`[OCR] Error in LlamaBot.extractTextFromImageWithScout:`, error);
       return null;
     }
   }
@@ -1115,9 +1271,145 @@ class LlamaBot extends BaseBot {
     // If not a follow-up or follow-up not actioned, proceed with normal response generation
     try { // START OF MAIN TRY BLOCK
       console.log(`[LlamaBot.generateResponse] Entering try block for post URI: ${post.uri}, Text: "${post.record.text ? post.record.text.substring(0, 50) + '...' : 'N/A'}"`);
-      const userQueryText = post.record.text; // The current user's message text
+      const userQueryText = post.record.text || ""; // The current user's message text, ensure it's a string
 
-      // 1. Check for search history intent first
+      // Keywords for image-based article search
+      const imageArticleSearchKeywords = ['is this true', 'find this article', 'verify this', 'source for this', 'article for this', 'what is this from'];
+      const lowerUserQueryText = userQueryText.toLowerCase();
+      const isImageArticleQuery = imageArticleSearchKeywords.some(keyword => lowerUserQueryText.includes(keyword));
+
+      let imageToProcess = null;
+      let sourcePostForImage = post; // Default to current post
+
+      if (post.record?.embed && (post.record.embed.$type === 'app.bsky.embed.images' || post.record.embed.$type === 'app.bsky.embed.images#view')) {
+        if (post.record.embed.images && post.record.embed.images.length > 0) {
+          imageToProcess = post.record.embed.images[0];
+          console.log(`[ImageArticleSearch] Image found directly in current post ${post.uri}`);
+        }
+      }
+
+      // If no image in current post AND query implies looking for one (e.g. "above screenshot")
+      // AND there's a reply context indicating a parent post
+      if (!imageToProcess && isImageArticleQuery && post.record?.reply?.parent && context && context.length > 1) {
+        // The `context` is built by getReplyContext. It's an array of {author, text, images}.
+        // `images` in context items are {alt, url}. `url` here is `fullsize` or `thumb`.
+        // The last item in `context` is the current post. The one before it is the parent.
+        const parentContextPost = context[context.length - 2];
+        if (parentContextPost && parentContextPost.images && parentContextPost.images.length > 0) {
+          const parentImage = parentContextPost.images[0]; // Take first image from parent
+          if (parentImage.url) { // parentImage.url should be the fullsize or thumb from getReplyContext
+            imageToProcess = { fullsize: parentImage.url, alt: parentImage.alt || "" }; // Construct an object similar to what imageEmbed expects
+            // We need the original parent post's URI for context if we reply about it.
+            // `getReplyContext` currently doesn't return the full parent post object, just parts.
+            // For now, we'll use the current `post` for replies, but acknowledge the image source.
+            console.log(`[ImageArticleSearch] Image not in current post. Found image in parent post (via context) to process: ${parentImage.url}`);
+            // We don't have the original parent post's URI easily here to change `sourcePostForImage`
+            // This might be a limitation if we need to reply directly to the parent image post.
+            // For now, all replies go to the current `post` that triggered the bot.
+          }
+        }
+      }
+
+      // ===== Image-based Article Search Flow =====
+      if (imageToProcess && imageToProcess.fullsize && isImageArticleQuery) {
+        console.log(`[ImageArticleSearch] Processing image ${imageToProcess.fullsize} for post ${post.uri} with query "${userQueryText}".`);
+
+        // It's better to reply to the post that *asked* the question, which is `post`.
+        // The "I see an image..." message should also be a reply to `post`.
+        await this.postReply(post, "I see you're asking about an article related to an image. Let me try to read the image and search for it...");
+
+
+        const imageBase64 = await utils.imageUrlToBase64(imageToProcess.fullsize);
+        if (!imageBase64) {
+          console.error(`[ImageArticleSearch] Failed to download image ${imageToProcess.fullsize} for OCR.`);
+          await this.postReply(post, "I couldn't download the image to analyze it. Sorry about that!");
+          return null;
+        }
+
+        const extractedText = await this.extractTextFromImageWithScout(imageBase64);
+        if (!extractedText || extractedText.trim().length < 5) { // Require some minimal text
+          console.log(`[ImageArticleSearch] OCR extracted no significant text from image in post ${post.uri}. Extracted: "${extractedText}"`);
+          await this.postReply(post, "I tried to read the text from the image, but I couldn't find much there. If there's a headline, maybe try typing it out for me?");
+          return null;
+        }
+
+        console.log(`[ImageArticleSearch] OCR successful. Extracted text (first 100): "${extractedText.substring(0,100)}". Proceeding to web search.`);
+
+        // Now, use this extractedText for a web search (similar to 'web_search' intent type 'webpage')
+        const searchResults = await this.performGoogleWebSearch(extractedText, null, 'webpage');
+        let nemotronWebServicePrompt = "";
+        const webSearchSystemPrompt = `You are an AI assistant. The user posted an image (likely a news headline screenshot) and asked a question like "${userQueryText}". Text was extracted from the image using OCR: "${extractedText.substring(0, 200)}...". You have performed a web search based on this extracted text.
+Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question about the image content.
+Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
+If the search results confirm the headline, state that. If they debunk it, state that. If they are inconclusive, say so.
+Do not make up information not present in the search results. Keep the response suitable for a social media post.`;
+
+        if (searchResults && searchResults.length > 0) {
+          const resultsText = searchResults.map((res, idx) =>
+            `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`
+          ).join("\n\n---\n");
+          nemotronWebServicePrompt = `User's original question about image: "${userQueryText}"\nOCR'd text from image: "${extractedText.substring(0, 200)}..."\n\nWeb Search Results based on OCR'd text:\n${resultsText}\n\nBased on these results, please answer the user's original question about the image.`;
+        } else {
+          nemotronWebServicePrompt = `User's original question about image: "${userQueryText}"\nOCR'd text from image: "${extractedText.substring(0, 200)}..."\n\nNo clear results were found from the web search using the OCR'd text. Please inform the user politely that you couldn't find information based on the image text and perhaps suggest the text might be too generic or to try other keywords if they know them.`;
+        }
+
+        console.log(`[ImageArticleSearch] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
+        const nimWebResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${webSearchSystemPrompt}` },
+              { role: "user", content: nemotronWebServicePrompt }
+            ],
+            temperature: 0.6, max_tokens: 250, stream: false
+          }),
+          customTimeout: 60000 // 60s
+        });
+
+        if (nimWebResponse.ok) {
+          const nimWebData = await nimWebResponse.json();
+          if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
+            const synthesizedResponse = nimWebData.choices[0].message.content.trim();
+            // Filter this response
+            const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+              body: JSON.stringify({
+                model: 'meta/llama-4-scout-17b-16e-instruct',
+                messages: [
+                  { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                  { role: "user", content: synthesizedResponse }
+                ],
+                temperature: 0.1, max_tokens: 100, stream: false
+              }),
+              customTimeout: 60000 // 60s
+            });
+            if (filterResponse.ok) {
+              const filterData = await filterResponse.json();
+              if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                await this.postReply(post, filterData.choices[0].message.content.trim());
+              } else {
+                await this.postReply(post, synthesizedResponse); // Fallback to unfiltered
+              }
+            } else {
+              await this.postReply(post, synthesizedResponse); // Fallback to unfiltered
+            }
+          } else {
+            await this.postReply(post, "I searched the web based on the image text but had a little trouble putting together an answer. You could try rephrasing your question or typing out the headline if you see one!");
+          }
+        } else {
+          const errorText = await nimWebResponse.text();
+          console.error(`[ImageArticleSearch] Nvidia NIM API error for web synthesis (${nimWebResponse.status}) - Text: ${errorText}`);
+          await this.postReply(post, "I encountered an issue while trying to process information from the web based on the image. Please try again later.");
+        }
+        return null; // End of image-based article search flow
+      }
+      // ===== End of Image-based Article Search Flow =====
+
+
+      // 1. Check for search history intent first (original logic continues if not image article search)
       const searchIntent = await this.getSearchHistoryIntent(userQueryText);
 
       if (searchIntent.intent === "search_history") {
@@ -1233,7 +1525,7 @@ class LlamaBot extends BaseBot {
           : "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and the result of your search. If nothing was found, state that clearly and politely. If a post URL was found (but cannot be embedded), your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself.";
 
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
-        const nimSearchResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        const nimSearchResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
           body: JSON.stringify({
@@ -1243,9 +1535,10 @@ class LlamaBot extends BaseBot {
               { role: "user", content: nemotronSearchPrompt }
             ],
             temperature: 0.5,
-            max_tokens: 100, // Shorter, as it's just a confirmation if embedding
+            max_tokens: 100,
             stream: false
-          })
+          }),
+          customTimeout: 60000 // 60s
         });
         console.log(`NIM CALL END: Search History Response - Status: ${nimSearchResponse.status}`);
 
@@ -1254,8 +1547,7 @@ class LlamaBot extends BaseBot {
           if (nimSearchData.choices && nimSearchData.choices.length > 0 && nimSearchData.choices[0].message && nimSearchData.choices[0].message.content) {
             const baseResponseText = nimSearchData.choices[0].message.content.trim();
 
-            // Scout formatting for the text part
-            const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+            const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
@@ -1265,10 +1557,11 @@ class LlamaBot extends BaseBot {
                     { role: "user", content: baseResponseText }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
-                })
+                }),
+                customTimeout: 60000 // 60s
             });
 
-            let finalResponseText = baseResponseText; // Default to base if filter fails
+            let finalResponseText = baseResponseText;
             if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
                 if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
@@ -1563,7 +1856,7 @@ class LlamaBot extends BaseBot {
         if (!isQuerySafe) {
           console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
           const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
-          const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
             body: JSON.stringify({
@@ -1573,7 +1866,8 @@ class LlamaBot extends BaseBot {
                 { role: "user", content: unsafeQueryResponse }
               ],
               temperature: 0.1, max_tokens: 100, stream: false
-            })
+            }),
+            customTimeout: 30000 // 30s
           });
           if (filterResponse.ok) {
             const filterData = await filterResponse.json();
@@ -1732,7 +2026,7 @@ Do not make up information not present in the search results. Keep the response 
           }
 
           console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
-          const nimWebResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          const nimWebResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
             body: JSON.stringify({
@@ -1742,14 +2036,15 @@ Do not make up information not present in the search results. Keep the response 
                 { role: "user", content: nemotronWebServicePrompt }
               ],
               temperature: 0.6, max_tokens: 250, stream: false
-            })
+            }),
+            customTimeout: 60000 // 60s
           });
 
           if (nimWebResponse.ok) {
             const nimWebData = await nimWebResponse.json();
             if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
               const synthesizedResponse = nimWebData.choices[0].message.content.trim();
-              const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+              const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
@@ -1759,7 +2054,8 @@ Do not make up information not present in the search results. Keep the response 
                     { role: "user", content: synthesizedResponse }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
-                })
+                }),
+                customTimeout: 60000 // 60s
               });
               if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
@@ -1846,7 +2142,7 @@ ${baseInstruction}`;
       }
 
       console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}`);
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -1855,21 +2151,18 @@ ${baseInstruction}`;
             { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` },
             { role: "user", content: nemotronUserPrompt }
           ],
-          temperature: 0.7, max_tokens: 350, // Increased max_tokens for Nemotron
+          temperature: 0.7, max_tokens: 350,
           stream: false
-        })
+        }),
+        customTimeout: 90000 // 90s for main generation
       });
       console.log(`NIM CALL END: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Nvidia NIM API error (${response.status}) - Text: ${errorText}`);
-        try { const errorJson = JSON.parse(errorText); console.error(`Nvidia NIM API error (${response.status}) - JSON:`, errorJson); } catch (e) {}
-        if (response.status === 429 || response.status === 503 || response.status === 504) {
-          console.log('Rate limit or server error, retrying after delay...');
-          await utils.sleep(2000);
-          return this.generateResponse(post, context);
-        }
-        throw new Error(`Nvidia NIM API error: ${response.status} ${response.statusText}`);
+        // No automatic retry here by calling this.generateResponse; fetchWithRetries handles retries.
+        // If it still fails, throw or return null.
+        throw new Error(`Nvidia NIM API error after retries: ${response.status} ${response.statusText || errorText}`);
       }
       const data = await response.json();
       if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message) {
@@ -1878,8 +2171,9 @@ ${baseInstruction}`;
       }
       let initialResponse = data.choices[0].message.content;
       console.log(`[LlamaBot.generateResponse] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
+
       console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct`);
-      const filterResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -1888,24 +2182,30 @@ ${baseInstruction}`;
             { role: "system", content: "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens)." },
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.1, // Temperature for formatting (already lowered)
-          max_tokens: 450, // Increased max_tokens for Scout to handle longer, structured Nemotron output
+          temperature: 0.1,
+          max_tokens: 450,
           stream: false
-        })
+        }),
+        customTimeout: 60000 // 60s for filtering
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
       if (!filterResponse.ok) {
         const errorText = await filterResponse.text();
-        console.error(`Nvidia NIM API error (filter model) (${filterResponse.status}) - Text: ${errorText}`);
-        return initialResponse;
+        console.error(`Nvidia NIM API error (filter model) (${filterResponse.status}) - Text: ${errorText}. Falling back to basic formatter.`);
+        initialResponse = this.basicFormatFallback(initialResponse); // Apply basic formatting on fallback
+        // Continue with initialResponse now that it's basic formatted
+      } else {
+        const filterData = await filterResponse.json();
+        if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
+          initialResponse = filterData.choices[0].message.content; // Use Scout's formatted response
+        } else {
+          console.error('Unexpected response format from Nvidia NIM (filter model):', JSON.stringify(filterData), '. Falling back to basic formatter.');
+          initialResponse = this.basicFormatFallback(initialResponse); // Apply basic formatting on fallback
+        }
       }
-      const filterData = await filterResponse.json();
-      if (!filterData.choices || !Array.isArray(filterData.choices) || filterData.choices.length === 0 || !filterData.choices[0].message) {
-        console.error('Unexpected response format from Nvidia NIM (filter model):', JSON.stringify(filterData));
-        return initialResponse;
-      }
-      const scoutFormattedText = filterData.choices[0].message.content;
-      console.log(`[LlamaBot.generateResponse] Scout formatted text (raw): "${scoutFormattedText}"`);
+      // At this point, initialResponse holds either Scout's formatted text or a basic formatted version.
+      const scoutFormattedText = initialResponse; // Rename for clarity in subsequent code
+      console.log(`[LlamaBot.generateResponse] Final formatted text (Scout or fallback): "${scoutFormattedText}"`);
 
       // Attempt to parse structured response if profile analysis was done
       // Note: an image generated for the *initial* query that leads to a summary/details flow.
@@ -2707,6 +3007,7 @@ ${baseInstruction}`;
     }
     const modelId = 'meta/llama-4-scout-17b-16e-instruct';
     const systemPrompt = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
+You will also be used to determine if an image-based query should trigger OCR and search.
 
 Output a JSON object. Choose ONE of the following intent structures:
 
@@ -2844,7 +3145,7 @@ Examples:
     console.log(`[IntentClassifier] Calling Scout (getSearchHistoryIntent) for query: "${userQueryText}"`);
 
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -2853,10 +3154,11 @@ Examples:
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
           ],
-          temperature: 0.2, // Low temperature for classification/extraction
-          max_tokens: 150, // Enough for the JSON structure
+          temperature: 0.2,
+          max_tokens: 150,
           stream: false
-        })
+        }),
+        customTimeout: 45000 // 45s for intent classification
       });
 
       if (!response.ok) {
@@ -2986,7 +3288,7 @@ Examples:
     console.log(`[IntentClassifier] Calling Scout (shouldFetchProfileContext) for query: "${userQueryText}"`);
 
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -2996,9 +3298,10 @@ Examples:
             { role: "user", content: userPrompt }
           ],
           temperature: 0.1,
-          max_tokens: 5, // Enough for "YES" or "NO"
+          max_tokens: 5,
           stream: false
-        })
+        }),
+        customTimeout: 30000 // 30s
       });
 
       if (!response.ok) {
@@ -3031,7 +3334,7 @@ Examples:
 
     console.log(`[IntentClassifier] Calling Scout (isRequestingDetails) for follow-up: "${userFollowUpText}"`);
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -3043,7 +3346,8 @@ Examples:
           temperature: 0.1,
           max_tokens: 5,
           stream: false
-        })
+        }),
+        customTimeout: 30000 // 30s
       });
       if (!response.ok) {
         const errorText = await response.text();
@@ -3070,23 +3374,37 @@ Examples:
     if (!apiKey) { console.error('TOGETHER_AI_API_KEY is not configured. Cannot generate image.'); return null; }
     console.log(`TOGETHER AI CALL START: generateImage for model "${modelToUse}" with prompt "${prompt}"`);
     const requestBody = { model: modelToUse, prompt: prompt, n: 1, size: "1024x1024" };
-    // console.log('Together AI Request Body:', JSON.stringify(requestBody)); // Reduce noise
+
     try {
+      // Note: fetchWithRetries is for NIM; Together AI might have different retry/timeout needs.
+      // For now, using direct fetch for Together AI as it wasn't the source of original timeouts.
+      // If Together AI also shows instability, a similar wrapper might be needed for it.
       const response = await fetch('https://api.together.xyz/v1/images/generations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify(requestBody)
+        // Consider adding a timeout here if direct fetch is kept, e.g., using AbortController
       });
       const responseStatus = response.status;
-      const responseText = await response.text();
+      // It's important to read response.text() or .json() only once.
+      // Let's try to parse as JSON first, and if it fails, then use text.
+      let responseBody;
+      try {
+        responseBody = await response.json();
+      } catch (e) {
+        // If .json() fails, try to get text (though for errors, text might be more useful)
+        // This path is less likely if response.ok is false and API returns structured JSON error
+        responseBody = await response.text();
+      }
+
       console.log(`TOGETHER AI CALL END: generateImage - Status: ${responseStatus}`);
-      // console.log(`TOGETHER AI CALL Full Response Text: ${responseText}`); // Reduce noise
+
       if (!response.ok) {
-        console.error(`Together AI API error (${responseStatus}) for generateImage with prompt "${prompt}" - Full Response: ${responseText}`);
-        try { const errorJson = JSON.parse(responseText); console.error(`Together AI API error (${responseStatus}) for generateImage - Parsed JSON:`, errorJson); } catch (e) {}
+        console.error(`Together AI API error (${responseStatus}) for generateImage with prompt "${prompt}". Response:`, responseBody);
         return null;
       }
-      const data = JSON.parse(responseText);
+      // Assuming responseBody is now parsed JSON if response.ok was true
+      const data = responseBody;
       if (data.data && Array.isArray(data.data) && data.data.length > 0) {
         const firstImageData = data.data[0];
         if (firstImageData.b64_json) {
@@ -3109,7 +3427,7 @@ Examples:
   async isTextSafeScout(prompt) {
     console.log(`NIM CALL START: isTextSafeScout for model meta/llama-4-scout-17b-16e-instruct`);
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -3119,23 +3437,23 @@ Examples:
             { role: "user", content: prompt }
           ],
           temperature: 0.1, max_tokens: 10, stream: false
-        })
+        }),
+        customTimeout: 30000 // 30s
       });
       console.log(`NIM CALL END: isTextSafeScout for prompt "${prompt}" - Status: ${response.status}`);
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Nvidia NIM API error (${response.status}) for isTextSafeScout (prompt: "${prompt}") - Text: ${errorText}`);
-        return false;
+        return false; // Default to unsafe on error
       }
       const data = await response.json();
-      // console.log(`NIM CALL RESPONSE: isTextSafeScout for prompt "${prompt}" - Data:`, JSON.stringify(data)); // Reduce noise
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
         const decision = data.choices[0].message.content.trim().toLowerCase();
         console.log(`Safety check for text "${prompt}": AI decision: "${decision}"`);
         return decision === 'safe';
       }
       console.error(`Unexpected response format from Nvidia NIM for isTextSafeScout (prompt: "${prompt}"):`, JSON.stringify(data));
-      return false;
+      return false; // Default to unsafe on unexpected format
     } catch (error) { console.error(`Error in LlamaBot.isTextSafeScout (prompt: "${prompt}"):`, error); return false; }
   }
 
@@ -3148,14 +3466,15 @@ Examples:
 3. If the text is safe, extract the core artistic request. Rephrase it if necessary to be a concise and effective prompt for an image generation model like Flux.1 Schnell. The prompt should be descriptive and clear.
 4. If safe, respond with a JSON object: \`{ "safe": true, "image_prompt": "your_refined_image_prompt_here" }\`.
 Ensure your entire response is ONLY the JSON object.`;
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
           model: 'meta/llama-4-scout-17b-16e-instruct',
           messages: [ { role: "system", content: system_instruction }, { role: "user", content: user_prompt_text } ],
           temperature: 0.3, max_tokens: 150, stream: false,
-        })
+        }),
+        customTimeout: 45000 // 45s
       });
       console.log(`NIM CALL END: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - Status: ${response.status}`);
       if (!response.ok) {
@@ -3163,10 +3482,10 @@ Ensure your entire response is ONLY the JSON object.`;
         console.error(`Nvidia NIM API error (${response.status}) for processImagePromptWithScout (user_prompt_text: "${user_prompt_text}") - Text: ${errorText}`);
         return { safe: false, reply_text: "Sorry, I encountered an issue processing your image request. Please try again later." };
       }
+      // Read response.text() once for parsing, as .json() consumes the body
       const apiResponseText = await response.text();
-      // console.log(`NIM CALL RESPONSE: processImagePromptWithScout for user_prompt_text "${user_prompt_text}" - API Raw Text: ${apiResponseText}`); // Reduce noise
       try {
-        const apiData = JSON.parse(apiResponseText);
+        const apiData = JSON.parse(apiResponseText); // Try parsing the text
         if (apiData.choices && apiData.choices.length > 0 && apiData.choices[0].message && apiData.choices[0].message.content) {
           let rawContent = apiData.choices[0].message.content.trim();
           console.log(`NIM CALL RESPONSE: processImagePromptWithScout - Raw content from model: "${rawContent}"`);
@@ -3250,20 +3569,20 @@ Ensure your entire response is ONLY the JSON object.`;
     const systemPrompt = "You are an AI assistant. Your task is to describe the provided image for a social media post. Be descriptive, engaging, and try to capture the essence of the image. Keep your description concise, ideally under 200 characters, as it will also be used for alt text. Focus solely on describing the visual elements of the image.";
     const userPromptText = "Please describe this image.";
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
           model: modelToUse,
           messages: [ { role: "system", content: systemPrompt }, { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] } ],
           temperature: 0.5, max_tokens: 100, stream: false
-        })
+        }),
+        customTimeout: 90000 // 90s for image description
       });
       console.log(`NIM CALL END: describeImageWithScout - Status: ${response.status}`);
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - Text: ${errorText}`);
-        try { const errorJson = JSON.parse(errorText); console.error(`Nvidia NIM API error (${response.status}) for describeImageWithScout - JSON:`, errorJson); } catch (e) { }
         return null;
       }
       const data = await response.json();
@@ -3279,25 +3598,22 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 
   async isImageSafeScout(imageBase64) {
-    const modelToUse = 'meta/llama-4-scout-17b-16e-instruct'; // Assuming this model can do visual safety
+    const modelToUse = 'meta/llama-4-scout-17b-16e-instruct';
     console.log(`[VisualSafetyCheck] NIM CALL START: isImageSafeScout for model ${modelToUse}`);
     if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
       console.error('[VisualSafetyCheck] imageBase64 data is invalid or empty.');
-      return false; // Treat as unsafe if no image data
+      return false;
     }
-
-    // Determine MIME type (simple check, could be more robust if needed)
-    // For now, assuming PNG from our Flux generation and common web formats for Imgflip.
-    // If we consistently get a specific format from Imgflip, we can use that.
-    // Defaulting to image/jpeg as it's common.
-    const mimeType = 'image/jpeg'; // Or 'image/png' - Scout might be flexible
+    let mimeType = 'image/jpeg';
+    if (imageBase64.startsWith('iVBORw0KGgo=')) mimeType = 'image/png';
+    else if (imageBase64.startsWith('/9j/')) mimeType = 'image/jpeg';
     const dataUrl = `data:${mimeType};base64,${imageBase64}`;
 
     const systemPrompt = `You are an AI visual safety moderator. For this image, which is a generated meme, focus primarily on identifying: adult content, NSFW, depictions of real-world violence or gore, hate speech symbols or imagery, and illegal activities. The use of recognizable characters or copyrighted elements, when clearly part of a known meme format or used in a transformative comedic way typical of internet memes, should generally be considered acceptable unless it directly promotes one of the aforementioned harmful categories. If strictly harmful content is present, respond with ONLY the word 'unsafe'. Otherwise, respond with ONLY the word 'safe'. Do not provide any other explanation or commentary.`;
     const userPromptText = "Please analyze this image for safety according to the guidelines.";
 
     try {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
@@ -3306,16 +3622,17 @@ Ensure your entire response is ONLY the JSON object.`;
             { role: "system", content: systemPrompt },
             { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] }
           ],
-          temperature: 0.1, // Low temperature for classification
-          max_tokens: 10,   // Enough for "safe" or "unsafe"
+          temperature: 0.1,
+          max_tokens: 10,
           stream: false
-        })
+        }),
+        customTimeout: 90000 // 90s for visual safety check
       });
       console.log(`[VisualSafetyCheck] NIM CALL END: isImageSafeScout - Status: ${response.status}`);
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`[VisualSafetyCheck] Nvidia NIM API error (${response.status}) for isImageSafeScout - Text: ${errorText}`);
-        return false; // Treat as unsafe on API error
+        return false;
       }
       const data = await response.json();
       if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
@@ -3324,10 +3641,10 @@ Ensure your entire response is ONLY the JSON object.`;
         return decision === 'safe';
       }
       console.error(`[VisualSafetyCheck] Unexpected response format from Nvidia NIM for isImageSafeScout:`, JSON.stringify(data));
-      return false; // Treat as unsafe on unexpected format
+      return false;
     } catch (error) {
       console.error(`[VisualSafetyCheck] Exception in LlamaBot.isImageSafeScout:`, error);
-      return false; // Treat as unsafe on exception
+      return false;
     }
   }
 
