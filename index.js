@@ -170,147 +170,200 @@ class BaseBot {
     }
   }
 
-  async handleAdminPostCommand(post, commandContent, isImageCommand) {
+  async handleAdminPostCommand(post, commandContent, commandType) {
     if (await this.hasAlreadyReplied(post)) {
       console.log(`[ADMIN_CMD_SKIP_REPLIED] Post URI ${post.uri} already replied or processed, skipping in handleAdminPostCommand.`);
       return;
     }
 
-    console.log(`[HANDLE_ADMIN_POST_COMMAND_ENTER] Timestamp: ${new Date().toISOString()}, Post URI: ${post.uri}, Command Content: "${commandContent}", IsImageCommand: ${isImageCommand}`);
+    console.log(`[HANDLE_ADMIN_POST_COMMAND_ENTER] Timestamp: ${new Date().toISOString()}, Post URI: ${post.uri}, Command Content: "${commandContent}", Command Type: ${commandType}`);
 
     try {
       this.repliedPosts.add(post.uri);
       console.log(`[HANDLE_ADMIN_POST_COMMAND_PROCESSED_URI] Timestamp: ${new Date().toISOString()}, Added to repliedPosts: ${post.uri}`);
 
       const context = await this.getReplyContext(post);
+      let textForLLM = "";
+      let mediaPrompt = ""; // For art prompt, image search query, or video search query/URL
+      let postDetails = {}; // To store various details like imageBase64, altText, externalEmbed
 
-      let textForLLM = commandContent;
-      let imgPrompt = "";
+      // Parse commandContent based on commandType
+      // Assuming format "[text for LLM to generate post] | [media prompt]" for commands with media
+      // And just "[text for LLM to generate post]" for 'text' type.
+      // For 'art', 'image', 'video', commandContent is "[text for LLM] | [prompt for media]"
+      // or just "[prompt for media]" if no preceding text for LLM.
+      // or just "[text for LLM]" if no pipe and media should be auto-derived (not current plan for these commands).
 
-      if (isImageCommand) {
-        console.log(`[DEBUG_IMG_FLOW] isImageCommand is true. Initial commandContent for splitting: "${commandContent}"`);
-        const parts = commandContent.split('+image');
-        if (parts.length > 1 && commandContent.includes('+image')) {
-            textForLLM = parts[0].trim();
-            imgPrompt = parts[1].trim();
-        } else {
-            textForLLM = "";
-            imgPrompt = commandContent.trim();
+      const parts = commandContent.split('|').map(p => p.trim());
+      if (commandType === 'text') {
+        textForLLM = commandContent; // Entire content is for LLM
+      } else if (parts.length > 1) {
+        textForLLM = parts[0];
+        mediaPrompt = parts.slice(1).join('|').trim(); // Join back if there were pipes in media prompt
+      } else {
+        // No pipe: could be only textForLLM or only mediaPrompt depending on command intent.
+        // For !post+art, !post+image, !post+video, if no pipe, assume content is mediaPrompt and textForLLM is empty.
+        if (commandType === 'art' || commandType === 'image' || commandType === 'video') {
+            mediaPrompt = commandContent;
+            textForLLM = ""; // No specific text for LLM to generate, might use alt text or default.
+        } else { // Should not happen if commandType is validated by monitor
+            textForLLM = commandContent;
         }
-        console.log(`[DEBUG_IMG_FLOW] Determined for Image Command: textForLLM: "${textForLLM}", imgPrompt: "${imgPrompt}"`);
-      } else {
-        console.log(`[DEBUG_IMG_FLOW] isImageCommand is false. textForLLM set to commandContent: "${textForLLM}"`);
       }
 
-      if (isImageCommand && !textForLLM && !imgPrompt) {
-          console.warn(`Admin command: !post+image used but both text and image prompts are effectively empty after parsing. Post URI: ${post.uri}`);
-          await this.postReply(post, "Admin command '!post+image' requires a valid image prompt or text for the post.");
-          return;
+      console.log(`[ADMIN_CMD_PARSED] textForLLM: "${textForLLM}", mediaPrompt: "${mediaPrompt}" for type: ${commandType}`);
+
+
+      // Initial text generation (if textForLLM is provided)
+      let generatedPostText = "";
+      if (textForLLM) {
+        generatedPostText = await this.generateStandalonePostFromContext(context, textForLLM);
+        if (generatedPostText) {
+          console.log(`Admin command: Generated initial post text (first 50 chars): "${generatedPostText.substring(0,50)}..."`);
+        } else {
+          console.warn(`Admin command: generateStandalonePostFromContext returned no text for LLM prompt: "${textForLLM}"`);
+        }
       }
 
-      const newPostText = await this.generateStandalonePostFromContext(context, textForLLM);
+      let finalPostText = generatedPostText; // Start with LLM generated text
+      let mediaError = null;
 
-      if (newPostText) {
-        console.log(`Admin command: Generated new post text (first 50 chars): "${newPostText.substring(0,50)}..."`);
-      } else {
-        console.warn(`Admin command: generateStandalonePostFromContext returned no text for LLM prompt: "${textForLLM}"`);
-      }
-
-      let finalPostText = newPostText;
-      let imageBase64 = null;
-      let imageAltText = "Generated image";
-      let imageGenError = null;
-
-      if (isImageCommand) {
-        console.log(`[DEBUG_IMG_BLOCK] Image processing initiated. Actual image prompt to use: "${imgPrompt}"`);
-        if (imgPrompt && imgPrompt.length > 0) {
-          console.log(`Admin command: Image requested. Passing to Scout. Prompt: "${imgPrompt}"`);
-          const scoutResult = await this.processImagePromptWithScout(imgPrompt);
-          console.log(`[DEBUG_IMG_BLOCK] Scout result: ${JSON.stringify(scoutResult)}`);
-
-          if (!scoutResult.safe) {
-            imageGenError = scoutResult.reply_text || "Image prompt deemed unsafe by Scout.";
-            console.warn(`Admin command: Image prompt "${imgPrompt}" deemed unsafe. Reason: ${imageGenError}`);
+      switch (commandType) {
+        case 'art': // Formerly !post+image, uses FLUX
+          if (!mediaPrompt) {
+            mediaError = "Art generation requested with !post+art, but no art prompt was provided.";
+            break;
+          }
+          console.log(`Admin command type 'art': Generating art with prompt: "${mediaPrompt}"`);
+          const scoutResultArt = await this.processImagePromptWithScout(mediaPrompt);
+          if (!scoutResultArt.safe) {
+            mediaError = scoutResultArt.reply_text || "Art prompt deemed unsafe by Scout.";
           } else {
-            console.log(`Admin command: Scout deemed prompt safe. Refined prompt for Flux: "${scoutResult.image_prompt}"`);
-            imageBase64 = await this.generateImage(scoutResult.image_prompt);
-            console.log(`[DEBUG_IMG_BLOCK] generateImage returned: ${imageBase64 ? 'base64 data received' : 'null'}`);
-
-            if (imageBase64) {
-              console.log(`Admin command: Image generated successfully by Flux.`);
-              const describedAltText = await this.describeImageWithScout(imageBase64);
-              if (describedAltText) {
-                imageAltText = describedAltText;
-                console.log(`Admin command: Image described by Scout for alt text: "${imageAltText}"`);
-              } else {
-                console.warn(`Admin command: Scout failed to describe the image. Using default alt text: "${imageAltText}"`);
-              }
-
-              if (!textForLLM && (!finalPostText || finalPostText.trim() === "")) {
-                if (imageAltText !== "Generated image" && imageAltText.length > 0) {
-                    finalPostText = imageAltText;
-                    console.log(`[DEBUG_IMG_BLOCK] Used image alt text as finalPostText because textForLLM and newPostText were empty.`);
-                } else {
-                    finalPostText = "Here's an image I generated:";
-                    console.log(`[DEBUG_IMG_BLOCK] Used generic message as finalPostText because textForLLM, newPostText were empty and alt text was default/empty.`);
-                }
-              }
+            postDetails.imageBase64 = await this.generateImage(scoutResultArt.image_prompt);
+            if (postDetails.imageBase64) {
+              postDetails.altText = await this.describeImageWithScout(postDetails.imageBase64) || `Generated art for: ${mediaPrompt}`;
+              if (!finalPostText && postDetails.altText) finalPostText = postDetails.altText; // Use alt as text if no other text
             } else {
-              imageGenError = "Image generation by Flux failed (returned null).";
-              console.warn(`Admin command: Image generation failed for prompt (Flux returned null): "${scoutResult.image_prompt}"`);
+              mediaError = "Art generation by Flux failed.";
             }
           }
-        } else {
-          imageGenError = "Image requested with '+image' command, but no image prompt was actually provided or extracted.";
-          console.log(`Admin command: isImageCommand was true, but imgPrompt was empty. Setting error: "${imageGenError}"`);
-        }
-      } else {
-         console.log(`[DEBUG_IMG_BLOCK] No image was requested (isImageCommand is false).`);
+          break;
+
+        case 'image': // New: Web search for an image
+          if (!mediaPrompt) {
+            mediaError = "Image search requested with !post+image, but no search query was provided.";
+            break;
+          }
+          console.log(`Admin command type 'image': Searching web for image with query: "${mediaPrompt}"`);
+          const imageSearchResults = await this.performGoogleWebSearch(mediaPrompt, null, 'image');
+          if (imageSearchResults && imageSearchResults.length > 0) {
+            const imageResult = imageSearchResults[0]; // Take the first image
+            postDetails.imageBase64 = await utils.imageUrlToBase64(imageResult.imageUrl);
+            if (postDetails.imageBase64) {
+              postDetails.altText = imageResult.title || `Image related to: ${mediaPrompt}`;
+              // Attribution: Append to finalPostText later, after it's fully determined
+              postDetails.sourceUrl = imageResult.contextUrl;
+              if (!finalPostText && postDetails.altText) {
+                finalPostText = postDetails.altText; // Use alt text as main text if no other text provided/generated
+              }
+            } else {
+              mediaError = `Failed to download image found for "${mediaPrompt}" from ${imageResult.imageUrl}.`;
+            }
+          } else {
+            mediaError = `No images found via web search for query: "${mediaPrompt}".`;
+          }
+          break;
+
+        case 'video': // New: YouTube video
+          if (!mediaPrompt) {
+            mediaError = "YouTube video requested with !post+video, but no search query or URL was provided.";
+            break;
+          }
+          console.log(`Admin command type 'video': Searching YouTube for: "${mediaPrompt}"`);
+          const videoResults = await this.performYouTubeSearch(mediaPrompt, 1);
+
+          if (videoResults && videoResults.length > 0) {
+            const video = videoResults[0];
+            postDetails.externalEmbed = {
+              uri: video.videoUrl,
+              title: video.title,
+              description: utils.truncateResponse(video.description, 150) // Card description
+            };
+            // If finalPostText is empty, we might use the video title.
+            if (!finalPostText) {
+              finalPostText = video.title;
+            }
+            console.log(`[ADMIN_CMD] Found YouTube video: ${video.title} - ${video.videoUrl}`);
+          } else {
+            mediaError = `No YouTube videos found for query: "${mediaPrompt}".`;
+          }
+          break;
+
+        case 'text': // Text-only post
+          console.log(`Admin command type 'text': Using generated text.`);
+          // finalPostText is already set from generatedPostText
+          if (!finalPostText && textForLLM) { // If LLM failed but original instruction was there
+            finalPostText = textForLLM; // Fallback to using admin's direct text if LLM provided nothing
+            console.log(`[ADMIN_CMD] LLM returned no text, using admin's raw textForLLM for 'text' type post.`);
+          } else if (!finalPostText && !textForLLM) {
+             mediaError = "Text post requested but no text was provided or generated.";
+          }
+          break;
+
+        default:
+          console.warn(`[ADMIN_CMD] Unknown command type: ${commandType}`);
+          mediaError = `Unknown admin command type "${commandType}".`;
       }
 
-      if (finalPostText || imageBase64) {
-        console.log(`[DEBUG_POSTING_LOGIC] Attempting post. finalPostText (first 50): "${finalPostText ? finalPostText.substring(0,50)+'...' : 'null'}", imageBase64 present: ${!!imageBase64}`);
-        const postSuccess = await this.postToOwnFeed(finalPostText, imageBase64, imageAltText);
+      if (mediaError) {
+        console.warn(`[ADMIN_CMD] Media error for type ${commandType}: ${mediaError}`);
+      }
+
+      // Add attribution for web-searched images if one was successfully processed
+      if (commandType === 'image' && postDetails.imageBase64 && postDetails.sourceUrl) {
+        if (finalPostText) {
+          finalPostText += `\n\n(Image Source: ${postDetails.sourceUrl})`;
+        } else {
+          // This case should ideally not happen if finalPostText was set to altText,
+          // but as a fallback if finalPostText is still empty.
+          finalPostText = `(Image Source: ${postDetails.sourceUrl})`;
+        }
+      }
+
+      // Consolidate posting logic
+      if (finalPostText || postDetails.imageBase64 || postDetails.externalEmbed) {
+        console.log(`[ADMIN_CMD_POSTING] Attempting post. Final text (50): "${finalPostText ? finalPostText.substring(0,50)+'...' : 'null'}", image: ${!!postDetails.imageBase64}, embed: ${!!postDetails.externalEmbed}`);
+
+        // postToOwnFeed needs to be adapted if it only takes imageBase64 and not externalEmbed yet
+        // For now, assuming postToOwnFeed can handle text, imageBase64, altText.
+        // If externalEmbed is present, we'd need a different flow or enhanced postToOwnFeed.
+        // Let's simplify: if externalEmbed, we expect text and that. If imageBase64, text and that.
+
+        const postSuccess = await this.postToOwnFeed(finalPostText, postDetails.imageBase64, postDetails.altText, postDetails.externalEmbed);
 
         if (postSuccess) {
-          let confirmationMessage = `Admin command executed.`;
-          if (finalPostText && imageBase64) {
-            confirmationMessage += ` I've posted text ("${utils.truncateResponse(finalPostText, 50)}") and an image to my feed.`;
+          let confirmationMessage = `Admin command type '${commandType}' executed.`;
+          if (finalPostText && (postDetails.imageBase64 || postDetails.externalEmbed)) {
+            confirmationMessage += ` I've posted text and media to my feed.`;
           } else if (finalPostText) {
-            confirmationMessage += ` I've posted the following text to my feed: "${utils.truncateResponse(finalPostText, 100)}"`;
-          } else if (imageBase64) {
-            confirmationMessage += ` I've posted an image to my feed.`;
+            confirmationMessage += ` I've posted text to my feed.`;
+          } else if (postDetails.imageBase64 || postDetails.externalEmbed) {
+            confirmationMessage += ` I've posted media to my feed.`;
           }
-
-          if (isImageCommand && imageGenError) {
-            confirmationMessage += ` (Note: Image processing failed: ${imageGenError})`;
-          } else if (isImageCommand && !imageBase64 && !imageGenError) {
-            confirmationMessage += ` (Note: Image was requested but not generated; verify prompt if provided).`;
-          }
+          if (mediaError) confirmationMessage += ` (Media processing note: ${mediaError})`;
 
           await this.postReply(post, confirmationMessage);
-          console.log(`Sent confirmation reply to admin for post URI: ${post.uri}. Message: "${confirmationMessage}"`);
         } else {
-          const failureReason = `Admin command: postToOwnFeed failed for post URI: ${post.uri}. finalPostText: ${finalPostText ? '"'+finalPostText.substring(0,50)+"...\"" : 'null'}, imageBase64 present: ${!!imageBase64}.`;
-          console.warn(failureReason);
-          await this.postReply(post, "Admin command failed: Could not post to my own feed. " + (imageGenError ? `Image error: ${imageGenError}`: ""));
+          await this.postReply(post, `Admin command type '${commandType}' failed: Could not post to my own feed. ${mediaError ? `(Media error: ${mediaError})` : ""}`);
         }
-      } else if (imageGenError && isImageCommand) {
-         const reason = `Admin command: No text generated AND image generation failed for post URI: ${post.uri}. Error: ${imageGenError}`;
-         console.warn(reason);
-         await this.postReply(post, `Admin command failed: No text was generated and image generation failed: ${imageGenError}`);
-      } else if (!finalPostText && !isImageCommand) {
-         const reason = `Admin command: Could not generate any content for the post (no text from LLM, and no image requested). Post URI: ${post.uri}.`;
-         console.warn(reason);
-         await this.postReply(post, "Admin command failed: Could not generate any content for the post.");
-      } else {
-        console.log(`[DEBUG_POSTING_LOGIC] Nothing to post. finalPostText is empty/null and no imageBase64. isImageCommand: ${isImageCommand}, imageGenError: ${imageGenError}`);
-        if (!imageGenError && !(finalPostText && finalPostText.length > 0) && !imageBase64 ) {
-            await this.postReply(post, "Admin command resulted in no content to post.");
-        }
+      } else if (mediaError) { // No text generated/provided AND media processing failed
+         await this.postReply(post, `Admin command type '${commandType}' failed: ${mediaError}. No content was posted.`);
+      } else { // No text, no media, no error - implies empty command or LLM failure for text-only
+         await this.postReply(post, `Admin command type '${commandType}' resulted in no content to post. Please check your command or prompt.`);
       }
+
     } catch (error) {
-      console.error(`FATAL Error handling admin command for post ${post.uri}:`, error);
+      console.error(`FATAL Error handling admin command type ${commandType} for post ${post.uri}:`, error);
       await this.postReply(post, `An unexpected error occurred while handling the admin command: ${error.message}`);
     }
   }
@@ -320,34 +373,53 @@ class BaseBot {
     return 'Placeholder post text generated from context by BaseBot.';
   }
 
-  async postToOwnFeed(text, imageBase64 = null, altText = "Generated image") {
-    const postText = text ? utils.truncateResponse(text) : (imageBase64 ? "" : null);
-    if (postText === null && !imageBase64) {
-      console.warn(`[postToOwnFeed] Attempted to post with no text and no image. Aborting.`);
+  async postToOwnFeed(text, imageBase64 = null, altText = "Generated image", externalEmbedDetails = null) {
+    let postText = text ? utils.truncateResponse(text) : null;
+
+    // If there's media (image or external link) but no text, set text to empty string for the post object.
+    if ((imageBase64 || externalEmbedDetails) && postText === null) {
+      postText = "";
+    }
+
+    if (postText === null && !imageBase64 && !externalEmbedDetails) {
+      console.warn(`[postToOwnFeed] Attempted to post with no text and no media. Aborting.`);
       return false;
     }
-    console.log(`Attempting to post to own feed. Text: "${postText}"`, imageBase64 ? `Image included (Alt: "${altText}")` : "No image.");
+
+    console.log(`Attempting to post to own feed. Text: "${postText}"`,
+                imageBase64 ? `Image included (Alt: "${altText}")` : "",
+                externalEmbedDetails ? `External embed included (URI: "${externalEmbedDetails.uri}")` : "");
     try {
       RateLimit.check();
       const postObject = {};
-      if (postText !== null && postText.trim() !== "") {
+
+      if (postText !== null) { // Allows empty string if media is present
         postObject.text = postText;
-      } else if (postText === "" && !imageBase64) {
-        console.warn('[postToOwnFeed] Attempting to post with empty text and no image. Aborting.');
-        return false;
-      } else if (postText === "" && imageBase64) {
-         postObject.text = "";
       }
 
-      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+      // Embed logic: External Link Card takes precedence if both somehow provided (though current admin logic won't do that)
+      if (externalEmbedDetails && externalEmbedDetails.uri && externalEmbedDetails.title && externalEmbedDetails.description) {
+        postObject.embed = {
+          $type: 'app.bsky.embed.external',
+          external: {
+            uri: externalEmbedDetails.uri,
+            title: externalEmbedDetails.title,
+            description: externalEmbedDetails.description
+          }
+        };
+        console.log(`[postToOwnFeed] External link card embed created for URI: ${externalEmbedDetails.uri}`);
+      } else if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
         console.log(`[postToOwnFeed] imageBase64 received, length: ${imageBase64.length}. Attempting to upload.`);
         try {
           const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
           console.log(`[postToOwnFeed] Converted base64 to Uint8Array, size: ${imageBytes.length} bytes.`);
           if (imageBytes.length === 0) {
-            console.error('[postToOwnFeed] Image byte array is empty after conversion. Skipping image upload for this attempt.');
+            console.error('[postToOwnFeed] Image byte array is empty after conversion. Skipping image upload.');
           } else {
-            const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' });
+            // Assuming imageMimeType would be 'image/png' or 'image/gif' by default for admin posts if not specified
+            // For now, postToOwnFeed defaults to 'image/png' for direct image uploads if not specified otherwise.
+            // If this method needs to handle GIFs from admin, it would need mimeType too.
+            const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: 'image/png' }); // Defaulting to png for now
             console.log('[postToOwnFeed] Successfully uploaded image to Bluesky:', JSON.stringify(uploadedImage));
             if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
               postObject.embed = {
@@ -360,11 +432,12 @@ class BaseBot {
             }
           }
         } catch (uploadError) { console.error('[postToOwnFeed] Error during image upload or embed creation:', uploadError); }
-      } else if (imageBase64) {
-        console.warn(`[postToOwnFeed] imageBase64 was present but invalid. Length: ${imageBase64 ? imageBase64.length : 'null'}. Skipping image embed.`);
+      } else if (imageBase64) { // imageBase64 present but not a valid string or empty
+        console.warn(`[postToOwnFeed] imageBase64 was provided but invalid. Skipping image embed.`);
       }
 
-      if (Object.keys(postObject).length === 0 || (postObject.text === undefined && !postObject.embed)) {
+      // Final check: ensure there's something to post (either text or an embed)
+      if (postObject.text === undefined && !postObject.embed) {
           console.warn('[postToOwnFeed] Post object is effectively empty (no text and no image embed). Aborting post.');
           return false;
       }
@@ -460,7 +533,7 @@ class BaseBot {
 
               const commandText = currentPostObject.record.text;
               let commandContent = "";
-              let isImageCommand = false;
+              let commandType = null; // 'art', 'image', 'video', or 'text'
               let commandSearchText = commandText;
               const botMention = `@${this.config.BLUESKY_IDENTIFIER}`;
 
@@ -468,20 +541,27 @@ class BaseBot {
                   commandSearchText = commandText.substring(botMention.length).trim();
               }
 
-              if (commandSearchText.startsWith("!post+image ")) {
-                  isImageCommand = true;
+              if (commandSearchText.startsWith("!post+art ")) {
+                  commandType = 'art';
+                  commandContent = commandSearchText.substring("!post+art ".length).trim();
+              } else if (commandSearchText.startsWith("!post+image ")) {
+                  commandType = 'image';
                   commandContent = commandSearchText.substring("!post+image ".length).trim();
-              } else if (commandSearchText.startsWith("!post ")) {
-                  isImageCommand = false;
+              } else if (commandSearchText.startsWith("!post+video ")) {
+                  commandType = 'video';
+                  commandContent = commandSearchText.substring("!post+video ".length).trim();
+              } else if (commandSearchText.startsWith("!post ")) { // Text-only post
+                  commandType = 'text';
                   commandContent = commandSearchText.substring("!post ".length).trim();
               }
 
-              if (commandSearchText.startsWith("!post+image ") || commandSearchText.startsWith("!post ")) {
-                console.log(`[Monitor] Admin command detected: "${commandSearchText}" in post ${currentPostObject.uri}`);
-                await this.handleAdminPostCommand(currentPostObject, commandContent, isImageCommand);
+              if (commandType) {
+                console.log(`[Monitor] Admin command type "${commandType}" detected: "${commandSearchText}" in post ${currentPostObject.uri}`);
+                // Pass currentPostObject, commandContent (which is the part after the command keyword), and commandType
+                await this.handleAdminPostCommand(currentPostObject, commandContent, commandType);
                 isAdminCmdHandled = true;
-              } else {
-                console.log(`[Monitor] Admin post ${currentPostObject.uri} included '!post' but not as a recognized command prefix.`);
+              } else if (commandSearchText.includes("!post")) { // It includes !post but not a recognized full command
+                console.log(`[Monitor] Admin post ${currentPostObject.uri} included '!post' but not as a recognized command prefix like !post+art, !post+image, !post+video, or !post (for text).`);
               }
             }
 
