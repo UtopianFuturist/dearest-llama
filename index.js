@@ -797,12 +797,12 @@ class BaseBot {
                   imageUrl = img.fullsize;
                 } else if (img.thumb) {
                   imageUrl = img.thumb;
-                } else if (img.image && typeof img.image?.ref?.$link === 'string') { // For blob CIDs - added optional chain for image
+                } else if (img.image && typeof img.image?.ref?.$link === 'string') {
                   imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.ref.$link}`;
-                } else if (img.image && typeof img.image?.cid === 'string') { // Alternative CID location - added optional chain for image
+                } else if (img.image && typeof img.image?.cid === 'string') {
                    imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.cid}`;
                 }
-                // Add more fallbacks if other structures for image URLs/CIDs are found
+                console.log(`[getReplyContext Map] Img obj for ${parentPostInThread.uri}: CID via $link: ${img.image?.ref?.$link}, CID via .cid: ${img.image?.cid}, Author DID: ${parentPostInThread.author.did}, Constructed URL: ${imageUrl}`);
                 return {
                   alt: img.alt || '',
                   url: imageUrl
@@ -1376,6 +1376,7 @@ class LlamaBot extends BaseBot {
       const hasTruthQuery = imageArticleSearchKeywords.some(kw => ['true', 'article', 'verify', 'source', 'what is this from'].includes(kw) && lowerUserQueryText.includes(kw));
       const hasImageReference = imageArticleSearchKeywords.some(kw => ['screenshot', 'image', 'picture', 'photo'].includes(kw) && lowerUserQueryText.includes(kw));
 
+      console.log(`[ImageCheck] For query "${lowerUserQueryText.substring(0,70)}...": hasTruthQuery=${hasTruthQuery}, hasImageReference=${hasImageReference}`);
       let isImageArticleQuery = false;
       if (lowerUserQueryText.includes('is this true') ||
           lowerUserQueryText.includes('find this article') ||
@@ -1390,7 +1391,8 @@ class LlamaBot extends BaseBot {
         // This is a basic combination, could be more NLP-driven if needed
         isImageArticleQuery = true;
       }
-
+      // Ensure the final state of isImageArticleQuery is logged after all conditions
+      console.log(`[ImageCheck] Final isImageArticleQuery state: ${isImageArticleQuery}`);
 
       let imageToProcess = null;
       let sourcePostForImage = post; // Default to current post
