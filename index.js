@@ -797,9 +797,9 @@ class BaseBot {
                   imageUrl = img.fullsize;
                 } else if (img.thumb) {
                   imageUrl = img.thumb;
-                } else if (img.image && typeof img.image.ref?.$link === 'string') { // For blob CIDs
+                } else if (img.image && typeof img.image?.ref?.$link === 'string') { // For blob CIDs - added optional chain for image
                   imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.ref.$link}`;
-                } else if (img.image && typeof img.image.cid === 'string') { // Alternative CID location
+                } else if (img.image && typeof img.image?.cid === 'string') { // Alternative CID location - added optional chain for image
                    imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.cid}`;
                 }
                 // Add more fallbacks if other structures for image URLs/CIDs are found
