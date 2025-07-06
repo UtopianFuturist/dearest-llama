@@ -1453,21 +1453,24 @@ class LlamaBot extends BaseBot {
 
         if (giphyResults && giphyResults.length > 0) {
           const gif = giphyResults[0];
-          const imageBase64 = await utils.imageUrlToBase64(gif.gifUrl);
+          // Instead of downloading, create a link card to the Giphy page.
 
-          if (imageBase64) {
-            let responseText = `Here's a GIF for "${searchIntent.search_query}":`;
-            // Giphy attribution requirement: "Powered By GIPHY"
-            // Also, good to provide the source page URL.
-            responseText += `\n(Powered by GIPHY - Source: ${gif.pageUrl})`;
+          let responseText = `Here's a GIPHY GIF for "${searchIntent.search_query}":`;
+          // The card itself will show a preview. Attribution will be in the card description.
 
-            await this.postReply(post, responseText, imageBase64, gif.altText || gif.title || searchIntent.search_query, null, null, gif.mimeType);
-          } else {
-            console.warn(`[GiphySearchFlow] Failed to download GIF from URL: ${gif.gifUrl}`);
-            await this.postReply(post, `I found a GIF for "${searchIntent.search_query}" but had trouble displaying it. You can try here: ${gif.pageUrl}`);
-          }
+          const cardDescription = `${gif.title || 'View on GIPHY'}. Powered by GIPHY.`;
+
+          const externalEmbed = {
+            uri: gif.pageUrl, // Use the Giphy page URL for the card
+            title: gif.title || `GIPHY GIF for ${searchIntent.search_query}`,
+            description: utils.truncateResponse(cardDescription, 200) // Keep card description concise
+          };
+
+          // Post the text and the link card
+          await this.postReply(post, responseText, null, null, null, externalEmbed);
+
         } else {
-          const noResultsText = `Sorry, I couldn't find a GIPHY GIF for "${searchIntent.search_query}".`;
+          const noResultsText = `Sorry, I couldn't find any GIPHY GIFs for "${searchIntent.search_query}".`;
           await this.postReply(post, noResultsText);
         }
         return null; // Giphy search handling complete
