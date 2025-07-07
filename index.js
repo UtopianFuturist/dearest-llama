@@ -1117,7 +1117,7 @@ class LlamaBot extends BaseBot {
       console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${nemotronResponseText}"`);
 
       // Now, filter this response using Gemma
-      const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+      const filterModelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
       const filterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
 
@@ -1134,7 +1134,7 @@ class LlamaBot extends BaseBot {
             ],
             temperature: 0.1, max_tokens: 100, stream: false
           }),
-          customTimeout: 60000 // 60s timeout
+          customTimeout: 90000 // 90s timeout
         });
         console.log(`NIM CALL END: filterResponse (using ${filterModelId}) in generateStandalonePostFromContext - Status: ${filterResponse.status}`);
         if (!filterResponse.ok) {
@@ -1194,7 +1194,7 @@ class LlamaBot extends BaseBot {
   }
 
   async extractTextFromImageWithScout(imageBase64) { // Renaming to extractTextFromImage
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
@@ -1232,7 +1232,7 @@ class LlamaBot extends BaseBot {
           ],
           temperature: 0.1, max_tokens: 1024, stream: false
         }),
-        customTimeout: 90000 // 90s
+        customTimeout: 120000 // 120s
       });
       console.log(`[OCR] NIM CALL END: extractTextFromImage (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
@@ -1568,7 +1568,7 @@ Do not make up information not present in the search results. Keep the response 
             ],
             temperature: 0.6, max_tokens: 250, stream: false
           }),
-          customTimeout: 120000 // 120s
+          customTimeout: 60000 // 60s
         });
 
         if (nimWebResponse.ok) {
@@ -1580,14 +1580,14 @@ Do not make up information not present in the search results. Keep the response 
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
               body: JSON.stringify({
-                model: 'meta/llama-4-scout-17b-16e-instruct',
+                  model: 'meta/llama-3.2-90b-vision-instruct',
                 messages: [
                   { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
                   { role: "user", content: synthesizedResponse }
                 ],
                 temperature: 0.1, max_tokens: 100, stream: false
               }),
-              customTimeout: 60000 // 60s
+              customTimeout: 90000 // 90s
             });
             if (filterResponse.ok) {
               const filterData = await filterResponse.json();
@@ -1691,7 +1691,7 @@ Do not make up information not present in the search results. Keep the response 
               ],
               temperature: 0.6, max_tokens: 250, stream: false
             }),
-          customTimeout: 120000 // 120s
+            customTimeout: 60000 // 60s
           });
 
           if (nimWebResponse.ok) {
@@ -1702,14 +1702,14 @@ Do not make up information not present in the search results. Keep the response 
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  model: 'meta/llama-3.2-90b-vision-instruct',
                   messages: [
                     { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
                     { role: "user", content: synthesizedResponse }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
                 }),
-                customTimeout: 60000 // 60s
+              customTimeout: 90000 // 90s
               });
               if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
@@ -1867,7 +1867,7 @@ Do not make up information not present in the search results. Keep the response 
             max_tokens: 100,
             stream: false
           }),
-          customTimeout: 120000 // 120s
+          customTimeout: 60000 // 60s
         });
         console.log(`NIM CALL END: Search History Response - Status: ${nimSearchResponse.status}`);
 
@@ -1880,14 +1880,14 @@ Do not make up information not present in the search results. Keep the response 
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  model: 'meta/llama-3.2-90b-vision-instruct',
                   messages: [
                     { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
                     { role: "user", content: baseResponseText }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
                 }),
-                customTimeout: 60000 // 60s
+                customTimeout: 90000 // 90s
             });
 
             let finalResponseText = baseResponseText;
@@ -2044,15 +2044,14 @@ Do not make up information not present in the search results. Keep the response 
             const captionGenPrompt = `Generate ${foundTemplate.box_count} short, witty meme captions for the "${foundTemplate.name}" template, related to: "${topic}". Respond with each caption on a new line.`;
             const nemotronSystemPrompt = "You are a creative and funny meme caption generator."; // Different persona for this
 
-            const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+            const nimResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
                   model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or a model good for creative short text
                   messages: [ { role: "system", content: nemotronSystemPrompt }, { role: "user", content: captionGenPrompt } ],
                   temperature: 0.8, max_tokens: 50 * foundTemplate.box_count, stream: false
-                }),
-                customTimeout: 120000 // 120s
+                })
             });
             if (nimResponse.ok) {
                 const nimData = await nimResponse.json();
@@ -2367,7 +2366,7 @@ Do not make up information not present in the search results. Keep the response 
               ],
               temperature: 0.6, max_tokens: 250, stream: false
             }),
-          customTimeout: 120000 // 120s
+            customTimeout: 60000 // 60s
           });
 
           if (nimWebResponse.ok) {
@@ -2378,14 +2377,14 @@ Do not make up information not present in the search results. Keep the response 
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  model: 'meta/llama-3.2-90b-vision-instruct',
                   messages: [
                     { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
                     { role: "user", content: synthesizedResponse }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
                 }),
-                customTimeout: 60000 // 60s
+                customTimeout: 90000 // 90s
               });
               if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
@@ -2507,7 +2506,7 @@ ${baseInstruction}`;
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
-          model: 'meta/llama-4-scout-17b-16e-instruct',
+          model: 'meta/llama-3.2-90b-vision-instruct',
           messages: [
             { role: "system", content: "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens)." },
             { role: "user", content: initialResponse }
@@ -2516,7 +2515,7 @@ ${baseInstruction}`;
           max_tokens: 450,
           stream: false
         }),
-        customTimeout: 60000 // 60s for filtering
+        customTimeout: 90000 // 90s for filtering
       });
       console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
       if (!filterResponse.ok) {
@@ -2535,7 +2534,7 @@ ${baseInstruction}`;
       }
       // At this point, initialResponse holds Nemotron's direct output.
       // Filter it with Gemma.
-      const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+      const filterModelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
       const filterSystemPromptForGenerateResponse = "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens).";
 
@@ -2553,7 +2552,7 @@ ${baseInstruction}`;
             ],
             temperature: 0.1, max_tokens: 450, stream: false
           }),
-          customTimeout: 60000 // 60s
+          customTimeout: 90000 // 90s
         });
         console.log(`NIM CALL END: filterResponse (using ${filterModelId}) in generateResponse - Status: ${filterResponse.status}`);
         if (!filterResponse.ok) {
@@ -3376,7 +3375,7 @@ ${baseInstruction}`;
     if (!userQueryText || userQueryText.trim() === "") {
       return { intent: "none" };
     }
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     const systemPromptContent = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
@@ -3444,7 +3443,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
           temperature: 0.2, max_tokens: 200,
           stream: false
         }),
-        customTimeout: 45000 // 45s
+        customTimeout: 90000 // 90s
       });
 
       console.log(`[IntentClassifier] ${modelId} (getIntent) response status: ${response.status}`);
@@ -3522,7 +3521,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   async shouldFetchProfileContext(userQueryText) {
     if (!userQueryText || userQueryText.trim() === "") return false;
 
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = "Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about themselves, their posts, their online personality, their Bluesky account, or their life, in a way that their recent Bluesky activity could provide relevant context. Respond with only the word YES or the word NO.";
     const userPromptContent = `User query: '${userQueryText}'`;
@@ -3537,7 +3536,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
           messages: [ { role: "system", content: systemPromptContent }, { role: "user", content: userPromptContent } ],
           temperature: 0.1, max_tokens: 5, stream: false
         }),
-        customTimeout: 30000 // 30s
+        customTimeout: 90000 // 90s
       });
       console.log(`[IntentClassifier] ${modelId} (shouldFetchProfileContext) response status: ${response.status}`);
       if (!response.ok) {
@@ -3562,7 +3561,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   async isRequestingDetails(userFollowUpText) {
     if (!userFollowUpText || userFollowUpText.trim() === "") return false;
 
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
     const userPromptContent = `User reply: '${userFollowUpText}'`;
@@ -3577,7 +3576,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
           messages: [ { role: "system", content: systemPromptContent }, { role: "user", content: userPromptContent } ],
           temperature: 0.1, max_tokens: 5, stream: false
         }),
-        customTimeout: 30000 // 30s
+        customTimeout: 90000 // 90s
       });
       console.log(`[IntentClassifier] ${modelId} (isRequestingDetails) response status: ${response.status}`);
       if (!response.ok) {
@@ -3656,7 +3655,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   }
 
   async isTextSafeScout(prompt) {
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI safety moderator. Analyze the following user text. If the text violates any of the safety guidelines (adult content, NSFW, copyrighted material, illegal content, violence, politics), respond with "unsafe". Otherwise, respond with "safe". Only respond with "safe" or "unsafe".`;
 
@@ -3673,7 +3672,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
           ],
           temperature: 0.1, max_tokens: 10, stream: false
         }),
-        customTimeout: 30000 // 30s
+        customTimeout: 90000 // 90s
       });
       console.log(`NIM CALL END: isTextSafe (using ${modelId}) for prompt "${prompt.substring(0, 50)}..." - Status: ${response.status}`);
       if (!response.ok) {
@@ -3696,7 +3695,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   }
 
   async processImagePromptWithScout(user_prompt_text) { // Renaming to processImagePrompt, Scout no longer specific
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const system_instruction = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI assistant. Analyze the following user text intended as a prompt for an image generation model.
 1. First, determine if the user's text is safe according to the safety guidelines. The guidelines include: no adult content, no NSFW material, no copyrighted characters or concepts unless very generic, no illegal activities, no violence, no political content.
@@ -3717,7 +3716,7 @@ Ensure your entire response is ONLY the JSON object.`;
           messages: [ { role: "system", content: system_instruction }, { role: "user", content: user_prompt_text } ],
           temperature: 0.3, max_tokens: 150, stream: false,
         }),
-        customTimeout: 45000 // 45s
+        customTimeout: 120000 // 120s
       });
       console.log(`NIM CALL END: processImagePrompt (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
@@ -3785,7 +3784,7 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 
   async describeImageWithScout(imageBase64) { // Renaming to describeImage
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
@@ -3810,7 +3809,7 @@ Ensure your entire response is ONLY the JSON object.`;
           messages: [ { role: "system", content: systemPromptContent }, { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] } ],
           temperature: 0.5, max_tokens: 100, stream: false
         }),
-        customTimeout: 90000 // 90s
+        customTimeout: 120000 // 120s
       });
       console.log(`NIM CALL END: describeImage (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
@@ -3838,7 +3837,7 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 
   async isImageSafeScout(imageBase64) { // Renaming to isImageSafe
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
@@ -3867,7 +3866,7 @@ Ensure your entire response is ONLY the JSON object.`;
           ],
           temperature: 0.1, max_tokens: 10, stream: false
         }),
-        customTimeout: 90000 // 90s
+        customTimeout: 120000 // 120s
       });
       console.log(`[VisualSafetyCheck] NIM CALL END: isImageSafe (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
