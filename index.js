@@ -1084,6 +1084,42 @@ class LlamaBot extends BaseBot {
   // `getLikes` should primarily be used if the actual list of likers is needed for a specific post.
   constructor(config, agent) {
     super(config, agent);
+    this.readmeCache = {
+      content: null,
+      lastFetched: 0,
+      ttl: 60 * 60 * 1000 // 1 hour in milliseconds
+    };
+  }
+
+  async _getReadmeContent() {
+    const now = Date.now();
+    if (this.readmeCache.content && (now - this.readmeCache.lastFetched < this.readmeCache.ttl)) {
+      console.log("[ReadmeSelfHelp] Using cached README content.");
+      return this.readmeCache.content;
+    }
+
+    try {
+      console.log("[ReadmeSelfHelp] Fetching README.md from GitHub...");
+      const readmeUrl = "https://raw.githubusercontent.com/UtopianFuturist/dearest-llama/main/README.md";
+      // Using direct fetch as this is internal bot logic.
+      const response = await fetch(readmeUrl);
+      if (!response.ok) {
+        console.error(`[ReadmeSelfHelp] Error fetching README: ${response.status} ${response.statusText}`);
+        this.readmeCache.content = null; // Invalidate cache on error
+        this.readmeCache.lastFetched = 0;
+        return null;
+      }
+      const rawReadme = await response.text();
+      this.readmeCache.content = rawReadme;
+      this.readmeCache.lastFetched = now;
+      console.log("[ReadmeSelfHelp] README fetched and cached successfully.");
+      return rawReadme;
+    } catch (error) {
+      console.error("[ReadmeSelfHelp] Exception fetching README:", error);
+      this.readmeCache.content = null;
+      this.readmeCache.lastFetched = 0;
+      return null;
+    }
   }
 
   async generateStandalonePostFromContext(context, adminInstructions) {
@@ -1772,7 +1808,52 @@ Do not make up information not present in the search results. Keep the response 
       // 1. Check for search history intent first (original logic continues if not image article search)
       const searchIntent = await this.getSearchHistoryIntent(userQueryText);
 
-      if (searchIntent.intent === "search_history") {
+      if (searchIntent.intent === "read_readme_for_self_help" && searchIntent.user_query_about_bot) {
+        console.log(`[ReadmeSelfHelp] Detected intent to read README for query: "${searchIntent.user_query_about_bot}"`);
+        const readmeContent = await this._getReadmeContent();
+
+        if (readmeContent) {
+          const readmeSystemPrompt = `You are a helpful assistant. The user is asking about your (the bot's) capabilities or how to use you. Use the following content from your README.md file to answer their question. Provide a concise and helpful response. If the README doesn't directly answer the specific question, explain what you can based on the README or suggest how the user might find the information.`;
+          const readmeUserPrompt = `README.md Content:\n\`\`\`\n${readmeContent}\n\`\`\`\n\nUser's question: "${searchIntent.user_query_about_bot}"\n\nPlease answer the user's question based on the README.`;
+
+          console.log(`[ReadmeSelfHelp] Calling Nemotron for README-based answer.`);
+          const nimReadmeResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+              model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+              messages: [
+                { role: "system", content: readmeSystemPrompt },
+                { role: "user", content: readmeUserPrompt }
+              ],
+              temperature: 0.5,
+              max_tokens: 300,
+              stream: false
+            }),
+            customTimeout: 120000 // 120s for Nemotron
+          });
+
+          if (nimReadmeResponse.ok) {
+            const nimReadmeData = await nimReadmeResponse.json();
+            if (nimReadmeData.choices && nimReadmeData.choices.length > 0 && nimReadmeData.choices[0].message && nimReadmeData.choices[0].message.content) {
+              const answer = nimReadmeData.choices[0].message.content.trim();
+              const filteredAnswer = this.basicFormatFallback(answer, 870); // Allow longer for multi-part
+              await this.postReply(post, filteredAnswer);
+            } else {
+              console.error('[ReadmeSelfHelp] Nvidia NIM API response for README was ok, but no content found:', JSON.stringify(nimReadmeData));
+              await this.postReply(post, "I looked at my README, but had a little trouble formulating an answer. You can try asking differently!");
+            }
+          } else {
+            const errorTextNim = await nimReadmeResponse.text();
+            console.error(`[ReadmeSelfHelp] Nvidia NIM API error for README synthesis (${nimReadmeResponse.status}) - Text: ${errorTextNim}`);
+            await this.postReply(post, "I tried to consult my README, but there was an issue connecting to the AI to understand it. Please try again later.");
+          }
+          return null;
+        } else {
+          await this.postReply(post, "I'm having trouble accessing my own help file (README) right now. Sorry about that!");
+          return null;
+        }
+      } else if (searchIntent.intent === "search_history") {
         console.log(`[SearchHistory] Intent detected. Criteria:`, searchIntent);
         let matches = [];
         let searchPerformed = ""; // To describe which search was done
@@ -3413,16 +3494,40 @@ ${baseInstruction}`;
     const systemPromptContent = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
 You will also be used to determine if an image-based query should trigger OCR and search.
 Output a JSON object. Choose ONE of the following intent structures:
-1. If searching PAST INTERACTIONS (conversation history, bot's gallery):
+
+PRIORITY 1: Explicit Image Generation Command:
+- If the query is a direct command to GENERATE, CREATE, DRAW, or MAKE an image (e.g., "generate an image of X", "draw me Y", "create a picture of Z", "make an artwork showing..."), output:
+  { "intent": "none", "reason": "image_generation_command" }
+
+PRIORITY 2: Bot Self-Help/Capabilities Query:
+- If the user is asking about your (the bot's) capabilities, features, how to use you, or asking for help with how you work (e.g., "what can you do?", "how do I use the meme feature?", "help with bot commands"):
+{
+  "intent": "read_readme_for_self_help",
+  "user_query_about_bot": "the user's original question about your capabilities"
+}
+
+PRIORITY 3: If not an image generation or self-help command, then consider other intents:
+1. If searching PAST INTERACTIONS (conversation history, bot's gallery) for something specific the user or bot previously posted or saw:
 {
   "intent": "search_history",
-  "target_type": "image" | "link" | "post" | "message" | "unknown", "author_filter": "user" | "bot" | "any", "keywords": ["keyword1", ...], "recency_cue": "textual cue for recency" | null, "search_scope": "bot_gallery" | "conversation" | null
+  "target_type": "image" | "link" | "post" | "message" | "unknown",
+  "author_filter": "user" | "bot" | "any",
+  "keywords": ["keyword1", ...],
+  "recency_cue": "textual cue for recency" | null,
+  "search_scope": "bot_gallery" | "conversation" | null
 }
-2. If it's a GENERAL QUESTION for a WEB SEARCH (text or image):
+   - "target_type": "image" if user asks to FIND/SEARCH FOR an "image", "picture", "photo" they or you posted/saw.
+   - "keywords": EXCLUDE image generation verbs like "generate", "create", "draw", "make".
+
+2. If it's a GENERAL QUESTION that can be answered by a WEB SEARCH (including requests to find generic images not tied to conversation history):
 {
   "intent": "web_search",
-  "search_query": "optimized query for web search engine", "search_type": "webpage" | "image", "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null
+  "search_query": "optimized query for web search engine",
+  "search_type": "webpage" | "image",
+  "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null
 }
+   - "search_type": "image" if user asks for a generic image (e.g., "show me pictures of cats", "find images of Mars").
+
 3. If asking for NASA's Astronomy Picture of the Day (APOD):
 {
   "intent": "nasa_apod",
@@ -3443,19 +3548,29 @@ Output a JSON object. Choose ONE of the following intent structures:
   "intent": "giphy_search",
   "search_query": "keywords for GIPHY search"
 }
-7. If NEITHER of the above: { "intent": "none" }
+7. If NEITHER of the above specific intents fit (and it's not an image generation command covered by PRIORITY 1), output:
+{ "intent": "none" }
+
+
 IMPORTANT RULES for "search_history":
-- "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
-- "author_filter": "user" (they sent/posted), "bot" (you sent/generated), or "any".
-- "keywords": Core content terms. EXCLUDE recency cues (e.g., "yesterday") AND type words (e.g., "image", "link"). Max 5.
+- "target_type": "image" if the user is asking to FIND or REMEMBER a specific "image", "picture", "photo", "screenshot" that was previously seen, posted, or generated in the conversation or gallery.
+- "author_filter": "user" (they sent/posted), "bot" (you sent/generated/posted), or "any".
+- "keywords": Core content terms for the search. EXCLUDE recency cues (e.g., "yesterday") AND type words (e.g., "image", "link") AND image generation verbs. Max 5.
 - "recency_cue": Time phrases (e.g., "yesterday", "last week"). Null if none.
-- "search_scope": For "target_type": "image" AND "author_filter": "bot": If user asks for an image bot *created/generated* and not explicitly tied to a direct reply/chat, prefer "bot_gallery". If 'sent me' or part of shared chat, "conversation". Default "conversation" if ambiguous. Null otherwise.
+- "search_scope": For "target_type": "image" AND "author_filter": "bot": If user asks for an image bot *previously created/generated* and not explicitly tied to a direct reply/chat, prefer "bot_gallery". If 'sent me' or part of shared chat, "conversation". Default "conversation" if ambiguous. Null otherwise.
+
 IMPORTANT RULES for "web_search":
-- Use "web_search" for general knowledge, current info/news, explanations not tied to prior interactions.
-- "search_query": Essence of user's question. For news from a source (e.g., "recent news from NBC"), simplify to "[Source] news".
+- Use "web_search" for general knowledge, current info/news, explanations not tied to prior interactions, or requests for generic images not from history.
+- "search_query": Essence of user's question. For news from a source (e.g., "recent news from NBC"), simplify to "[Source] news". For generic images, this is the image subject.
+- "search_type": Set to "image" if the user is asking for generic images (e.g., "find pictures of sunsets", "show me a photo of a dog"). Otherwise, "webpage".
 - "freshness_suggestion": For "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", "oneMonth". Smallest sensible period. Null if no strong cue.
-PRIORITIZATION: Past interactions ("you sent me", "we discussed") -> "search_history" (conversation). Bot created/generated image (not direct chat) -> "search_history" (bot_gallery). Factual world question -> "web_search".
-If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.`;
+
+CLARIFICATION ON IMAGE REQUESTS:
+- "Generate an image of a cat" -> { "intent": "none", "reason": "image_generation_command" }
+- "Find the image of a cat we were talking about yesterday" -> { "intent": "search_history", "target_type": "image", ... }
+- "Show me pictures of cats" -> { "intent": "web_search", "search_type": "image", "search_query": "cats" }
+
+Output ONLY the JSON object.`;
     // System prompt shortened for diff display
 
     const userPromptContent = `User query: '${userQueryText}'`;
