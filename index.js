@@ -2738,8 +2738,8 @@ ${baseInstruction}`;
             // Clean any leading list-like markers from Nemotron/Scout
     // Clean known tags from pointTextContent
     let cleanPointText = pointTextContent
-        .replace(/\[SUMMARY FINDING WITH INVITATION\]/g, "")
-        .replace(/\[DETAILED ANALYSIS POINT \d+\]/g, "")
+        .replace(/\s*\[SUMMARY FINDING WITH INVITATION\]\s*/gi, "") // More robust regex
+        .replace(/\s*\[DETAILED ANALYSIS POINT \d+\]\s*/gi, "") // More robust regex
         .trim();
     // Also keep existing list marker cleaning
     cleanPointText = cleanPointText.replace(/^(\s*(\d+\.|\d+\)|\*|-)\s*)+/, '').trim();
@@ -2758,8 +2758,8 @@ ${baseInstruction}`;
 
           // Defensively clean summaryText again, though initial parsing should handle it.
           const cleanSummaryText = summaryText
-            .replace(/\[SUMMARY FINDING WITH INVITATION\]/g, "")
-            .replace(/\[DETAILED ANALYSIS POINT \d+\]/g, "") // Should not be in summary, but defensive
+            .replace(/\s*\[SUMMARY FINDING WITH INVITATION\]\s*/gi, "") // More robust regex
+            .replace(/\s*\[DETAILED ANALYSIS POINT \d+\]\s*/gi, "") // More robust regex, also for safety
             .trim();
 
           if (cleanSummaryText) {
@@ -2787,27 +2787,28 @@ ${baseInstruction}`;
                 });
                 console.log(`[LlamaBot.generateResponse] Stored ${detailedPoints.length} detailed points, pending for original post URI: ${post.uri}, summary URI: ${summaryPostUri}`);
               }
-              return null; // Signal that response (summary) has been handled, and details are pending.
-            } else { // else for if (summaryPostUrisArray && summaryPostUrisArray.length > 0)
-              console.error("[LlamaBot.generateResponse] Failed to post summary. Falling back to sending full text.");
-              return scoutFormattedText; // Fallback
+              return null; // Successfully posted summary and cached details
+            } else {
+              console.error("[LlamaBot.generateResponse] Failed to post summary. Replying with error and returning null.");
+              await this.postReply(post, "I had a little trouble putting my thoughts together for that summary. Could you try asking again?");
+              return null;
             }
-          } else { // else for if (summaryText)
-            console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Returning full Scout output.");
-            return scoutFormattedText; // Fallback
-          } // Closes else for if (summaryText)
-        } else { // else for if (summaryStartIndex !== -1)
-          console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
-          return scoutFormattedText; // Fallback
-        } // Closes else for if (summaryStartIndex !== -1)
-      } else { // else for if (fetchContextDecision)
-        // This path is taken if fetchContextDecision is false.
-        // nemotronUserPrompt was set, shared API calls produced scoutFormattedText.
-        // Return scoutFormattedText directly without parsing for summary/details.
+          } else {
+            console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Replying with error and returning null.");
+            await this.postReply(post, "I analyzed the context but couldn't form a summary. Maybe try rephrasing?");
+            return null;
+          }
+        } else {
+          console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Replying with error and returning null.");
+          await this.postReply(post, "I tried to analyze the context but had trouble structuring my response. Could you try a different approach?");
+          return null;
+        }
+      } else {
+        // This path is taken if fetchContextDecision is false - standard response path
         return scoutFormattedText;
-      } // Closes else for if (fetchContextDecision)
-    } // Closes the main 'else' block starting at L1390
-    } catch (error) { // This is line 1520 in Render's logs
+      }
+    } // Closes the main 'else' block (this comment might be slightly off if structure changed)
+    } catch (error) {
       console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
     } // Closes the catch block of generateResponse
