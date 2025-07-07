@@ -752,79 +752,102 @@ class BaseBot {
   async getReplyContext(post) {
     try {
       const conversation = [];
-      const extractImages = (record) => (record?.embed?.images || record?.embed?.media?.images || []).map(img => ({ alt: img.alt, url: img.fullsize || img.thumb }));
-      conversation.push({ author: post.author.handle, text: post.record.text, images: extractImages(post.record) });
-      if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed) {
-        try {
-          const uri = post.record.embed.record.uri;
-          const matches = uri.match(/at:\/\/([^/]+)\/[^/]+\/([^/]+)/);
-          if (matches) {
-            const [_, repo, rkey] = matches;
-            const quotedPostResponse = await this.agent.getPost({ repo, rkey });
-            if (quotedPostResponse?.value) {
-              const authorDid = matches[1];
-              const postValue = quotedPostResponse.value;
-              if (postValue.text) {
-                const quotedImages = postValue.embed?.images || postValue.embed?.media?.images || [];
-                conversation.unshift({ author: authorDid, text: postValue.text, images: quotedImages.map(img => ({ alt: img.alt, url: img.fullsize || img.thumb })) });
-              }
-            }
-          }
-        } catch (error) { console.error('Error fetching quoted post:', error); }
-      }
-      if (post.record?.reply) {
-        let currentUri = post.record.reply.parent?.uri; // Start with the parent's URI
-        let safetyCount = 0; // Prevent infinite loops
 
-        while (currentUri && safetyCount < 5) { // Limit depth
+      // Helper to extract image details from a record's embed
+      // Now accepts authorDid to construct URLs if necessary
+      const extractImages = (record, authorDid) => {
+        const images = record?.embed?.images || record?.embed?.media?.images || [];
+        return images.map(img => {
+          let imageUrl = img.fullsize || img.thumb;
+          if (!imageUrl && authorDid && img.image?.ref?.$link) { // .ref is an object with $link
+            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${img.image.ref.$link}`;
+            console.log(`[extractImages] Constructed URL via ref.$link: ${imageUrl}`);
+          } else if (!imageUrl && authorDid && img.image?.cid) { // .cid is a string
+            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${img.image.cid}`;
+            console.log(`[extractImages] Constructed URL via image.cid: ${imageUrl}`);
+          }
+          return { alt: img.alt || '', url: imageUrl };
+        }).filter(img => img.url); // Only keep images where a URL could be constructed
+      };
+
+      // Add current post details
+      conversation.push({
+        uri: post.uri,
+        author: post.author.handle,
+        text: post.record.text,
+        images: extractImages(post.record, post.author.did) // Pass current post's author DID
+      });
+
+      // Handle quoted post
+      if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed.record) {
+        const quotedPostRef = post.record.embed.record; // This is a LiteRecord, might not have .record.text directly
+        const quotedPostUri = quotedPostRef.uri;
+        console.log(`[getReplyContext] Quoted post detected: ${quotedPostUri}`);
+        try {
+          // Fetch the full quoted post to get its record and author DID for image URL construction
+          const { data: quotedPostThread } = await this.agent.getPostThread({ uri: quotedPostUri, depth: 0 });
+          const fullQuotedPost = quotedPostThread?.thread?.post;
+
+          if (fullQuotedPost && fullQuotedPost.record && fullQuotedPost.author) {
+            console.log(`[getReplyContext] Successfully fetched full quoted post by ${fullQuotedPost.author.handle}`);
+            const quotedImages = extractImages(fullQuotedPost.record, fullQuotedPost.author.did);
+
+            conversation.unshift({ // Add quoted post to the beginning
+              uri: fullQuotedPost.uri,
+              author: fullQuotedPost.author.handle,
+              text: fullQuotedPost.record.text, // Text from the full record
+              images: quotedImages
+            });
+          } else {
+            console.warn(`[getReplyContext] Could not fetch full details for quoted post ${quotedPostUri}. Attempting to use LiteRecord info.`);
+            // Fallback: Try to use info from the LiteRecord if available
+            // Note: LiteRecord value might be a postRecord or just a basic view.
+            // Author DID might not be present on LiteRecord directly, so image URLs from CID might fail.
+            const liteRecordValue = quotedPostRef.value || {}; // .value should be the actual record content
+            const liteRecordAuthorDid = quotedPostRef.author?.did; // Attempt to get author DID from the reference
+            const quotedImages = extractImages({ embed: liteRecordValue.embed }, liteRecordAuthorDid); // Pass a compatible structure
+             conversation.unshift({
+              uri: quotedPostUri,
+              author: quotedPostRef.author?.handle || 'unknown author',
+              text: liteRecordValue?.text,
+              images: quotedImages
+            });
+          }
+        } catch (error) {
+            console.error(`[getReplyContext] Error fetching or processing quoted post ${quotedPostUri}:`, error);
+        }
+      }
+
+      // Handle reply thread (parents)
+      if (post.record?.reply) {
+        let currentUri = post.record.reply.parent?.uri;
+        let safetyCount = 0;
+
+        while (currentUri && safetyCount < 5) {
           safetyCount++;
           try {
-            const { data: thread } = await this.agent.getPostThread({ uri: currentUri, depth: 0, parentHeight: 0 }); // Fetch only the specific post
+            const { data: thread } = await this.agent.getPostThread({ uri: currentUri, depth: 0, parentHeight: 0 });
             const parentPostInThread = thread?.thread?.post;
 
             if (!parentPostInThread) break;
 
-            if (parentPostInThread.record) {
-              console.log(`[getReplyContext] Parent Loop: Processing parent URI ${parentPostInThread.uri}. Author DID: ${parentPostInThread.author.did}. Embed object:`, JSON.stringify(parentPostInThread.record.embed, null, 2));
+            if (!parentPostInThread.record || !parentPostInThread.author) {
+                console.warn(`[getReplyContext] Parent post ${currentUri} missing record or author data. Skipping.`);
+                currentUri = parentPostInThread.record?.reply?.parent?.uri;
+                continue;
             }
 
-            let parentImages = [];
-            const embed = parentPostInThread.record?.embed;
-            if (embed && (embed.$type === 'app.bsky.embed.images' || embed.$type === 'app.bsky.embed.images#view') && embed.images) {
-              parentImages = embed.images.map(img => {
-                let imageUrl = null;
-                if (img.fullsize) {
-                  imageUrl = img.fullsize;
-                } else if (img.thumb) {
-                  imageUrl = img.thumb;
-                } else if (img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
-                  // Most specific path first
-                  console.log(`[getReplyContext Map Detail] Accessing img.image.ref.$link. img.image.ref object:`, JSON.stringify(img.image.ref));
-                  imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.ref.$link}`;
-                } else if (img.image && typeof img.image.cid === 'string') {
-                  console.log(`[getReplyContext Map Detail] Accessing img.image.cid. img.image object:`, JSON.stringify(img.image));
-                   imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentPostInThread.author.did}&cid=${img.image.cid}`;
-                } else if (img.image) {
-                  console.warn(`[getReplyContext Map Detail] img.image exists for ${parentPostInThread.uri}, but expected CID paths (.ref.$link or .cid) not found. img.image:`, JSON.stringify(img.image));
-                } else {
-                  console.warn(`[getReplyContext Map Detail] img.image is missing for an image object in ${parentPostInThread.uri}. Img object:`, JSON.stringify(img));
-                }
-                console.log(`[getReplyContext Map] Img obj for ${parentPostInThread.uri}: CID via $link: ${img.image?.ref?.$link}, CID via .cid: ${img.image?.cid}, Author DID: ${parentPostInThread.author.did}, Constructed URL: ${imageUrl}`);
-                return {
-                  alt: img.alt || '',
-                  url: imageUrl
-                };
-              }).filter(img => img.url); // Only keep images where a URL could be constructed
-            }
+            // Use extractImages with the parent post's author DID
+            const parentImages = extractImages(parentPostInThread.record, parentPostInThread.author.did);
 
-            conversation.unshift({ // Add parent to the beginning of the array
+            conversation.unshift({
               uri: parentPostInThread.uri,
               author: parentPostInThread.author.handle,
               text: parentPostInThread.record.text,
               images: parentImages
             });
 
-            currentUri = parentPostInThread.record?.reply?.parent?.uri; // Move to next parent
+            currentUri = parentPostInThread.record?.reply?.parent?.uri;
           } catch (fetchParentError) {
             console.error(`[getReplyContext] Error fetching parent post ${currentUri}:`, fetchParentError);
             break;
@@ -844,9 +867,17 @@ class BaseBot {
       return conversation;
     } catch (error) {
       console.error('[getReplyContext] Fatal error in getReplyContext:', error);
-      // Fallback with current post only, ensuring 'uri' is present for safety
-      const extractImages = (record) => (record?.embed?.images || record?.embed?.media?.images || []).map(img => ({ alt: img.alt, url: img.fullsize || img.thumb }));
-      return [{ uri: post.uri, author: post.author.handle, text: post.record.text, images: extractImages(post.record) }];
+      // Fallback with current post only
+      const extractImagesFallback = (record, authorDid) => { // Basic version for fallback
+        const images = record?.embed?.images || record?.embed?.media?.images || [];
+        return images.map(img => ({ alt: img.alt || '', url: img.fullsize || img.thumb })).filter(img => img.url);
+      };
+      return [{
+        uri: post.uri,
+        author: post.author.handle,
+        text: post.record.text,
+        images: extractImagesFallback(post.record, post.author.did)
+      }];
     }
   }
 
@@ -1568,7 +1599,7 @@ Do not make up information not present in the search results. Keep the response 
             ],
             temperature: 0.6, max_tokens: 250, stream: false
           }),
-          customTimeout: 60000 // 60s
+          customTimeout: 120000 // 120s
         });
 
         if (nimWebResponse.ok) {
@@ -1587,7 +1618,7 @@ Do not make up information not present in the search results. Keep the response 
                 ],
                 temperature: 0.1, max_tokens: 100, stream: false
               }),
-              customTimeout: 90000 // 90s
+                customTimeout: 90000 // 90s
             });
             if (filterResponse.ok) {
               const filterData = await filterResponse.json();
@@ -1691,7 +1722,7 @@ Do not make up information not present in the search results. Keep the response 
               ],
               temperature: 0.6, max_tokens: 250, stream: false
             }),
-            customTimeout: 60000 // 60s
+          customTimeout: 120000 // 120s
           });
 
           if (nimWebResponse.ok) {
@@ -1709,7 +1740,7 @@ Do not make up information not present in the search results. Keep the response 
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
                 }),
-              customTimeout: 90000 // 90s
+                customTimeout: 90000 // 90s
               });
               if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
@@ -1867,7 +1898,7 @@ Do not make up information not present in the search results. Keep the response 
             max_tokens: 100,
             stream: false
           }),
-          customTimeout: 60000 // 60s
+          customTimeout: 120000 // 120s
         });
         console.log(`NIM CALL END: Search History Response - Status: ${nimSearchResponse.status}`);
 
@@ -2044,14 +2075,15 @@ Do not make up information not present in the search results. Keep the response 
             const captionGenPrompt = `Generate ${foundTemplate.box_count} short, witty meme captions for the "${foundTemplate.name}" template, related to: "${topic}". Respond with each caption on a new line.`;
             const nemotronSystemPrompt = "You are a creative and funny meme caption generator."; // Different persona for this
 
-            const nimResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+            const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
                   model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Or a model good for creative short text
                   messages: [ { role: "system", content: nemotronSystemPrompt }, { role: "user", content: captionGenPrompt } ],
                   temperature: 0.8, max_tokens: 50 * foundTemplate.box_count, stream: false
-                })
+                }),
+                customTimeout: 120000 // 120s
             });
             if (nimResponse.ok) {
                 const nimData = await nimResponse.json();
@@ -2366,7 +2398,7 @@ Do not make up information not present in the search results. Keep the response 
               ],
               temperature: 0.6, max_tokens: 250, stream: false
             }),
-            customTimeout: 60000 // 60s
+          customTimeout: 120000 // 120s
           });
 
           if (nimWebResponse.ok) {
@@ -2506,7 +2538,7 @@ ${baseInstruction}`;
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
-          model: 'meta/llama-3.2-90b-vision-instruct',
+          model: 'meta/llama-3.2-90b-vision-instruct', // This was already changed in a previous step by mistake, ensuring it's correct
           messages: [
             { role: "system", content: "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens)." },
             { role: "user", content: initialResponse }
@@ -2517,7 +2549,7 @@ ${baseInstruction}`;
         }),
         customTimeout: 90000 // 90s for filtering
       });
-      console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
+      console.log(`NIM CALL END: filterResponse for model meta/llama-3.2-90b-vision-instruct - Status: ${filterResponse.status}`);
       if (!filterResponse.ok) {
         const errorText = await filterResponse.text();
         console.error(`Nvidia NIM API error (filter model) (${filterResponse.status}) - Text: ${errorText}. Falling back to basic formatter.`);
@@ -2534,7 +2566,7 @@ ${baseInstruction}`;
       }
       // At this point, initialResponse holds Nemotron's direct output.
       // Filter it with Gemma.
-      const filterModelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+      const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
       const filterSystemPromptForGenerateResponse = "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens).";
 
@@ -3375,7 +3407,7 @@ ${baseInstruction}`;
     if (!userQueryText || userQueryText.trim() === "") {
       return { intent: "none" };
     }
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     const systemPromptContent = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
@@ -3521,7 +3553,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   async shouldFetchProfileContext(userQueryText) {
     if (!userQueryText || userQueryText.trim() === "") return false;
 
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = "Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about themselves, their posts, their online personality, their Bluesky account, or their life, in a way that their recent Bluesky activity could provide relevant context. Respond with only the word YES or the word NO.";
     const userPromptContent = `User query: '${userQueryText}'`;
@@ -3561,7 +3593,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   async isRequestingDetails(userFollowUpText) {
     if (!userFollowUpText || userFollowUpText.trim() === "") return false;
 
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
     const userPromptContent = `User reply: '${userFollowUpText}'`;
@@ -3655,7 +3687,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   }
 
   async isTextSafeScout(prompt) {
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI safety moderator. Analyze the following user text. If the text violates any of the safety guidelines (adult content, NSFW, copyrighted material, illegal content, violence, politics), respond with "unsafe". Otherwise, respond with "safe". Only respond with "safe" or "unsafe".`;
 
@@ -3695,7 +3727,7 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
   }
 
   async processImagePromptWithScout(user_prompt_text) { // Renaming to processImagePrompt, Scout no longer specific
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const system_instruction = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI assistant. Analyze the following user text intended as a prompt for an image generation model.
 1. First, determine if the user's text is safe according to the safety guidelines. The guidelines include: no adult content, no NSFW material, no copyrighted characters or concepts unless very generic, no illegal activities, no violence, no political content.
@@ -3716,7 +3748,7 @@ Ensure your entire response is ONLY the JSON object.`;
           messages: [ { role: "system", content: system_instruction }, { role: "user", content: user_prompt_text } ],
           temperature: 0.3, max_tokens: 150, stream: false,
         }),
-        customTimeout: 120000 // 120s
+        customTimeout: 45000 // 45s
       });
       console.log(`NIM CALL END: processImagePrompt (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
@@ -3784,7 +3816,7 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 
   async describeImageWithScout(imageBase64) { // Renaming to describeImage
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
@@ -3809,7 +3841,7 @@ Ensure your entire response is ONLY the JSON object.`;
           messages: [ { role: "system", content: systemPromptContent }, { role: "user", content: [ { type: "text", text: userPromptText }, { type: "image_url", image_url: { url: dataUrl } } ] } ],
           temperature: 0.5, max_tokens: 100, stream: false
         }),
-        customTimeout: 120000 // 120s
+        customTimeout: 90000 // 90s
       });
       console.log(`NIM CALL END: describeImage (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
@@ -3837,7 +3869,7 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 
   async isImageSafeScout(imageBase64) { // Renaming to isImageSafe
-    const modelId = 'meta/llama-3.2-90b-vision-instruct'; // Changed to Gemma
+    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length === 0) {
@@ -3866,7 +3898,7 @@ Ensure your entire response is ONLY the JSON object.`;
           ],
           temperature: 0.1, max_tokens: 10, stream: false
         }),
-        customTimeout: 120000 // 120s
+        customTimeout: 90000 // 90s
       });
       console.log(`[VisualSafetyCheck] NIM CALL END: isImageSafe (using ${modelId}) - Status: ${response.status}`);
       if (!response.ok) {
