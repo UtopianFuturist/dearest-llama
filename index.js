@@ -1115,6 +1115,108 @@ class LlamaBot extends BaseBot {
       lastFetched: 0,
       ttl: 60 * 60 * 1000 // 1 hour in milliseconds
     };
+    this.visualEnhancementCache = new Map(); // Cache for visual enhancement suggestions
+    this.VISUAL_ENHANCEMENT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  }
+
+  async getVisualEnhancementSuggestion(userQueryText, botDraftText) {
+    const cacheKey = `${userQueryText}|${botDraftText}`;
+    const now = Date.now();
+
+    if (this.visualEnhancementCache.has(cacheKey)) {
+      const cachedEntry = this.visualEnhancementCache.get(cacheKey);
+      if (now - cachedEntry.timestamp < this.VISUAL_ENHANCEMENT_CACHE_TTL) {
+        console.log("[ResponseEnhancer] Using cached visual enhancement suggestion.");
+        return cachedEntry.suggestion;
+      } else {
+        this.visualEnhancementCache.delete(cacheKey); // Expired
+      }
+    }
+
+    const systemPrompt = `You are an AI Response Enhancer. Your goal is to decide if adding a visual element would make the bot's draft response significantly more engaging, clearer, or contextually appropriate, given the user's query.
+
+Consider the following:
+- User's Query: "${userQueryText}"
+- Bot's Draft Text Response: "${botDraftText}"
+
+Rules:
+1. If the bot's draft text already explicitly states it will provide an image or visual (e.g., "I'll draw that for you!", "Here's an image:"), then no additional visual is needed. Output: {"action": "none"}
+2. If the user's query is a direct command to generate an image (e.g., "draw a cat", "generate a picture of space") AND the bot's draft text is a simple acknowledgment (e.g., "Okay!", "Sure thing!"), this implies the main image generation flow will handle it. Output: {"action": "none"}
+3. Only suggest a visual if it genuinely adds value and is highly relevant. Avoid overuse.
+4. If a visual is appropriate:
+    - If the context is lighthearted, emotional, or could be expressed well with a short animation, suggest a GIF. Output: {"action": "gif_search", "query": "<concise Giphy search term>"}
+    - If the context requires a specific scene, object, or concept to be visualized, and a generated image would be best, suggest image generation. Output: {"action": "generate", "query": "<concise prompt for FLUX model>"}
+    - If the context refers to a real-world entity, object, or scene that can be found via web image search, suggest that. Output: {"action": "image_search", "query": "<concise Google Image search term>"}
+5. Keep search queries and generation prompts very concise (2-5 words typically).
+6. If multiple visual types could fit, prefer in this order: gif_search (for common reactions/emotions), image_search (for real-world things), generate (for novel/creative concepts).
+7. If unsure, or if the text response is sufficient, output: {"action": "none"}
+
+Respond ONLY with a single JSON object based on these rules.
+
+Examples:
+User Query: "I'm so happy today!"
+Bot's Draft Text Response: "That's wonderful to hear! Spreading the joy!"
+Your JSON Output: {"action": "gif_search", "query": "happy celebration"}
+
+User Query: "What did the first car look like?"
+Bot's Draft Text Response: "The Benz Patent-Motorwagen, built in 1885, is widely regarded as the world's first production automobile."
+Your JSON Output: {"action": "image_search", "query": "Benz Patent-Motorwagen 1885"}
+
+User Query: "Can you imagine a futuristic city on Mars?"
+Bot's Draft Text Response: "A futuristic city on Mars... towering biodomes, sleek transit tubes, and the reddish landscape stretching out under a terraformed sky. It sounds amazing!"
+Your JSON Output: {"action": "generate", "query": "futuristic city on Mars biodomes"}
+
+User Query: "Draw a dragon."
+Bot's Draft Text Response: "Okay, I'll get right on that dragon drawing for you!"
+Your JSON Output: {"action": "none"}
+
+User Query: "What's 2+2?"
+Bot's Draft Text Response: "2+2 equals 4!"
+Your JSON Output: {"action": "none"}`;
+
+    try {
+      console.log(`[ResponseEnhancer] Calling Llama 3.2 Vision to get visual enhancement suggestion.`);
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: 'meta/llama-3.2-90b-vision-instruct',
+          messages: [{ role: "system", content: systemPrompt }, {role: "user", content: `User Query: "${userQueryText}"\nBot's Draft Text Response: "${botDraftText}"\n\nYour JSON Output:`}],
+          temperature: 0.3, // Lower temperature for more deterministic JSON output
+          max_tokens: 100,
+          stream: false
+        }),
+        customTimeout: 90000 // 90s, as it's a decision task
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[ResponseEnhancer] API error (${response.status}): ${errorText}`);
+        return { action: "none", error: "API error" };
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices[0].message && data.choices[0].message.content) {
+        let suggestionJson = data.choices[0].message.content.trim();
+        // Extract JSON from potential markdown code block
+        const match = suggestionJson.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+        if (match && match[1]) {
+          suggestionJson = match[1];
+        }
+
+        console.log(`[ResponseEnhancer] Raw suggestion JSON: ${suggestionJson}`);
+        const suggestion = JSON.parse(suggestionJson);
+        if (suggestion && suggestion.action) {
+          this.visualEnhancementCache.set(cacheKey, { suggestion, timestamp: now });
+          return suggestion;
+        }
+      }
+      console.error("[ResponseEnhancer] Failed to parse suggestion or unexpected format.");
+      return { action: "none", error: "Parsing error" };
+    } catch (error) {
+      console.error(`[ResponseEnhancer] Exception: ${error.message}`);
+      return { action: "none", error: error.message };
+    }
   }
 
   async _getReadmeContent() {
@@ -2838,7 +2940,71 @@ Output only the processed text. This is an internal formatting step; do not ment
           return null;
         }
       } else {
-        // This path is taken if fetchContextDecision is false - standard response path
+        // This path is taken if fetchContextDecision is false (standard response path)
+        // or if profile analysis was attempted but markers weren't found (fallback to treating as standard response).
+        // `scoutFormattedText` here is the result of Nemotron + two filters.
+
+        // Call for visual enhancement suggestion
+        const visualSuggestion = await this.getVisualEnhancementSuggestion(userQueryText, scoutFormattedText);
+
+        if (visualSuggestion && visualSuggestion.action !== "none") {
+          console.log(`[ResponseEnhancer] Suggestion received: ${JSON.stringify(visualSuggestion)}`);
+          // For now, we will just log the suggestion.
+          // Actual tool execution (generate, gif_search, image_search) and combining with scoutFormattedText
+          // will be handled in the next plan step and might require returning more structured data
+          // or handling posting directly here and then returning null.
+          // For this step, let's just get the suggestion. The next step will use it.
+          // We will still return scoutFormattedText for now, and monitor will post it.
+          // The monitor will then need to be adjusted to handle these suggestions.
+          //
+          // OR, simpler for now: if a visual is suggested, this function posts text + visual and returns null.
+          // This avoids major refactor of monitor immediately.
+
+          let imageBase64 = null;
+          let altText = null;
+          let externalEmbed = null;
+          let finalResponseText = scoutFormattedText; // Start with the original text
+
+          try {
+            if (visualSuggestion.action === "generate" && visualSuggestion.query) {
+              const genPromptScoutResult = await this.processImagePromptWithScout(visualSuggestion.query);
+              if (genPromptScoutResult.safe) {
+                imageBase64 = await this.generateImage(genPromptScoutResult.image_prompt);
+                if (imageBase64) {
+                  altText = await this.describeImageWithScout(imageBase64) || `Generated image for: ${visualSuggestion.query}`;
+                  // Prepend a note about the image to the text response, or modify as needed
+                  // finalResponseText = `${scoutFormattedText}\n\nHere's an image I thought you might like:`;
+                } else { console.warn("[ResponseEnhancer] Image generation failed for suggested prompt."); }
+              } else { console.warn("[ResponseEnhancer] Suggested image generation prompt deemed unsafe."); }
+            } else if (visualSuggestion.action === "gif_search" && visualSuggestion.query) {
+              const gifs = await this.searchGiphy(visualSuggestion.query, 1);
+              if (gifs && gifs.length > 0 && gifs[0].pageUrl) {
+                externalEmbed = { uri: gifs[0].pageUrl, title: gifs[0].title || "GIF", description: `Via GIPHY for: ${visualSuggestion.query}` };
+                // finalResponseText = `${scoutFormattedText}\n\nI found a GIF for that:`;
+              } else { console.warn("[ResponseEnhancer] Giphy search failed for suggested query."); }
+            } else if (visualSuggestion.action === "image_search" && visualSuggestion.query) {
+              const images = await this.performGoogleWebSearch(visualSuggestion.query, null, 'image');
+              if (images && images.length > 0 && images[0].imageUrl) {
+                imageBase64 = await utils.imageUrlToBase64(images[0].imageUrl);
+                if (imageBase64) {
+                  altText = images[0].title || `Image related to: ${visualSuggestion.query}`;
+                  // finalResponseText = `${scoutFormattedText}\n\nHere's an image I found:`;
+                } else { console.warn("[ResponseEnhancer] Web image download failed for suggested query."); }
+              } else { console.warn("[ResponseEnhancer] Web image search failed for suggested query."); }
+            }
+
+            // If any visual was successfully prepared, post it with the text and return null
+            if (imageBase64 || externalEmbed) {
+              console.log(`[ResponseEnhancer] Posting original text with proactive visual. Image: ${!!imageBase64}, Embed: ${!!externalEmbed}`);
+              await this.postReply(post, finalResponseText, imageBase64, altText, null, externalEmbed);
+              return null; // Response fully handled
+            }
+          } catch (toolError) {
+            console.error(`[ResponseEnhancer] Error during proactive tool execution:`, toolError);
+            // Fall through to just returning the original text if tool use fails
+          }
+        }
+        // If no visual suggestion or tool use failed, return the original text
         return scoutFormattedText;
       }
     } // Closes the main 'else' block (this comment might be slightly off if structure changed)
