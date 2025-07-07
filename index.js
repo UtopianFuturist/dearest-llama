@@ -658,35 +658,61 @@ class BaseBot {
               const responseText = await this.generateResponse(currentPostObject, context); // Pass the full post object
 
               if (responseText) { // generateResponse now handles search history internally and might return null
-                // Image generation request detection (simplified for brevity, actual logic is more complex)
-                const imageRequestKeywords = ["generate image", "create a picture of"]; // Simplified
+                // Image generation request detection
+                const imageRequestKeywords = ["generate image", "create a picture of", "draw a picture of", "make an image of", "draw an image of", "generate a picture of"];
                 let isImageRequest = false;
                 let imagePrompt = "";
-                const lowercasedText = (currentPostObject.record.text || "").toLowerCase();
+                const originalUserText = (currentPostObject.record.text || "");
+                const lowerUserText = originalUserText.toLowerCase();
+                const botHandleLower = `@${this.config.BLUESKY_IDENTIFIER.toLowerCase()}`;
+
+                let textToParseForPrompt = lowerUserText;
+                if (textToParseForPrompt.startsWith(botHandleLower)) {
+                    textToParseForPrompt = textToParseForPrompt.substring(botHandleLower.length).trim();
+                }
+
                 for (const keyword of imageRequestKeywords) {
-                    if (lowercasedText.includes(keyword)) {
+                    const keywordIndex = textToParseForPrompt.indexOf(keyword);
+                    if (keywordIndex !== -1) {
                         isImageRequest = true;
-                        imagePrompt = lowercasedText.replace(keyword, "").trim().replace(/^of /,"").trim();
-                        break;
+                        imagePrompt = textToParseForPrompt.substring(keywordIndex + keyword.length).trim();
+                        // Further clean common leading prepositions like "of", "for", "about"
+                        const prepositions = ["of ", "for ", "about ", "displaying ", "showing ", "depicting ", "that shows ", "that is ", "that depicts "];
+                        for (const prep of prepositions) {
+                            if (imagePrompt.startsWith(prep)) {
+                                imagePrompt = imagePrompt.substring(prep.length).trim();
+                                // No break here, allow stripping multiple if they are chained, e.g. "of for a..."
+                            }
+                        }
+                        if (imagePrompt) { // Ensure prompt is not empty after stripping
+                           break; // Found keyword and extracted prompt
+                        } else {
+                           isImageRequest = false; // Keyword was at the end, no actual prompt
+                        }
                     }
                 }
 
                 if (isImageRequest && imagePrompt) {
-                    console.log(`[Monitor] Image request detected in ${currentPostObject.uri}. Prompt: "${imagePrompt}"`);
-                    const scoutResult = await this.processImagePromptWithScout(imagePrompt);
-                    if (!scoutResult.safe) {
-                        await this.postReply(currentPostObject, `${responseText}\n\nRegarding your image request: ${scoutResult.reply_text}`);
-                    } else {
-                        const imageBase64 = await this.generateImage(scoutResult.image_prompt);
-                        if (imageBase64) {
-                            const altText = await this.describeImageWithScout(imageBase64) || "Generated image";
-                            await this.postReply(currentPostObject, `${responseText}\n\nHere's the image you requested:`, imageBase64, altText);
-                        } else {
-                            await this.postReply(currentPostObject, `${responseText}\n\nI tried to generate an image for "${scoutResult.image_prompt}", but it didn't work out this time.`);
-                        }
-                    }
+                  console.log(`[Monitor] Image generation request detected. Original user text: "${originalUserText}", Extracted prompt for AI processing: "${imagePrompt}"`);
+                  const textResponsePart = responseText ? `${responseText}\n\n` : ""; // Use Nemotron's text if available
+
+                  const scoutResult = await this.processImagePromptWithScout(imagePrompt); // This now uses Llama 3.2 Vision
+                  if (!scoutResult.safe) {
+                      await this.postReply(currentPostObject, `${textResponsePart}Regarding your image request: ${scoutResult.reply_text}`);
+                  } else {
+                      const imageBase64 = await this.generateImage(scoutResult.image_prompt); // FLUX call
+                      if (imageBase64) {
+                          const altText = await this.describeImageWithScout(imageBase64) || `Generated image for: ${scoutResult.image_prompt}`; // Llama 3.2 Vision for alt text
+                          await this.postReply(currentPostObject, `${textResponsePart}Here's the image you requested:`, imageBase64, altText);
+                      } else {
+                          await this.postReply(currentPostObject, `${textResponsePart}I tried to generate an image for "${scoutResult.image_prompt}", but it didn't work out this time.`);
+                      }
+                  }
                 } else {
+                  // If not an image request, or prompt extraction failed, just post the text response (if any)
+                  if (responseText) { // Only post if there's something to say
                     await this.postReply(currentPostObject, responseText);
+                  }
                 }
               }
             }
@@ -2649,7 +2675,15 @@ ${baseInstruction}`;
       // Filter it with Gemma.
       const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
-      const filterSystemPromptForGenerateResponse = "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens).";
+      const filterSystemPromptForGenerateResponse = `ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are:
+1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. If you must truncate, end with '...'.
+2. Remove any surrounding quotation marks that make the entire text appear as a direct quote (unless the quote is very short and clearly intended as such).
+3. Remove any sender attributions like 'Bot:', 'AI:', 'Nemotron says:', 'Llama says:', 'Assistant:', etc.
+4. Remove any double asterisks (\`**\`) used for emphasis if they are not standard Markdown for bolding that would render correctly.
+5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text.
+6. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications.
+7. DO NOT add any structural markers like [SUMMARY FINDING WITH INVITATION] or [DETAILED ANALYSIS POINT N] unless they were explicitly part of the input text and seem intended for the user. If they seem like processing instructions, remove them.
+Output only the processed text. This is an internal formatting step; do not mention it.`;
 
       let gemmaFormattedText; // Changed variable name
       try {
