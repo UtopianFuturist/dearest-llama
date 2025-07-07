@@ -29,7 +29,7 @@ const agent = new AtpAgent({
 // ===== Utility Functions =====
 
 // Helper for fetch with retries and timeout
-async function fetchWithRetries(url, options, maxRetries = 3, initialDelay = 2000, timeout = 30000) {
+async function fetchWithRetries(url, options, maxRetries = 3, initialDelay = 5000, timeout = 30000) { // Increased initialDelay to 5s
   let attempt = 0;
   let currentDelay = initialDelay;
 
@@ -1098,7 +1098,7 @@ class LlamaBot extends BaseBot {
           messages: [ { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` }, { role: "user", content: userPrompt } ],
           temperature: 0.90, max_tokens: 100, stream: false
         }),
-        customTimeout: 60000 // 60s timeout
+        customTimeout: 120000 // 120s timeout
       });
       console.log(`NIM CALL END: generateStandalonePostFromContext for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
       if (!response.ok) {
@@ -2477,7 +2477,7 @@ ${baseInstruction}`;
           temperature: 0.7, max_tokens: 350,
           stream: false
         }),
-        customTimeout: 90000 // 90s for main generation
+          customTimeout: 120000 // 120s for main generation
       });
       console.log(`NIM CALL END: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1 - Status: ${response.status}`);
       if (!response.ok) {
