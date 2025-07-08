@@ -29,7 +29,7 @@ const agent = new AtpAgent({
 // ===== Utility Functions =====
 
 // Helper for fetch with retries and timeout
-async function fetchWithRetries(url, options, maxRetries = 3, initialDelay = 5000, timeout = 30000) { // Increased initialDelay to 5s
+async function fetchWithRetries(url, options, maxRetries = 3, initialDelay = 10000, timeout = 30000) { // Increased initialDelay to 10s
   let attempt = 0;
   let currentDelay = initialDelay;
 
