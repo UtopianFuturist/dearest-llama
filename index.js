@@ -2762,9 +2762,16 @@ Do not make up information not present in the search results. Keep the response 
         let conversationHistory = '';
         if (context && context.length > 0) {
           for (const msg of context) {
-            conversationHistory += `${msg.author}: ${msg.text}\n`;
+            const authorRole = (msg.author === this.config.BLUESKY_IDENTIFIER) ? "Bot" : "User";
+            conversationHistory += `${authorRole}: ${msg.text}\n`;
             if (msg.images && msg.images.length > 0) {
-              msg.images.forEach(image => { if (image.alt) conversationHistory += `[Image description: ${image.alt}]\n`; });
+              msg.images.forEach(image => {
+                if (image.alt) {
+                  conversationHistory += `[${authorRole} sent an image with description: ${image.alt}]\n`;
+                } else {
+                  conversationHistory += `[${authorRole} sent an image]\n`;
+                }
+              });
             }
           }
         }
