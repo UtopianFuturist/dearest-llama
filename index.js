@@ -2889,7 +2889,7 @@ ${baseInstruction}`;
 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. If you must truncate, end with '...'.
 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote (unless the quote is very short and clearly intended as such).
 3. Remove any sender attributions like 'Bot:', 'AI:', 'Nemotron says:', 'Llama says:', 'Assistant:', etc.
-4. Remove any double asterisks (\`**\`) used for emphasis if they are not standard Markdown for bolding that would render correctly.
+4. Remove ALL double asterisks (\`**\`) unconditionally.
 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text.
 6. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications.
 7. DO NOT add any structural markers like [SUMMARY FINDING WITH INVITATION] or [DETAILED ANALYSIS POINT N] unless they were explicitly part of the input text and seem intended for the user. If they seem like processing instructions, remove them.
@@ -3828,13 +3828,15 @@ PRIORITY 3: If not an image generation or self-help command, then consider other
    - "target_type": "image" if user asks to FIND/SEARCH FOR an "image", "picture", "photo" they or you posted/saw.
    - "keywords": EXCLUDE image generation verbs like "generate", "create", "draw", "make".
 
-2. If it's a GENERAL QUESTION that can be answered by a WEB SEARCH (including requests to find generic images not tied to conversation history):
+2. If it's a GENERAL QUESTION *clearly asking for external information* that can be answered by a WEB SEARCH (including requests to find generic images not tied to conversation history):
 {
   "intent": "web_search",
   "search_query": "optimized query for web search engine",
   "search_type": "webpage" | "image",
   "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null
 }
+   - Only use "web_search" if the user is explicitly asking a question that requires looking up external facts, current events, or generic images NOT related to conversation history.
+   - Simple statements, observations, or replies in a conversation should generally NOT be a "web_search".
    - "search_type": "image" if user asks for a generic image (e.g., "show me pictures of cats", "find images of Mars").
 
 3. If asking for NASA's Astronomy Picture of the Day (APOD):
@@ -3857,7 +3859,7 @@ PRIORITY 3: If not an image generation or self-help command, then consider other
   "intent": "giphy_search",
   "search_query": "keywords for GIPHY search"
 }
-7. If NEITHER of the above specific intents fit (and it's not an image generation command covered by PRIORITY 1), output:
+7. If NEITHER of the above specific intents fit (and it's not an image generation or self-help command), OR if the query is a general statement, observation, or conversational reply not explicitly asking for external information, output:
 { "intent": "none" }
 
 
@@ -3869,7 +3871,9 @@ IMPORTANT RULES for "search_history":
 - "search_scope": For "target_type": "image" AND "author_filter": "bot": If user asks for an image bot *previously created/generated* and not explicitly tied to a direct reply/chat, prefer "bot_gallery". If 'sent me' or part of shared chat, "conversation". Default "conversation" if ambiguous. Null otherwise.
 
 IMPORTANT RULES for "web_search":
-- Use "web_search" for general knowledge, current info/news, explanations not tied to prior interactions, or requests for generic images not from history.
+- Use "web_search" ONLY for explicit questions needing external knowledge (e.g., "What is X?", "How does Y work?", "Show me Z pictures") or very clear implicit requests for such information.
+- Conversational statements (e.g., "I think X is interesting", "That's cool", "Yes, I agree") should result in `{"intent": "none"}`.
+- Observations about the bot itself (e.g., "You seem to be working better now", "You can do many things") should result in `{"intent": "none"}` unless they are direct questions about capabilities (which would be `read_readme_for_self_help`).
 - "search_query": Essence of user's question. For news from a source (e.g., "recent news from NBC"), simplify to "[Source] news". For generic images, this is the image subject.
 - "search_type": Set to "image" if the user is asking for generic images (e.g., "find pictures of sunsets", "show me a photo of a dog"). Otherwise, "webpage".
 - "freshness_suggestion": For "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", "oneMonth". Smallest sensible period. Null if no strong cue.
@@ -3878,6 +3882,19 @@ CLARIFICATION ON IMAGE REQUESTS:
 - "Generate an image of a cat" -> { "intent": "none", "reason": "image_generation_command" }
 - "Find the image of a cat we were talking about yesterday" -> { "intent": "search_history", "target_type": "image", ... }
 - "Show me pictures of cats" -> { "intent": "web_search", "search_type": "image", "search_query": "cats" }
+
+NEW EXAMPLES to guide "none" intent for conversational statements:
+User Query: "I think your new autonomous API call feature is pretty neat."
+Your JSON Output: {"intent": "none"}
+
+User Query: "The weather is nice today."
+Your JSON Output: {"intent": "none"}
+
+User Query: "Yes, that makes sense." (in reply to the bot)
+Your JSON Output: {"intent": "none"}
+
+User Query: "Okay, I will test that scenario now."
+Your JSON Output: {"intent": "none"}
 
 Output ONLY the JSON object.`;
     // System prompt shortened for diff display
