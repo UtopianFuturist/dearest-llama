@@ -1470,17 +1470,20 @@ Your JSON Output: {"action": "none"}`;
         formattedText = formattedText.substring(1, formattedText.length - 1);
     }
 
-    formattedText = formattedText.replace(/\*\*/g, ""); // Remove double asterisks
-
-    // Truncate more intelligently (similar to utils.truncateResponse but simplified)
+    // Truncate if necessary (do this *before* final asterisk removal to avoid cutting in middle of a sequence)
     if (formattedText.length > maxLength) {
-        let truncated = formattedText.substring(0, maxLength - 3);
+        let truncated = formattedText.substring(0, maxLength - 3); // Reserve space for "..."
         const lastSpace = truncated.lastIndexOf(' ');
-        if (lastSpace > maxLength / 2) { // Only truncate at space if it's reasonably far in
+        // Only truncate at space if it's reasonably far in and makes sense
+        if (lastSpace > maxLength / 2 && lastSpace > 0) {
             truncated = truncated.substring(0, lastSpace);
         }
         formattedText = truncated + "...";
     }
+
+    // Remove double asterisks *after* potential truncation and other cleaning
+    formattedText = formattedText.replace(/\*\*/g, "");
+
     return formattedText.trim();
   }
 
