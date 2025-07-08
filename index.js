@@ -3808,8 +3808,8 @@ You will also be used to determine if an image-based query should trigger OCR an
 Output a JSON object. Choose ONE of the following intent structures:
 
 PRIORITY 1: Explicit Image Generation Command:
-- If the query is a direct command to GENERATE, CREATE, DRAW, or MAKE an image (e.g., "generate an image of X", "draw me Y", "create a picture of Z", "make an artwork showing..."), output:
-  { "intent": "none", "reason": "image_generation_command" }
+- If the query is a direct command to GENERATE, CREATE, DRAW, OR MAKE an image (e.g., "generate an image of X", "draw me Y", "create a picture of Z", "make an artwork showing..."), output:
+  {\\"intent\\": \\"none\\", \\"reason\\": \\"image_generation_command\\"}
 
 PRIORITY 2: Bot Self-Help/Capabilities Query:
 - If the user is asking about your (the bot's) capabilities, features, how to use you, or asking for help with how you work (e.g., "what can you do?", "how do I use the meme feature?", "help with bot commands"):
@@ -3863,7 +3863,7 @@ PRIORITY 3: If not an image generation or self-help command, then consider other
   "search_query": "keywords for GIPHY search"
 }
 7. If NEITHER of the above specific intents fit (and it's not an image generation or self-help command), OR if the query is a general statement, observation, or conversational reply not explicitly asking for external information, output:
-{ "intent": "none" }
+{\\"intent\\": \\"none\\"}
 
 
 IMPORTANT RULES for "search_history":
@@ -3888,16 +3888,16 @@ CLARIFICATION ON IMAGE REQUESTS:
 
 NEW EXAMPLES to guide "none" intent for conversational statements:
 User Query: "I think your new autonomous API call feature is pretty neat."
-Your JSON Output: {"intent": "none"}
+Your JSON Output: {\"intent\": \"none\"}
 
 User Query: "The weather is nice today."
-Your JSON Output: {"intent": "none"}
+Your JSON Output: {\"intent\": \"none\"}
 
 User Query: "Yes, that makes sense." (in reply to the bot)
-Your JSON Output: {"intent": "none"}
+Your JSON Output: {\"intent\": \"none\"}
 
 User Query: "Okay, I will test that scenario now."
-Your JSON Output: {"intent": "none"}
+Your JSON Output: {\"intent\": \"none\"}
 
 Output ONLY the JSON object.`;
     // System prompt shortened for diff display
