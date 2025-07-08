@@ -3875,8 +3875,8 @@ IMPORTANT RULES for "search_history":
 
 IMPORTANT RULES for "web_search":
 - Use "web_search" ONLY for explicit questions needing external knowledge (e.g., "What is X?", "How does Y work?", "Show me Z pictures") or very clear implicit requests for such information.
-- Conversational statements (e.g., "I think X is interesting", "That's cool", "Yes, I agree") should result in `{"intent": "none"}`.
-- Observations about the bot itself (e.g., "You seem to be working better now", "You can do many things") should result in `{"intent": "none"}` unless they are direct questions about capabilities (which would be `read_readme_for_self_help`).
+- Conversational statements (e.g., "I think X is interesting", "That's cool", "Yes, I agree") should result in {"intent": "none"}.
+- Observations about the bot itself (e.g., "You seem to be working better now", "You can do many things") should result in {"intent": "none"} unless they are direct questions about capabilities (which would be `read_readme_for_self_help`).
 - "search_query": Essence of user's question. For news from a source (e.g., "recent news from NBC"), simplify to "[Source] news". For generic images, this is the image subject.
 - "search_type": Set to "image" if the user is asking for generic images (e.g., "find pictures of sunsets", "show me a photo of a dog"). Otherwise, "webpage".
 - "freshness_suggestion": For "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", "oneMonth". Smallest sensible period. Null if no strong cue.
