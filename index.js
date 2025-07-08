@@ -203,6 +203,100 @@ class BaseBot {
     }
   }
 
+  async getClarificationSuggestion(userQueryText, conversationContext) {
+    const cacheKey = `${userQueryText}|${conversationContext || 'nocachekeycontext'}`;
+    const now = Date.now();
+
+    if (this.clarificationCache.has(cacheKey)) {
+      const cachedEntry = this.clarificationCache.get(cacheKey);
+      if (now - cachedEntry.timestamp < this.CLARIFICATION_CACHE_TTL) {
+        console.log("[ClarificationHelper] Using cached clarification suggestion.");
+        return cachedEntry.suggestion;
+      } else {
+        this.clarificationCache.delete(cacheKey);
+        console.log("[ClarificationHelper] Clarification suggestion cache expired, re-fetching.");
+      }
+    }
+
+    const systemPrompt = `You are an AI assistant that helps decide if a user's query needs clarification before the main bot attempts a full response or action.
+Analyze the USER QUERY provided.
+Consider if the query is too vague, ambiguous, could have multiple common interpretations leading to different actions, or is missing key information needed for a specific tool (like image generation, web search, etc.).
+
+Rules:
+1. If the query is clear and actionable, or a simple greeting/statement, respond with: {"needs_clarification": false, "clarification_question": null}
+2. If the query IS ambiguous or incomplete:
+   - Formulate a single, polite, concise clarifying question to ask the user.
+   - The question should help the user provide the missing information or specify their intent.
+   - Respond with: {"needs_clarification": true, "clarification_question": "Your clarifying question here."}
+3. Do not try to answer the user's query itself. Only decide if clarification is needed and provide the question.
+4. Focus on ambiguities that prevent the bot from choosing a correct tool or providing a relevant answer.
+
+Examples:
+User Query: "Tell me about it."
+Your JSON Output: {"needs_clarification": true, "clarification_question": "Could you please tell me what 'it' you're referring to?"}
+
+User Query: "Generate an image."
+Your JSON Output: {"needs_clarification": true, "clarification_question": "Sure, I can try to generate an image! What would you like me to generate?"}
+
+User Query: "Search for cats."
+Your JSON Output: {"needs_clarification": false, "clarification_question": null} // Actionable by search tool
+
+User Query: "What's up?"
+Your JSON Output: {"needs_clarification": false, "clarification_question": null} // Simple greeting
+
+User Query: "Can you help me?"
+Your JSON Output: {"needs_clarification": true, "clarification_question": "I can certainly try! What do you need help with?"}
+
+User Query: "The previous thing."
+Your JSON Output: {"needs_clarification": true, "clarification_question": "Could you remind me what specific 'previous thing' you're referring to?"}
+
+Respond ONLY with a single JSON object.`;
+
+    const userPromptForClarification = `USER QUERY: "${userQueryText}"\n\nYOUR JSON OUTPUT:`;
+
+    try {
+      console.log(`[ClarificationHelper] Calling Llama 3.2 Vision for ambiguity check on query: "${userQueryText}"`);
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: 'meta/llama-3.2-90b-vision-instruct',
+          messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPromptForClarification }],
+          temperature: 0.2,
+          max_tokens: 150,
+          stream: false
+        }),
+        customTimeout: 90000
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[ClarificationHelper] API error (${response.status}): ${errorText}`);
+        return { needs_clarification: false, clarification_question: null, error: "API error" };
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices[0].message && data.choices[0].message.content) {
+        let suggestionJson = data.choices[0].message.content.trim();
+        const match = suggestionJson.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+        if (match && match[1]) {
+          suggestionJson = match[1];
+        }
+        console.log(`[ClarificationHelper] Raw suggestion JSON: ${suggestionJson}`);
+        const suggestion = JSON.parse(suggestionJson);
+        if (suggestion && typeof suggestion.needs_clarification === 'boolean') {
+          this.clarificationCache.set(cacheKey, { suggestion, timestamp: now });
+          return suggestion;
+        }
+      }
+      console.error("[ClarificationHelper] Failed to parse suggestion or unexpected format.");
+      return { needs_clarification: false, clarification_question: null, error: "Parsing error" };
+    } catch (error) {
+      console.error(`[ClarificationHelper] Exception: ${error.message}`);
+      return { needs_clarification: false, clarification_question: null, error: error.message };
+    }
+  }
+
   async generateResponse(post, context) {
     throw new Error('generateResponse must be implemented by child class');
   }
@@ -1117,6 +1211,8 @@ class LlamaBot extends BaseBot {
     };
     this.visualEnhancementCache = new Map(); // Cache for visual enhancement suggestions
     this.VISUAL_ENHANCEMENT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+    this.clarificationCache = new Map();
+    this.CLARIFICATION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
   }
 
   async getVisualEnhancementSuggestion(userQueryText, botDraftText) {
@@ -1452,6 +1548,18 @@ Your JSON Output: {"action": "none"}`;
   async generateResponse(post, context) {
     // At the very start of LlamaBot.generateResponse, before any other logic
     console.log(`[EmbedCheck] Post URI: ${post.uri} - Full Embed Object:`, JSON.stringify(post.record?.embed, null, 2));
+
+    const userQueryText = post.record.text || ""; // Ensure userQueryText is defined early
+
+    // New: Check for clarification before any other processing
+    // For context, we could pass a summary of `context`, but for now, focusing on userQueryText
+    const clarificationSuggestion = await this.getClarificationSuggestion(userQueryText, null /* Pass context summary here if developed */);
+    if (clarificationSuggestion.needs_clarification && clarificationSuggestion.clarification_question) {
+      console.log(`[ClarificationHelper] Query needs clarification. Asking: "${clarificationSuggestion.clarification_question}"`);
+      await this.postReply(post, clarificationSuggestion.clarification_question);
+      return null; // Stop further processing, wait for user's response
+    }
+
     if (post.record?.embed) {
       console.log(`[EmbedCheck] Embed type: ${post.record.embed.$type}`);
       if (post.record.embed.images) {
