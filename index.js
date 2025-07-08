@@ -895,6 +895,7 @@ Respond ONLY with a single JSON object.`;
         uri: post.uri,
         author: post.author.handle,
         text: post.record.text,
+        createdAt: post.record.createdAt,
         images: extractImages(post.record, post.author.did) // Pass current post's author DID
       });
 
@@ -916,6 +917,7 @@ Respond ONLY with a single JSON object.`;
               uri: fullQuotedPost.uri,
               author: fullQuotedPost.author.handle,
               text: fullQuotedPost.record.text, // Text from the full record
+              createdAt: fullQuotedPost.record.createdAt,
               images: quotedImages
             });
           } else {
@@ -930,6 +932,7 @@ Respond ONLY with a single JSON object.`;
               uri: quotedPostUri,
               author: quotedPostRef.author?.handle || 'unknown author',
               text: liteRecordValue?.text,
+              createdAt: liteRecordValue?.createdAt, // This might be undefined if not on LiteRecord
               images: quotedImages
             });
           }
@@ -964,6 +967,7 @@ Respond ONLY with a single JSON object.`;
               uri: parentPostInThread.uri,
               author: parentPostInThread.author.handle,
               text: parentPostInThread.record.text,
+              createdAt: parentPostInThread.record.createdAt,
               images: parentImages
             });
 
@@ -996,6 +1000,7 @@ Respond ONLY with a single JSON object.`;
         uri: post.uri,
         author: post.author.handle,
         text: post.record.text,
+        createdAt: post.record.createdAt, // Also add here for fallback
         images: extractImagesFallback(post.record, post.author.did)
       }];
     }
@@ -1191,6 +1196,36 @@ Respond ONLY with a single JSON object.`;
 
   getModelName() {
     return 'Unknown Model';
+  }
+
+  async getLikers(postUri) {
+    if (!postUri) return [];
+    try {
+      let likers = [];
+      let cursor;
+      console.log(`[getLikers] Fetching likes for post URI: ${postUri}`);
+      do {
+        // Making sure to await the call to the agent's method
+        const response = await this.agent.api.app.bsky.feed.getLikes({ uri: postUri, limit: 100, cursor });
+        if (response.success && response.data.likes && response.data.likes.length > 0) {
+          likers = likers.concat(response.data.likes.map(like => like.actor.did));
+          cursor = response.data.cursor;
+          console.log(`[getLikers] Fetched a page of ${response.data.likes.length} likes. Total likers so far: ${likers.length}. Cursor: ${cursor}`);
+        } else {
+          if (!response.success) {
+            console.warn(`[getLikers] API call to getLikes was not successful for ${postUri}. Response:`, response);
+          } else if (!response.data.likes || response.data.likes.length === 0) {
+            console.log(`[getLikers] No more likes found for ${postUri} on this page or empty likes array.`);
+          }
+          cursor = null; // Stop if no success or no likes data or empty likes array
+        }
+      } while (cursor);
+      console.log(`[getLikers] Total likers found for ${postUri}: ${likers.length}`);
+      return likers;
+    } catch (error) {
+      console.error(`[getLikers] Error fetching likes for URI ${postUri}:`, error);
+      return []; // Return empty array on error
+    }
   }
 }
 
@@ -1916,6 +1951,42 @@ Do not make up information not present in the search results. Keep the response 
         return null; // End of image-based article search flow
       }
       // ===== Image-based Article Search Flow (Revised: OCR is primary if image found) =====
+      // This entire block needs to be before the like check, or the like check needs to be careful not to run if this block runs and returns null.
+      // For now, let's assume this block runs and might return null, stopping further processing.
+
+      // New Like Check Logic - Placed before major processing branches like ImageArticleFlow or SearchHistoryIntent
+      // but after clarification check.
+      let userLikedBotsPreviousReply = false;
+      // botsPreviousReplyUri is not strictly needed outside this block for now
+      // let botsPreviousReplyUri = null;
+
+      if (context && context.length >= 2) {
+        const currentUserPost = context[context.length - 1]; // This is 'post'
+        const potentialBotsReply = context[context.length - 2];
+
+        if (potentialBotsReply.author === this.config.BLUESKY_IDENTIFIER &&
+            post.record?.reply?.parent?.uri === potentialBotsReply.uri &&
+            currentUserPost.author !== this.config.BLUESKY_IDENTIFIER && // Current post is from user
+            post.author.did) { // Ensure we have the current user's DID
+
+          // botsPreviousReplyUri = potentialBotsReply.uri; // Store if needed later
+          console.log(`[LikeCheck] User ${post.author.handle} (DID: ${post.author.did}) replied to bot's message ${potentialBotsReply.uri}. Checking if user liked it.`);
+          try {
+            const likers = await this.getLikers(potentialBotsReply.uri);
+            if (likers.includes(post.author.did)) {
+              userLikedBotsPreviousReply = true;
+              console.log(`[LikeCheck] User ${post.author.handle} liked the bot's previous message ${potentialBotsReply.uri}.`);
+            } else {
+              console.log(`[LikeCheck] User ${post.author.handle} did NOT like the bot's previous message ${potentialBotsReply.uri}. Likers: ${likers.join(', ')}`);
+            }
+          } catch (e) {
+            console.error(`[LikeCheck] Error calling getLikers for ${potentialBotsReply.uri}:`, e);
+          }
+        }
+      }
+      // End of New Like Check Logic
+
+
       if (isImageArticleQuery) {
         console.log(`[ImageArticleFlow] 'isImageArticleQuery' is true. Attempting to find and OCR image.`);
         let textForSearch = null;
@@ -2763,7 +2834,18 @@ Do not make up information not present in the search results. Keep the response 
         if (context && context.length > 0) {
           for (const msg of context) {
             const authorRole = (msg.author === this.config.BLUESKY_IDENTIFIER) ? "Bot" : "User";
-            conversationHistory += `${authorRole}: ${msg.text}\n`;
+            let timestampStr = "";
+            if (msg.createdAt) {
+              try {
+                // Format: (Short Month Day, Year, HH:MM AM/PM) e.g. (Dec 25, 2023, 05:30 PM)
+                timestampStr = ` (${new Date(msg.createdAt).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })})`;
+              } catch (e) {
+                console.warn(`[TimestampFormat] Error formatting date: ${msg.createdAt}`, e);
+                // Keep timestampStr empty or add a generic error placeholder if preferred
+                timestampStr = " (timestamp unavailable)";
+              }
+            }
+            conversationHistory += `${authorRole}${timestampStr}: ${msg.text}\n`;
             if (msg.images && msg.images.length > 0) {
               msg.images.forEach(image => {
                 if (image.alt) {
@@ -2797,11 +2879,21 @@ Do not make up information not present in the search results. Keep the response 
       }
 
       let nemotronUserPrompt = "";
+      const currentDateTime = new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'full' });
       const baseInstruction = `Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. For detailed topics, you can generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
+
+      const dateTimePreamble = `Current date and time is ${currentDateTime}.\n\n`;
+
+      let likeAcknowledgementPreamble = "";
+      if (userLikedBotsPreviousReply) {
+        // This preamble provides context to the LLM. The system prompt (to be updated later)
+        // will instruct the LLM on how to use this information subtly.
+        likeAcknowledgementPreamble = "USER FEEDBACK: The user you are replying to recently liked your previous message in this thread. You can acknowledge this positively and subtly if it feels natural (e.g., 'Thanks for the feedback on my last message!' or 'Glad you liked my last response!'), before addressing their current query. This is just context; don't make it the main focus unless the user's current query is about the like itself.\n\n";
+      }
 
       if (userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "") {
         // Profile analysis prompt
-        nemotronUserPrompt = `The user's question is: "${post.record.text}"
+        nemotronUserPrompt = `${dateTimePreamble}${likeAcknowledgementPreamble}The user's question is: "${post.record.text}"
 
 Activate your "User Profile Analyzer" capability. Based on the "USER'S RECENT BLUESKY ACTIVITY" provided below, generate your response in two parts:
 
@@ -2826,10 +2918,10 @@ Your structured response (Summary with Invitation, then Detailed Points):
 ${baseInstruction}`;
       } else {
         // Standard prompt (no specific profile context fetched)
-        nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
+        nemotronUserPrompt = `${dateTimePreamble}${likeAcknowledgementPreamble}Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
       }
 
-      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}`);
+      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}. Like Preamble: ${!!likeAcknowledgementPreamble}`);
       const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
