@@ -886,38 +886,39 @@ Respond ONLY with a single JSON object.`;
 
         return images.map((img, idx) => {
           let imageUrl = img.fullsize || img.thumb;
-          // More detailed logging for property access
-          console.log(`[extractImages] Processing image ${idx}: Direct fullsize/thumb URL: ${imageUrl}.`);
-          console.log(`[extractImages] Image ${idx} Author DID for this image: ${authorDid}`);
-          console.log(`[extractImages] Image ${idx} full object: ${JSON.stringify(img, null, 2)}`);
+          let cidString = null;
 
-          const imgDotImage = img.image;
-          console.log(`[extractImages] Image ${idx} - img.image (type: ${typeof imgDotImage}): ${JSON.stringify(imgDotImage, null, 2)}`);
+          // Log initial state for this image
+          console.log(`[extractImages DEBUG] Processing image ${idx}: Direct fullsize/thumb: ${imageUrl}, Author DID: ${authorDid}`);
+          console.log(`[extractImages DEBUG] Image ${idx} object: ${JSON.stringify(img, null, 2)}`);
 
-          let imgDotImageDotRef;
-          if (imgDotImage && typeof imgDotImage === 'object' && imgDotImage !== null) { // Check for null explicitly
-            imgDotImageDotRef = imgDotImage.ref;
+
+          // Attempt to get CID string from the .ref object (which might be a CID instance)
+          if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') {
+            cidString = img.image.ref.toString();
+            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.ref.toString(): ${cidString}`);
           }
-          console.log(`[extractImages] Image ${idx} - img.image.ref (type: ${typeof imgDotImageDotRef}): ${JSON.stringify(imgDotImageDotRef, null, 2)}`);
 
-          let refLinkValue;
-          if (imgDotImageDotRef && typeof imgDotImageDotRef === 'object' && imgDotImageDotRef !== null) { // Check for null explicitly
-            refLinkValue = imgDotImageDotRef.$link;
+          // Fallback: Check for a direct $link property on img.image.ref (as seen in some LiteRecord contexts)
+          // This is less likely for the direct notification embed based on recent logs, but kept for robustness.
+          if (!cidString && img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
+            cidString = img.image.ref.$link;
+            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.ref.$link: ${cidString}`);
           }
-          console.log(`[extractImages] Image ${idx} - img.image.ref.$link (type: ${typeof refLinkValue}): ${refLinkValue}`);
 
-          const stringCidValue = imgDotImage && typeof imgDotImage === 'object' && imgDotImage !== null && typeof imgDotImage.cid === 'string' ? imgDotImage.cid : undefined;
-          console.log(`[extractImages] Image ${idx} - img.image.cid (type: ${typeof stringCidValue}): ${stringCidValue}`);
+          // Fallback: Check for a direct cid string on img.image (less common for blobs, but good to have)
+          if (!cidString && img.image && typeof img.image.cid === 'string') {
+            cidString = img.image.cid;
+            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.cid: ${cidString}`);
+          }
 
-          // Now use these variables in conditions
-          if (!imageUrl && authorDid && refLinkValue) {
-            console.log(`[extractImages] Image ${idx}: Entered branch for refLinkValue. Value: ${refLinkValue}`);
-            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${refLinkValue}`;
-          } else if (!imageUrl && authorDid && stringCidValue) {
-            console.log(`[extractImages] Image ${idx}: Entered branch for stringCidValue. Value: ${stringCidValue}`);
-            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${stringCidValue}`;
+          // If we have a CID string and an author DID, construct the URL
+          if (!imageUrl && authorDid && cidString) {
+            console.log(`[extractImages] Image ${idx}: Constructing URL. Author DID: ${authorDid}, CID: ${cidString}`);
+            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
           } else if (!imageUrl) {
-            console.log(`[extractImages] Image ${idx}: Conditions for CID URL construction not met. authorDid: ${authorDid}, refLinkValue: ${refLinkValue}, stringCidValue: ${stringCidValue}`);
+            // This log helps if no URL was formed via direct properties or CID methods.
+            console.log(`[extractImages] Image ${idx}: Could not determine imageUrl. authorDid: ${authorDid}, cidString: ${cidString}, Raw img.image: ${JSON.stringify(img.image, null, 2)}`);
           }
 
           console.log(`[extractImages] Image ${idx}: Final imageUrl for this image: ${imageUrl}, Alt: ${img.alt || ''}`);
