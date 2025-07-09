@@ -886,23 +886,40 @@ Respond ONLY with a single JSON object.`;
 
         return images.map((img, idx) => {
           let imageUrl = img.fullsize || img.thumb;
-          // New Log 3: Inside map, before CID construction
-          console.log(`[extractImages] Processing image ${idx}: Direct fullsize/thumb URL: ${imageUrl}. Image object: ${JSON.stringify(img, null, 2)}`);
+          // More detailed logging for property access
+          console.log(`[extractImages] Processing image ${idx}: Direct fullsize/thumb URL: ${imageUrl}.`);
+          console.log(`[extractImages] Image ${idx} Author DID for this image: ${authorDid}`);
+          console.log(`[extractImages] Image ${idx} full object: ${JSON.stringify(img, null, 2)}`);
 
-          if (!imageUrl && authorDid && img.image?.ref?.$link) {
-            // New Log 4: Attempting CID construction (ref link)
-            console.log(`[extractImages] Image ${idx}: Attempting URL construction from ref.$link. Author DID: ${authorDid}, CIDLink: ${img.image.ref.$link}`);
-            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${img.image.ref.$link}`;
-          } else if (!imageUrl && authorDid && img.image?.cid) { // String CID
-            // New Log 5: Attempting CID construction (string CID)
-            console.log(`[extractImages] Image ${idx}: Attempting URL construction from string CID. Author DID: ${authorDid}, CID: ${img.image.cid}`);
-            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${img.image.cid}`;
+          const imgDotImage = img.image;
+          console.log(`[extractImages] Image ${idx} - img.image (type: ${typeof imgDotImage}): ${JSON.stringify(imgDotImage, null, 2)}`);
+
+          let imgDotImageDotRef;
+          if (imgDotImage && typeof imgDotImage === 'object' && imgDotImage !== null) { // Check for null explicitly
+            imgDotImageDotRef = imgDotImage.ref;
+          }
+          console.log(`[extractImages] Image ${idx} - img.image.ref (type: ${typeof imgDotImageDotRef}): ${JSON.stringify(imgDotImageDotRef, null, 2)}`);
+
+          let refLinkValue;
+          if (imgDotImageDotRef && typeof imgDotImageDotRef === 'object' && imgDotImageDotRef !== null) { // Check for null explicitly
+            refLinkValue = imgDotImageDotRef.$link;
+          }
+          console.log(`[extractImages] Image ${idx} - img.image.ref.$link (type: ${typeof refLinkValue}): ${refLinkValue}`);
+
+          const stringCidValue = imgDotImage && typeof imgDotImage === 'object' && imgDotImage !== null && typeof imgDotImage.cid === 'string' ? imgDotImage.cid : undefined;
+          console.log(`[extractImages] Image ${idx} - img.image.cid (type: ${typeof stringCidValue}): ${stringCidValue}`);
+
+          // Now use these variables in conditions
+          if (!imageUrl && authorDid && refLinkValue) {
+            console.log(`[extractImages] Image ${idx}: Entered branch for refLinkValue. Value: ${refLinkValue}`);
+            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${refLinkValue}`;
+          } else if (!imageUrl && authorDid && stringCidValue) {
+            console.log(`[extractImages] Image ${idx}: Entered branch for stringCidValue. Value: ${stringCidValue}`);
+            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${stringCidValue}`;
           } else if (!imageUrl) {
-            // New Log 6: Conditions for CID construction not met
-              console.log(`[extractImages] Image ${idx}: Conditions for CID URL construction not met. authorDid: ${authorDid}, img.image: ${JSON.stringify(img.image, null, 2)}`);
+            console.log(`[extractImages] Image ${idx}: Conditions for CID URL construction not met. authorDid: ${authorDid}, refLinkValue: ${refLinkValue}, stringCidValue: ${stringCidValue}`);
           }
 
-          // New Log 7: Final imageUrl and alt text before returning from map
           console.log(`[extractImages] Image ${idx}: Final imageUrl for this image: ${imageUrl}, Alt: ${img.alt || ''}`);
           return { alt: img.alt || '', url: imageUrl };
 
