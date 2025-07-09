@@ -2769,15 +2769,18 @@ If the search results do not provide a clear answer, state that you couldn't fin
 Do not make up information not present in the search results. Keep the response suitable for a social media post.`;
 
           if (searchResults && searchResults.length > 0) {
-            const resultsText = searchResults.map((res, idx) =>
-              `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${res.snippet}`
-            ).join("\n\n---\n");
-            nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nWeb Search Results:\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
+            const topResults = searchResults.slice(0, 2); // Take top 2 results
+            const resultsText = topResults.map((res, idx) => {
+              const truncatedSnippet = res.snippet ? res.snippet.substring(0, 500) : "No snippet available.";
+              return `Result ${idx + 1}:\nTitle: ${res.title}\nURL: ${res.url}\nSnippet: ${truncatedSnippet}${res.snippet && res.snippet.length > 500 ? "..." : ""}`;
+            }).join("\n\n---\n");
+            nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nWeb Search Results (Top ${topResults.length}):\n${resultsText}\n\nBased on these results, please answer the user's original question.`;
+            console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis (using top ${topResults.length} results, snippets truncated to 500 chars): "${nemotronWebServicePrompt.substring(0, 400)}..."`);
           } else {
             nemotronWebServicePrompt = `User's original question: "${userQueryText}"\nSearch query sent to web: "${searchIntent.search_query}"\n\nNo clear results were found from the web search. Please inform the user politely that you couldn't find information for their query via web search and suggest they rephrase or try a search engine directly.`;
+            console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis (no results found): "${nemotronWebServicePrompt.substring(0, 300)}..."`);
           }
 
-          console.log(`[WebSearchFlow] Nemotron prompt for web search synthesis: "${nemotronWebServicePrompt.substring(0, 300)}..."`);
           const nimWebResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
