@@ -909,63 +909,128 @@ Respond ONLY with a single JSON object.`;
 
       // Helper to extract image details from a record's embed
       // Now accepts authorDid to construct URLs if necessary
-      const extractImages = (record, authorDid) => {
-        const images = record?.embed?.images || record?.embed?.media?.images || [];
-        // New Log 1: Initial call and raw images found
-        console.log(`[extractImages] Called. Author DID: ${authorDid}. Raw images found in embed: ${images.length}`);
-        if (images.length > 0) {
-          // New Log 2: Details of the first raw image object (if any) for inspection
-          console.log(`[extractImages] Details of first raw image object: ${JSON.stringify(images[0], null, 2)}`);
+      // Renamed from extractImages to extractEmbedDetails
+      const extractEmbedDetails = (record, authorDid) => {
+        const embeds = [];
+        const rawEmbed = record?.embed;
+
+        if (!rawEmbed) {
+          // console.log(`[extractEmbedDetails] No rawEmbed found in record for author DID: ${authorDid}.`);
+          return embeds;
         }
 
-        return images.map((img, idx) => {
-          let imageUrl = img.fullsize || img.thumb;
-          let cidString = null;
+        // console.log(`[extractEmbedDetails] Processing rawEmbed type: ${rawEmbed.$type} for author DID: ${authorDid}`);
 
-          // Log initial state for this image
-          console.log(`[extractImages DEBUG] Processing image ${idx}: Direct fullsize/thumb: ${imageUrl}, Author DID: ${authorDid}`);
-          console.log(`[extractImages DEBUG] Image ${idx} object: ${JSON.stringify(img, null, 2)}`);
+        // Handle app.bsky.embed.images (and #view variant)
+        if (rawEmbed.$type === 'app.bsky.embed.images' || rawEmbed.$type === 'app.bsky.embed.images#view') {
+          const images = rawEmbed.images || [];
+          // console.log(`[extractEmbedDetails] Found ${images.length} direct images.`);
+          images.forEach((img, idx) => {
+            let imageUrl = img.fullsize || img.thumb;
+            let cidString = null;
 
+            if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') {
+              cidString = img.image.ref.toString();
+            } else if (img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
+              cidString = img.image.ref.$link;
+            } else if (img.image && typeof img.image.cid === 'string') {
+              cidString = img.image.cid;
+            }
 
-          // Attempt to get CID string from the .ref object (which might be a CID instance)
-          if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') {
-            cidString = img.image.ref.toString();
-            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.ref.toString(): ${cidString}`);
+            if (!imageUrl && authorDid && cidString) {
+              imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
+            }
+
+            if (imageUrl) {
+              embeds.push({
+                type: 'image',
+                url: imageUrl,
+                alt: img.alt || ''
+              });
+              // console.log(`[extractEmbedDetails] Added image embed: ${imageUrl}`);
+            } else {
+              // console.log(`[extractEmbedDetails] Could not determine URL for image ${idx}. CID: ${cidString}, AuthorDID: ${authorDid}`);
+            }
+          });
+        }
+
+        // Handle app.bsky.embed.external (and #view variant)
+        else if (rawEmbed.$type === 'app.bsky.embed.external' || rawEmbed.$type === 'app.bsky.embed.external#view') {
+          const external = rawEmbed.external;
+          if (external && external.uri) {
+            embeds.push({
+              type: 'external',
+              uri: external.uri,
+              title: external.title || '',
+              description: external.description || '',
+              thumb: external.thumb?.cid ? `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${external.thumb.cid}` : (external.thumb?.uri || null) // Assuming thumb might have cid or uri
+            });
+            // console.log(`[extractEmbedDetails] Added external embed: ${external.uri}`);
+          }
+        }
+
+        // Handle app.bsky.embed.record (and #view variant)
+        else if (rawEmbed.$type === 'app.bsky.embed.record' || rawEmbed.$type === 'app.bsky.embed.record#view') {
+          const recordEmbed = rawEmbed.record;
+          if (recordEmbed && recordEmbed.uri) {
+            // For simple record embeds, we might not have full text or author handle directly without another fetch.
+            // The 'recordEmbed' here is often a LiteRecord.
+            embeds.push({
+              type: 'record',
+              recordUri: recordEmbed.uri,
+              recordCid: recordEmbed.cid || null,
+              // Attempt to get author/text if LiteRecord provides them (might be partial or missing)
+              recordAuthor: recordEmbed.author?.handle || null,
+              recordText: recordEmbed.value?.text || null, // LiteRecord often has 'value' for the actual record content
+            });
+            // console.log(`[extractEmbedDetails] Added record embed: ${recordEmbed.uri}`);
+          }
+        }
+
+        // Handle app.bsky.embed.recordWithMedia (and #view variant)
+        else if (rawEmbed.$type === 'app.bsky.embed.recordWithMedia' || rawEmbed.$type === 'app.bsky.embed.recordWithMedia#view') {
+          const recordPart = rawEmbed.record?.record; // Note the double .record for the actual record data
+          const mediaPart = rawEmbed.media;
+          let extractedMedia = null;
+
+          if (mediaPart) {
+            if ((mediaPart.$type === 'app.bsky.embed.images' || mediaPart.$type === 'app.bsky.embed.images#view') && mediaPart.images) {
+              const images = mediaPart.images.map(img => {
+                let imageUrl = img.fullsize || img.thumb;
+                let cidString = null;
+                if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') cidString = img.image.ref.toString();
+                else if (img.image?.cid) cidString = img.image.cid;
+                if (!imageUrl && authorDid && cidString) imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
+                return imageUrl ? { type: 'image', url: imageUrl, alt: img.alt || '' } : null;
+              }).filter(Boolean);
+              if (images.length > 0) extractedMedia = { type: 'images', images: images };
+            } else if ((mediaPart.$type === 'app.bsky.embed.external' || mediaPart.$type === 'app.bsky.embed.external#view') && mediaPart.external) {
+              extractedMedia = {
+                type: 'external',
+                uri: mediaPart.external.uri,
+                title: mediaPart.external.title || '',
+                description: mediaPart.external.description || '',
+                thumb: mediaPart.external.thumb?.cid ? `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${mediaPart.external.thumb.cid}` : (mediaPart.external.thumb?.uri || null)
+              };
+            }
           }
 
-          // Fallback: Check for a direct $link property on img.image.ref (as seen in some LiteRecord contexts)
-          // This is less likely for the direct notification embed based on recent logs, but kept for robustness.
-          if (!cidString && img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
-            cidString = img.image.ref.$link;
-            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.ref.$link: ${cidString}`);
+          if (recordPart && recordPart.uri) {
+            embeds.push({
+              type: 'recordWithMedia',
+              record: {
+                uri: recordPart.uri,
+                cid: recordPart.cid || null,
+                authorHandle: recordPart.author?.handle || null,
+                textSnippet: recordPart.value?.text ? String(recordPart.value.text).substring(0, 100) : null,
+              },
+              media: extractedMedia
+            });
+            // console.log(`[extractEmbedDetails] Added recordWithMedia embed: Record URI ${recordPart.uri}, Media type: ${extractedMedia?.type}`);
           }
-
-          // Fallback: Check for a direct cid string on img.image (less common for blobs, but good to have)
-          if (!cidString && img.image && typeof img.image.cid === 'string') {
-            cidString = img.image.cid;
-            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.cid: ${cidString}`);
-          }
-
-          // If we have a CID string and an author DID, construct the URL
-          if (!imageUrl && authorDid && cidString) {
-            console.log(`[extractImages] Image ${idx}: Constructing URL. Author DID: ${authorDid}, CID: ${cidString}`);
-            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
-          } else if (!imageUrl) {
-            // This log helps if no URL was formed via direct properties or CID methods.
-            console.log(`[extractImages] Image ${idx}: Could not determine imageUrl. authorDid: ${authorDid}, cidString: ${cidString}, Raw img.image: ${JSON.stringify(img.image, null, 2)}`);
-          }
-
-          console.log(`[extractImages] Image ${idx}: Final imageUrl for this image: ${imageUrl}, Alt: ${img.alt || ''}`);
-          return { alt: img.alt || '', url: imageUrl };
-
-        }).filter(imgObject => { // Changed variable name to avoid confusion with 'img' in map
-          const shouldRetain = !!imgObject.url;
-          if (!shouldRetain) {
-            // New Log 8: Image being filtered out
-            console.log(`[extractImages] Filtering out image due to missing/falsy URL. Image object details: ${JSON.stringify(imgObject, null, 2)}`);
-          }
-          return shouldRetain;
-        });
+        }
+        // console.log(`[extractEmbedDetails] Finished processing for author DID: ${authorDid}. Total embeds extracted: ${embeds.length}`);
+        return embeds;
       };
 
       // Add current post details
@@ -974,44 +1039,37 @@ Respond ONLY with a single JSON object.`;
         author: post.author.handle,
         text: post.record.text,
         createdAt: post.record.createdAt,
-        images: extractImages(post.record, post.author.did) // Pass current post's author DID
+        embeds: extractEmbedDetails(post.record, post.author.did) // Use new function and key 'embeds'
       });
 
       // Handle quoted post
       if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed.record) {
-        const quotedPostRef = post.record.embed.record; // This is a LiteRecord, might not have .record.text directly
+        const quotedPostRef = post.record.embed.record;
         const quotedPostUri = quotedPostRef.uri;
-        console.log(`[getReplyContext] Quoted post detected: ${quotedPostUri}`);
+        // console.log(`[getReplyContext] Quoted post detected: ${quotedPostUri}`);
         try {
-          // Fetch the full quoted post to get its record and author DID for image URL construction
           const { data: quotedPostThread } = await this.agent.getPostThread({ uri: quotedPostUri, depth: 0 });
           const fullQuotedPost = quotedPostThread?.thread?.post;
 
           if (fullQuotedPost && fullQuotedPost.record && fullQuotedPost.author) {
-            console.log(`[getReplyContext] Successfully fetched full quoted post by ${fullQuotedPost.author.handle}`);
-            const quotedImages = extractImages(fullQuotedPost.record, fullQuotedPost.author.did);
-
+            // console.log(`[getReplyContext] Successfully fetched full quoted post by ${fullQuotedPost.author.handle}`);
             conversation.unshift({ // Add quoted post to the beginning
               uri: fullQuotedPost.uri,
               author: fullQuotedPost.author.handle,
-              text: fullQuotedPost.record.text, // Text from the full record
+              text: fullQuotedPost.record.text,
               createdAt: fullQuotedPost.record.createdAt,
-              images: quotedImages
+              embeds: extractEmbedDetails(fullQuotedPost.record, fullQuotedPost.author.did) // Use new function
             });
           } else {
-            console.warn(`[getReplyContext] Could not fetch full details for quoted post ${quotedPostUri}. Attempting to use LiteRecord info.`);
-            // Fallback: Try to use info from the LiteRecord if available
-            // Note: LiteRecord value might be a postRecord or just a basic view.
-            // Author DID might not be present on LiteRecord directly, so image URLs from CID might fail.
-            const liteRecordValue = quotedPostRef.value || {}; // .value should be the actual record content
-            const liteRecordAuthorDid = quotedPostRef.author?.did; // Attempt to get author DID from the reference
-            const quotedImages = extractImages({ embed: liteRecordValue.embed }, liteRecordAuthorDid); // Pass a compatible structure
+            // console.warn(`[getReplyContext] Could not fetch full details for quoted post ${quotedPostUri}. Using LiteRecord info.`);
+            const liteRecordValue = quotedPostRef.value || {};
+            const liteRecordAuthorDid = quotedPostRef.author?.did;
              conversation.unshift({
               uri: quotedPostUri,
               author: quotedPostRef.author?.handle || 'unknown author',
               text: liteRecordValue?.text,
-              createdAt: liteRecordValue?.createdAt, // This might be undefined if not on LiteRecord
-              images: quotedImages
+              createdAt: liteRecordValue?.createdAt,
+              embeds: extractEmbedDetails({ embed: liteRecordValue.embed }, liteRecordAuthorDid) // Use new function
             });
           }
         } catch (error) {
@@ -1033,20 +1091,17 @@ Respond ONLY with a single JSON object.`;
             if (!parentPostInThread) break;
 
             if (!parentPostInThread.record || !parentPostInThread.author) {
-                console.warn(`[getReplyContext] Parent post ${currentUri} missing record or author data. Skipping.`);
+                // console.warn(`[getReplyContext] Parent post ${currentUri} missing record or author data. Skipping.`);
                 currentUri = parentPostInThread.record?.reply?.parent?.uri;
                 continue;
             }
-
-            // Use extractImages with the parent post's author DID
-            const parentImages = extractImages(parentPostInThread.record, parentPostInThread.author.did);
 
             conversation.unshift({
               uri: parentPostInThread.uri,
               author: parentPostInThread.author.handle,
               text: parentPostInThread.record.text,
               createdAt: parentPostInThread.record.createdAt,
-              images: parentImages
+              embeds: extractEmbedDetails(parentPostInThread.record, parentPostInThread.author.did) // Use new function
             });
 
             currentUri = parentPostInThread.record?.reply?.parent?.uri;
