@@ -2389,30 +2389,61 @@ Do not make up information not present in the search results. Keep the response 
         let nemotronSearchPrompt = "";
         if (matches.length > 0) {
           const topMatch = matches[0]; // Get the single best match
-          // const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`; // URL will be part of the embed
+          let foundPostToEmbed = null; // Will be set if we are doing a generic embed
+          let searchSystemPrompt;
 
-          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
-          if (searchIntent.recency_cue) {
-            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+          // Check if the user is asking about the bot's immediately preceding post with an embed
+          const isReplyToBotRecentEmbed =
+            topMatch.authorDid === this.agent.did &&
+            topMatch.uri === post.record?.reply?.parent?.uri &&
+            topMatch.embedDetails &&
+            (topMatch.embedDetails.type === 'external' || topMatch.embedDetails.type === 'image' || (topMatch.embedDetails.type === 'recordWithMedia' && topMatch.embedDetails.media));
+
+          if (isReplyToBotRecentEmbed) {
+            console.log(`[SearchHistoryRefined] User is asking about bot's own recent embed. URI: ${topMatch.uri}`);
+            let embedDescription = `an embed of type '${topMatch.embedDetails.type}'`;
+            if (topMatch.embedDetails.type === 'external' && topMatch.embedDetails.external) {
+              embedDescription = `the link titled "${topMatch.embedDetails.external.title || 'Untitled'}" (${topMatch.embedDetails.external.uri})`;
+              // Attempt to infer original Giphy search query if title suggests it
+              if (topMatch.embedDetails.external.title && topMatch.embedDetails.external.title.toLowerCase().includes("giphy gif for")) {
+                const inferredQuery = topMatch.embedDetails.external.title.split("GIPHY GIF for")[1]?.trim().replace(/"/g, '');
+                if (inferredQuery) embedDescription += ` (related to query: "${inferredQuery}")`;
+              } else if (topMatch.embedDetails.external.description && topMatch.embedDetails.external.description.toLowerCase().includes("via giphy for:")) {
+                const inferredQuery = topMatch.embedDetails.external.description.split("Via GIPHY for:")[1]?.trim().replace(/"/g, '');
+                 if (inferredQuery) embedDescription += ` (related to query: "${inferredQuery}")`;
+              }
+            } else if (topMatch.embedDetails.type === 'image' && topMatch.embedDetails.images && topMatch.embedDetails.images.length > 0) {
+              embedDescription = `the image described as "${topMatch.embedDetails.images[0].alt || 'No description'}"`;
+            }
+
+            searchSystemPrompt = `You are a helpful AI assistant. The user is asking a question ("${userQueryText}") about a specific item you (the bot) just posted. That item was: ${embedDescription}.
+Directly answer their question. For example, if they ask "Can you see it?", respond affirmatively and reference the item. If they ask "What was that for?", explain the context if you know it (e.g., from the inferred query).
+Be conversational and direct. Do NOT simply state "I found this post."`;
+
+            nemotronSearchPrompt = `User's question about my recent post: "${userQueryText}"
+My recent post contained: ${embedDescription}.
+Please provide a direct, conversational answer to the user.`;
+            // No foundPostToEmbed in this case, as we want a textual answer, not re-embedding.
+
+          } else { // Standard search history logic (embed the found post or provide URL)
+            let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+            if (searchIntent.recency_cue) {
+              userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+            }
+            userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
+
+            nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
+
+            if (topMatch.uri && topMatch.cid) {
+                 foundPostToEmbed = { uri: topMatch.uri, cid: topMatch.cid };
+                 searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and confirmation that a relevant post was found. Formulate a brief, natural confirmation message (e.g., 'I found this post for you:', 'This might be what you were looking for:'). The actual post will be embedded by the system, so DO NOT include the URL or any details of the post in your text response. Just a short introductory phrase.";
+            } else {
+                console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
+                const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
+                nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+                searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and the result of your search (a URL). Your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself.";
+            }
           }
-          userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
-
-          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
-
-          // Prepare details for embedding the found post
-          const foundPostToEmbed = {
-            uri: topMatch.uri,
-            cid: topMatch.cid
-          };
-
-          if (!foundPostToEmbed.uri || !foundPostToEmbed.cid) {
-            console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
-            // Fallback to old behavior if critical embed info is missing
-            const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
-            nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
-          }
-
-
         } else { // NO MATCHES FOUND
           let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
@@ -2421,13 +2452,11 @@ Do not make up information not present in the search results. Keep the response 
           userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
 
           nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched ${searchPerformed} but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description ${searchPerformed} from ${searchIntent.recency_cue || 'recently'} but couldn't find it. Could you try different keywords?"`;
+          searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and informed that nothing was found. State that clearly and politely.";
         }
 
         console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
-
-        const searchSystemPrompt = matches.length > 0 && matches[0].uri && matches[0].cid
-          ? "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and confirmation that a relevant post was found. Formulate a brief, natural confirmation message (e.g., 'I found this post for you:', 'This might be what you were looking for:'). The actual post will be embedded by the system, so DO NOT include the URL or any details of the post in your text response. Just a short introductory phrase."
-          : "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and the result of your search. If nothing was found, state that clearly and politely. If a post URL was found (but cannot be embedded), your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself.";
+        console.log(`[SearchHistory] System prompt: "${searchSystemPrompt.substring(0,200)}..."`);
 
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimSearchResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -4087,7 +4116,7 @@ PRIORITY 2: Bot Self-Help/Capabilities Query:
 }
 
 PRIORITY 3: If not an image generation or self-help command, then consider other intents:
-1. If searching PAST INTERACTIONS (conversation history, bot's gallery) for something specific the user or bot previously posted or saw:
+1. If the user is asking to FIND or RECALL a *specific item* (like a post, image, or link) from PAST INTERACTIONS (conversation history, bot's gallery), or asking about the content of such a specific past item:
 {
   "intent": "search_history",
   "target_type": "image" | "link" | "post" | "message" | "unknown",
@@ -4096,7 +4125,8 @@ PRIORITY 3: If not an image generation or self-help command, then consider other
   "recency_cue": "textual cue for recency" | null,
   "search_scope": "bot_gallery" | "conversation" | null
 }
-   - "target_type": "image" if user asks to FIND/SEARCH FOR an "image", "picture", "photo" they or you posted/saw.
+   - "target_type": "image" if user asks to FIND/RECALL a specific "image", "picture", "photo" previously posted/seen.
+   - This intent is less likely if the user is making a simple, direct comment or question about something the bot *just did in the immediately preceding turn*, unless they are explicitly asking to *find that item again* or asking about its source/details in a way that implies looking it up.
    - "keywords": EXCLUDE image generation verbs like "generate", "create", "draw", "make".
 
 2. If it's a GENERAL QUESTION *clearly asking for external information* that can be answered by a WEB SEARCH (including requests to find generic images not tied to conversation history):
