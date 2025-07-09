@@ -877,17 +877,43 @@ Respond ONLY with a single JSON object.`;
       // Now accepts authorDid to construct URLs if necessary
       const extractImages = (record, authorDid) => {
         const images = record?.embed?.images || record?.embed?.media?.images || [];
-        return images.map(img => {
+        // New Log 1: Initial call and raw images found
+        console.log(`[extractImages] Called. Author DID: ${authorDid}. Raw images found in embed: ${images.length}`);
+        if (images.length > 0) {
+          // New Log 2: Details of the first raw image object (if any) for inspection
+          console.log(`[extractImages] Details of first raw image object: ${JSON.stringify(images[0], null, 2)}`);
+        }
+
+        return images.map((img, idx) => {
           let imageUrl = img.fullsize || img.thumb;
-          if (!imageUrl && authorDid && img.image?.ref?.$link) { // .ref is an object with $link
+          // New Log 3: Inside map, before CID construction
+          console.log(`[extractImages] Processing image ${idx}: Direct fullsize/thumb URL: ${imageUrl}. Image object: ${JSON.stringify(img, null, 2)}`);
+
+          if (!imageUrl && authorDid && img.image?.ref?.$link) {
+            // New Log 4: Attempting CID construction (ref link)
+            console.log(`[extractImages] Image ${idx}: Attempting URL construction from ref.$link. Author DID: ${authorDid}, CIDLink: ${img.image.ref.$link}`);
             imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${img.image.ref.$link}`;
-            console.log(`[extractImages] Constructed URL via ref.$link: ${imageUrl}`);
-          } else if (!imageUrl && authorDid && img.image?.cid) { // .cid is a string
+          } else if (!imageUrl && authorDid && img.image?.cid) { // String CID
+            // New Log 5: Attempting CID construction (string CID)
+            console.log(`[extractImages] Image ${idx}: Attempting URL construction from string CID. Author DID: ${authorDid}, CID: ${img.image.cid}`);
             imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${img.image.cid}`;
-            console.log(`[extractImages] Constructed URL via image.cid: ${imageUrl}`);
+          } else if (!imageUrl) {
+            // New Log 6: Conditions for CID construction not met
+              console.log(`[extractImages] Image ${idx}: Conditions for CID URL construction not met. authorDid: ${authorDid}, img.image: ${JSON.stringify(img.image, null, 2)}`);
           }
+
+          // New Log 7: Final imageUrl and alt text before returning from map
+          console.log(`[extractImages] Image ${idx}: Final imageUrl for this image: ${imageUrl}, Alt: ${img.alt || ''}`);
           return { alt: img.alt || '', url: imageUrl };
-        }).filter(img => img.url); // Only keep images where a URL could be constructed
+
+        }).filter(imgObject => { // Changed variable name to avoid confusion with 'img' in map
+          const shouldRetain = !!imgObject.url;
+          if (!shouldRetain) {
+            // New Log 8: Image being filtered out
+            console.log(`[extractImages] Filtering out image due to missing/falsy URL. Image object details: ${JSON.stringify(imgObject, null, 2)}`);
+          }
+          return shouldRetain;
+        });
       };
 
       // Add current post details
