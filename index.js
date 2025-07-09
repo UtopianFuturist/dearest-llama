@@ -220,11 +220,13 @@ class BaseBot {
 
     const systemPrompt = `You are an AI assistant that helps decide if a user's query needs clarification before the main bot attempts a full response or action.
 Analyze the USER QUERY provided.
-Consider if the query is too vague, ambiguous, could have multiple common interpretations leading to different actions, or is missing key information needed for a specific tool (like image generation, web search, etc.).
+A CONVERSATION CONTEXT might also be provided (oldest to newest messages). If the USER QUERY refers to something "previous", "that thing", "the image/gif/post", check the CONVERSATION CONTEXT.
+- If the context contains a recent message from the bot itself with an image, GIF (external link), or quoted post that the user is likely referring to, assume the user means that. In this case, clarification might NOT be needed if the reference is clear from context.
+- If the context is ambiguous or doesn't clarify the reference, then ask for clarification.
 
 Rules:
-1. If the query is clear and actionable, or a simple greeting/statement, respond with: {"needs_clarification": false, "clarification_question": null}
-2. If the query IS ambiguous or incomplete:
+1. If the query is clear and actionable (considering context if provided), or a simple greeting/statement, respond with: {"needs_clarification": false, "clarification_question": null}
+2. If the query IS ambiguous or incomplete (even after considering context):
    - Formulate a single, polite, concise clarifying question to ask the user.
    - The question should help the user provide the missing information or specify their intent.
    - Respond with: {"needs_clarification": true, "clarification_question": "Your clarifying question here."}
@@ -233,29 +235,61 @@ Rules:
 
 Examples:
 User Query: "Tell me about it."
+(No context provided or context is unhelpful)
 Your JSON Output: {"needs_clarification": true, "clarification_question": "Could you please tell me what 'it' you're referring to?"}
+
+CONVERSATION CONTEXT (simplified):
+[
+  { "author": "BotHandle", "text": "I found this cool GIF!", "embeds": [{ "type": "external", "uri": "giphy.com/some-gif", "title": "Cool GIF" }] },
+  { "author": "UserHandle", "text": "Wow, that's a great one!" }
+]
+USER QUERY: "Wow, that's a great one!"
+Your JSON Output: {"needs_clarification": false, "clarification_question": null}
+
+CONVERSATION CONTEXT (simplified):
+[
+  { "author": "UserHandle", "text": "Tell me about cats." },
+  { "author": "BotHandle", "text": "Cats are fascinating creatures! They are known for their agility and playful nature." },
+  { "author": "UserHandle", "text": "What about that other thing you mentioned?" }
+]
+USER QUERY: "What about that other thing you mentioned?"
+Your JSON Output: {"needs_clarification": true, "clarification_question": "I mentioned agility and playful nature regarding cats. Could you specify which 'other thing' you're curious about, or what you were referring to?"}
 
 User Query: "Generate an image."
 Your JSON Output: {"needs_clarification": true, "clarification_question": "Sure, I can try to generate an image! What would you like me to generate?"}
 
 User Query: "Search for cats."
-Your JSON Output: {"needs_clarification": false, "clarification_question": null} // Actionable by search tool
+Your JSON Output: {"needs_clarification": false, "clarification_question": null}
 
 User Query: "What's up?"
-Your JSON Output: {"needs_clarification": false, "clarification_question": null} // Simple greeting
-
-User Query: "Can you help me?"
-Your JSON Output: {"needs_clarification": true, "clarification_question": "I can certainly try! What do you need help with?"}
-
-User Query: "The previous thing."
-Your JSON Output: {"needs_clarification": true, "clarification_question": "Could you remind me what specific 'previous thing' you're referring to?"}
+Your JSON Output: {"needs_clarification": false, "clarification_question": null}
 
 Respond ONLY with a single JSON object.`;
 
-    const userPromptForClarification = `USER QUERY: "${userQueryText}"\n\nYOUR JSON OUTPUT:`;
+    let userPromptForClarification = `USER QUERY: "${userQueryText}"\n\n`;
+    if (conversationContext && conversationContext.length > 0) {
+      // Simple stringification of context for the prompt.
+      // Ensure sensitive details or very long texts are handled if necessary.
+      const contextString = conversationContext.map(m => {
+        let embedText = '';
+        if (m.embeds && m.embeds.length > 0) {
+          embedText = m.embeds.map(e => {
+            let details = `[Embed: ${e.type}`;
+            if (e.title) details += ` - Title: ${e.title.substring(0,30)}`;
+            if (e.alt) details += ` - Alt: ${e.alt.substring(0,30)}`;
+            if (e.uri) details += ` - URI: ${e.uri.substring(0,40)}`;
+            if (e.recordUri) details += ` - RecordURI: ${e.recordUri.substring(0,40)}`;
+            return details + ']';
+          }).join(' ');
+        }
+        return `${m.author}: ${m.text ? m.text.substring(0, 100) : ''} ${embedText}`;
+      }).join('\n');
+      userPromptForClarification += `CONVERSATION CONTEXT (oldest to newest, last message is the user's query which is also provided above):\n${contextString}\n\n`;
+    }
+    userPromptForClarification += `YOUR JSON OUTPUT:`;
 
     try {
-      console.log(`[ClarificationHelper] Calling Llama 3.2 Vision for ambiguity check on query: "${userQueryText}"`);
+      console.log(`[ClarificationHelper] Calling Llama 3.2 Vision for ambiguity check. Query: "${userQueryText}", Context length: ${conversationContext ? conversationContext.length : 0}`);
       const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
@@ -1025,10 +1059,31 @@ Respond ONLY with a single JSON object.`;
 
       console.log('[getReplyContext] Final conversation context structure (oldest to newest):');
       conversation.forEach((item, index) => {
-        console.log(`[getReplyContext] Context[${index}]: PostURI: ${item.uri}, Author: ${item.author}, Text: "${item.text?.substring(0,70)}...", Images: ${item.images?.length || 0}`);
-        if (item.images?.length > 0) {
-          item.images.forEach((img, imgIdx) => {
-            console.log(`[getReplyContext] Context[${index}] Image[${imgIdx}]: URL: ${img.url}, Alt: ${img.alt}`);
+        let embedSummary = "No embeds";
+        if (item.embeds && item.embeds.length > 0) {
+          const embedTypes = item.embeds.map(e => e.type).join(', ');
+          embedSummary = `Embeds: ${item.embeds.length} (${embedTypes})`;
+        }
+        console.log(`[getReplyContext] Context[${index}]: PostURI: ${item.uri}, Author: ${item.author}, Text: "${item.text?.substring(0,70)}...", ${embedSummary}`);
+        if (item.embeds && item.embeds.length > 0) {
+          item.embeds.forEach((embed, embedIdx) => {
+            if (embed.type === 'image') {
+              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (Image): URL: ${embed.url}, Alt: ${embed.alt}`);
+            } else if (embed.type === 'external') {
+              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (External): URI: ${embed.uri}, Title: ${embed.title?.substring(0,50)}...`);
+            } else if (embed.type === 'record') {
+              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (Record): URI: ${embed.recordUri}, Author: ${embed.recordAuthor}, Text: ${embed.recordText?.substring(0,50)}...`);
+            } else if (embed.type === 'recordWithMedia') {
+              let mediaSummary = 'No media content';
+              if (embed.media?.type === 'images' && embed.media.images?.length > 0) {
+                mediaSummary = `${embed.media.images.length} image(s)`;
+              } else if (embed.media?.type === 'external') {
+                mediaSummary = `External link: ${embed.media.external?.uri}`;
+              }
+              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (RecordWithMedia): Record URI: ${embed.record?.uri}, Media: ${mediaSummary}`);
+            } else {
+              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (Unknown type): ${JSON.stringify(embed)}`);
+            }
           });
         }
       });
@@ -1635,7 +1690,7 @@ Your JSON Output: {"action": "none"}`;
 
     // New: Check for clarification before any other processing
     // For context, we could pass a summary of `context`, but for now, focusing on userQueryText
-    const clarificationSuggestion = await this.getClarificationSuggestion(userQueryText, null /* Pass context summary here if developed */);
+    const clarificationSuggestion = await this.getClarificationSuggestion(userQueryText, context);
     if (clarificationSuggestion.needs_clarification && clarificationSuggestion.clarification_question) {
       console.log(`[ClarificationHelper] Query needs clarification. Asking: "${clarificationSuggestion.clarification_question}"`);
       await this.postReply(post, clarificationSuggestion.clarification_question);
@@ -2893,12 +2948,24 @@ Do not make up information not present in the search results. Keep the response 
               }
             }
             conversationHistory += `${authorRole}${timestampStr}: ${msg.text}\n`;
-            if (msg.images && msg.images.length > 0) {
-              msg.images.forEach(image => {
-                if (image.alt) {
-                  conversationHistory += `[${authorRole} sent an image with description: ${image.alt}]\n`;
+            if (msg.embeds && msg.embeds.length > 0) {
+              msg.embeds.forEach(embed => {
+                if (embed.type === 'image') {
+                  conversationHistory += `[${authorRole} sent an image${embed.alt ? ` with description: ${embed.alt.substring(0,100)}` : ''}]\n`;
+                } else if (embed.type === 'external') {
+                  conversationHistory += `[${authorRole} shared a link: ${embed.title ? embed.title.substring(0,70) : embed.uri}${embed.description ? ` - Description: ${embed.description.substring(0, 50)}...` : ''}]\n`;
+                } else if (embed.type === 'record') {
+                  conversationHistory += `[${authorRole} quoted a post by ${embed.recordAuthor || 'another user'}: "${embed.recordText ? embed.recordText.substring(0, 70) + '...' : '(content not shown)'}" (URI: ${embed.recordUri})]\n`;
+                } else if (embed.type === 'recordWithMedia') {
+                  let mediaDesc = 'media content';
+                  if (embed.media?.type === 'images' && embed.media.images?.length > 0) {
+                    mediaDesc = `${embed.media.images.length} image(s)${embed.media.images[0].alt ? ` (first image alt: ${embed.media.images[0].alt.substring(0,30)}...)` : ''}`;
+                  } else if (embed.media?.type === 'external') {
+                    mediaDesc = `a link: ${embed.media.external?.title ? embed.media.external.title.substring(0,50) : embed.media.external?.uri}`;
+                  }
+                  conversationHistory += `[${authorRole} quoted a post (URI: ${embed.record?.uri}) which included ${mediaDesc}]\n`;
                 } else {
-                  conversationHistory += `[${authorRole} sent an image]\n`;
+                  conversationHistory += `[${authorRole} included an embed of type: ${embed.type}]\n`;
                 }
               });
             }
