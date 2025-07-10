@@ -5032,11 +5032,19 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
   }
 
   async monitorBotFollowingFeed() {
-    console.log('[BotFeedMonitor] Starting bot following feed monitor...');
-    if (!this.botDisplayName) { // Check if bot's display name is available
-      console.warn('[BotFeedMonitor] Bot DisplayName not fetched. Skipping bot following feed monitoring.');
+    console.log('[BotFeedMonitor] Initializing bot following feed monitor...');
+    try {
+      await this.authenticate(); // Ensure authentication and name inference are complete
+    } catch (error) {
+      console.error('[BotFeedMonitor] Authentication failed, cannot start feed monitor:', error);
+      return; // Stop if authentication fails
+    }
+
+    if (!this.botDisplayName) { // Check if bot's display name is available after authentication
+      console.warn('[BotFeedMonitor] Bot DisplayName not fetched even after auth. Skipping bot following feed monitoring.');
       return;
     }
+    console.log(`[BotFeedMonitor] Bot DisplayName is "${this.botDisplayName}". Starting main loop.`);
 
     // Use a dedicated set for processed posts from the bot's following feed
     const processedBotFeedPostsPath = path.join(process.cwd(), 'processed_bot_feed_posts.json');
