@@ -3232,7 +3232,7 @@ Do not make up information not present in the search results. Keep the response 
 
       let nemotronUserPrompt = "";
       const currentDateTime = new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'full' });
-      const baseInstruction = `Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. For detailed topics, you can generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
+      const baseInstruction = `Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. For detailed topics, you can generate a response up to about 1150 characters; it will be split into multiple posts if needed.`;
 
       const dateTimePreamble = `Current date and time is ${currentDateTime}.\n\n`;
 
@@ -5186,23 +5186,60 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
 
               if (matchCondition) {
                 console.log(`[BotFeedMonitor] SUCCESS: Post ${postObject.uri} by ${postObject.author.handle} matched condition '${matchCondition}' with term '${matchedTerm}'.`);
-                console.log(`[BotFeedMonitor] DEBUG: Before switch - matchCondition type: ${typeof matchCondition}, value: '${matchCondition}'`); // DEBUG LOG
 
-                if (await this.hasAlreadyReplied(postObject)) {
-                  console.log(`[BotFeedMonitor] SKIP: Bot has already replied to ${postObject.uri}.`);
-                  processedBotFeedPosts.add(postObject.uri);
-                  continue;
+                let canProactivelyReply = false;
+                const isReply = !!postObject.record.reply;
+
+                if (!isReply) { // Top-level post or a quote post that isn't a reply
+                    canProactivelyReply = true;
+                    console.log(`[BotFeedMonitor] Post ${postObject.uri} is top-level or quote. Proactive reply permitted.`);
+                } else { // It is a reply
+                    const parentUri = postObject.record.reply.parent?.uri;
+                    if (parentUri) {
+                        try {
+                            console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply. Fetching parent ${parentUri}.`);
+                            const { data: parentThread } = await this.agent.getPostThread({ uri: parentUri, depth: 0 });
+                            const parentPost = parentThread?.thread?.post;
+                            if (parentPost && parentPost.author?.did === this.agent.did) {
+                                canProactivelyReply = true; // It's a reply to the bot's own post
+                                console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply to bot's own post. Proactive reply permitted.`);
+                            } else {
+                                // It's a reply to someone else's post
+                                if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
+                                    canProactivelyReply = true; // Bot was directly mentioned in the reply
+                                    console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply to third party, AND bot was mentioned. Proactive reply permitted.`);
+                                } else {
+                                    canProactivelyReply = false; // Persona match only on a comment to someone else
+                                    console.log(`[BotFeedMonitor] SUPPRESSED reply to ${postObject.uri} by ${postObject.author.handle}. It's a reply to a third party, and bot was not directly mentioned (only persona/keyword match: ${matchCondition}).`);
+                                }
+                            }
+                        } catch (error) {
+                            console.error(`[BotFeedMonitor] Error fetching parent post ${parentUri} for context:`, error);
+                            canProactivelyReply = false; // Default to not replying if parent context fails
+                        }
+                    } else {
+                        // Reply structure present but no parent URI (should be rare, treat cautiously)
+                        if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
+                            canProactivelyReply = true;
+                             console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply with no parent URI, BUT bot was mentioned. Proactive reply permitted.`);
+                        } else {
+                            canProactivelyReply = false;
+                            console.log(`[BotFeedMonitor] SUPPRESSED reply to ${postObject.uri} by ${postObject.author.handle}. Reply structure present but no parent URI, and bot not directly mentioned.`);
+                        }
+                    }
                 }
 
-                if (!this._canSendProactiveReply(postObject.author.did)) {
-                    console.log(`[BotFeedMonitor] SKIP: Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}) regarding post ${postObject.uri}.`);
-                    processedBotFeedPosts.add(postObject.uri);
-                    continue;
-                }
-                console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri} due to '${matchCondition}' (term: '${matchedTerm}').`);
-                const context = await this.getReplyContext(postObject);
-
-                let systemPromptForReply = "";
+                if (canProactivelyReply) {
+                    if (await this.hasAlreadyReplied(postObject)) {
+                        console.log(`[BotFeedMonitor] SKIP (already replied): Bot has already replied to ${postObject.uri}.`);
+                        // No continue here, will fall through to add to processedBotFeedPosts
+                    } else if (!this._canSendProactiveReply(postObject.author.did)) {
+                        console.log(`[BotFeedMonitor] SKIP (rate limit): Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}) regarding post ${postObject.uri}.`);
+                        // No continue here, will fall through to add to processedBotFeedPosts
+                    } else {
+                        console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri} due to '${matchCondition}' (term: '${matchedTerm}').`);
+                        const context = await this.getReplyContext(postObject);
+                        let systemPromptForReply = "";
                 let userPromptForReply = "";
 
                 if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
