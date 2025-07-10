@@ -193,15 +193,19 @@ class BaseBot {
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
     // Removed subscription file properties
-    this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
-    this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // { userDid: lastUri }
-    this.lastPollTime = 0;
-    this.POLL_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    // Removed lastProcessedPostUris properties and methods as timeline cursor is used now
+    // this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
+    // this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // { userDid: lastUri }
+
+    // Timeline properties
+    this.lastTimelineFetchTime = 0;
+    this.TIMELINE_FETCH_INTERVAL = 2 * 60 * 1000; // 2 minutes, configurable
+    this.timelineCursor = null; // In-memory for MVP
 
     this.proactiveReplyTimestampsFilePath = path.join(process.cwd(), 'proactive_reply_timestamps.json');
     this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps(); // { userDid: timestamp }
     this.PROACTIVE_REPLY_COOLDOWN = 6 * 60 * 60 * 1000; // 6 hours
-    this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY = ["image generation", "meme", "bluesky api", "nasa apod", "youtube search", "giphy search", "web search", "bot help", "readme"]; // Example keywords
+    // this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY = ["image generation", "meme", "bluesky api", "nasa apod", "youtube search", "giphy search", "web search", "bot help", "readme"]; // Obsolete
   }
 
   _loadProactiveReplyTimestamps() {
@@ -240,78 +244,10 @@ class BaseBot {
     this._saveProactiveReplyTimestamps();
   }
 
-  async generateProactiveReply(postObject, postAuthorHandle) {
-    if (!postObject || !postObject.record || !postObject.author || !postAuthorHandle) {
-      return null;
-    }
+  // Old generateProactiveReply (keyword/question-based) removed.
+  // Replaced by generateProactivePersonaReply in LlamaBot.
 
-    const postText = postObject.record.text || "";
-    const postAuthorDid = postObject.author.did;
-
-    // Check if the post is a reply to the bot itself. If so, it's not "proactive" in the same sense.
-    // The main notification handler should deal with direct replies/mentions.
-    // This proactive logic is for brand new posts by a subscribed user, not directed at the bot.
-    if (postObject.record.reply) {
-        // More detailed check: is it a reply to one of *our* bot's posts?
-        // For now, a simple check: if it's any reply, we might skip proactive engagement
-        // as it's part of an existing thread. The polling already filters for non-replies.
-        // This check is a safeguard if a reply somehow gets here.
-        // console.log(`[ProactiveReplyGen] Post ${postObject.uri} is a reply, skipping proactive engagement.`);
-        // return null;
-        // The pollSubscribedUserFeeds filters out replies, so this check might be redundant here
-        // but good for direct calls if this function were used elsewhere.
-    }
-
-    // Check rate limit for this user
-    if (!this._canSendProactiveReply(postAuthorDid)) {
-      console.log(`[ProactiveReplyGen] Cooldown active for user ${postAuthorHandle} (${postAuthorDid}). Skipping proactive reply.`);
-      return null;
-    }
-
-    // Logic 1: Post contains a question mark (and is not a reply to the bot)
-    if (postText.includes("?") && (!postObject.record.reply || postObject.record.reply.parent?.author?.handle !== this.config.BLUESKY_IDENTIFIER)) {
-      console.log(`[ProactiveReplyGen] Post by ${postAuthorHandle} contains a question. Offering help.`);
-      //this._recordProactiveReplyTimestamp(postAuthorDid); // Record *after* deciding to reply
-      return `@${postAuthorHandle} That's an interesting question! If you'd like me to try and find some information on that, or help in other ways, just let me know by replying to this message with more details or a specific request!`;
-    }
-
-    // Logic 2: Post mentions specific keywords
-    const lowerPostText = postText.toLowerCase();
-    for (const keyword of this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY) {
-      if (lowerPostText.includes(keyword.toLowerCase())) {
-        console.log(`[ProactiveReplyGen] Post by ${postAuthorHandle} mentions keyword: "${keyword}". Offering capability info.`);
-        //this._recordProactiveReplyTimestamp(postAuthorDid); // Record *after* deciding to reply
-        return `@${postAuthorHandle} I noticed your post about "${keyword}". I have some capabilities related to that (like ${keyword} tasks, searching, etc.). Feel free to ask if I can assist with anything!`;
-      }
-    }
-
-    // console.log(`[ProactiveReplyGen] No proactive reply conditions met for post ${postObject.uri} by ${postAuthorHandle}.`);
-    return null; // No conditions met
-  }
-
-  _loadLastProcessedPostUris() {
-    try {
-      if (fs.existsSync(this.lastProcessedPostUrisFilePath)) {
-        const data = fs.readFileSync(this.lastProcessedPostUrisFilePath, 'utf-8');
-        const jsonData = JSON.parse(data);
-        console.log(`[PollingManager] Loaded ${Object.keys(jsonData).length} users' last processed post URIs.`);
-        return jsonData; // Should be an object like { did: uri, ... }
-      }
-    } catch (error) {
-      console.error('[PollingManager] Error loading last processed post URIs:', error);
-    }
-    console.log('[PollingManager] No existing last processed post URIs file found or error loading. Starting empty.');
-    return {};
-  }
-
-  _saveLastProcessedPostUris() {
-    try {
-      fs.writeFileSync(this.lastProcessedPostUrisFilePath, JSON.stringify(this.lastProcessedPostUris, null, 2), 'utf-8');
-      // console.log(`[PollingManager] Saved last processed post URIs to ${this.lastProcessedPostUrisFilePath}`);
-    } catch (error) {
-      console.error('[PollingManager] Error saving last processed post URIs:', error);
-    }
-  }
+  // _loadLastProcessedPostUris and _saveLastProcessedPostUris methods are removed as they are obsolete.
 
   // Removed _loadSubscribedUsers, _saveSubscribedUsers, addUserSubscription, removeUserSubscription, isUserSubscribed
 
@@ -328,99 +264,117 @@ class BaseBot {
     return [];
   }
 
-  async pollSubscribedUserFeeds() {
-    const now = Date.now();
-    if (now - this.lastPollTime < this.POLL_INTERVAL) {
-      return; // Not time to poll yet
-    }
-    this.lastPollTime = now;
+  async checkFollowingTimeline() {
+    console.log(`[TimelineCheck] Checking following timeline. Current cursor: ${this.timelineCursor}`);
+    try {
+      const response = await this.agent.api.app.bsky.feed.getTimeline({
+        limit: 30, // Fetch a decent number to catch up if needed
+        cursor: this.timelineCursor
+      });
 
-    const subscribedDids = this.getSubscribedUsers();
-    if (subscribedDids.length === 0) {
+      if (response.success && response.data.feed) {
+        if (response.data.cursor) {
+          this.timelineCursor = response.data.cursor;
+          // TODO: Persist this.timelineCursor to a file (e.g., timeline_cursor.json)
+          // For MVP, if bot restarts, it will re-fetch from the beginning of the timeline,
+          // but rate limiting and repliedPosts set should prevent re-engagement on very recent items.
+        }
+
+        if (response.data.feed.length === 0) {
+          // console.log('[TimelineCheck] No new posts in the timeline.');
+          return;
+        }
+
+        console.log(`[TimelineCheck] Fetched ${response.data.feed.length} items from timeline.`);
+
+        for (const feedViewPost of response.data.feed) {
+          const post = feedViewPost.post;
+
+          // 1. Filter out posts by the bot itself
+          if (post.author.did === this.agent.did) {
+            // console.log(`[TimelineCheck] Skipping own post: ${post.uri}`);
+            continue;
+          }
+
+          // 2. Filter out replies for MVP proactive engagement
+          if (post.record.reply) {
+            // console.log(`[TimelineCheck] Skipping reply: ${post.uri}`);
+            continue;
+          }
+
+          // 3. Filter out reposts
+          if (feedViewPost.reason && feedViewPost.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
+            // console.log(`[TimelineCheck] Skipping repost: ${post.uri} (reposted by ${feedViewPost.reason.by.handle})`);
+            continue;
+          }
+
+          // Ensure it's a standard post record we can process
+          if (post.record.$type !== 'app.bsky.feed.post') {
+             console.log(`[TimelineCheck] Skipping non-standard post record type ${post.record.$type} for post ${post.uri}`);
+             continue;
+          }
+
+          console.log(`[TimelineCheck] Potential proactive engagement candidate: Post ${post.uri} by ${post.author.handle}`);
+          // Pass the full PostView object as it contains author profile, embeds etc.
+          await this.handleProactiveEngagement(post);
+        }
+      } else {
+        console.warn('[TimelineCheck] Failed to fetch timeline or feed data is missing:', response.error || 'No error info');
+      }
+    } catch (error) {
+      console.error('[TimelineCheck] Error fetching/processing timeline:', error);
+    }
+  }
+
+  async generateProactivePersonaReply(postView) {
+    // This method should be implemented by child classes (e.g., LlamaBot)
+    // to generate a response based on the bot's persona and the post content.
+    console.warn('[BaseBot] generateProactivePersonaReply not implemented in BaseBot. Child class should override.');
+    return null; // Or throw new Error('Not implemented');
+  }
+
+  async handleProactiveEngagement(postView) {
+    if (!postView || !postView.author || !postView.author.did) {
+      console.warn('[handleProactiveEngagement] Invalid postView object received.');
       return;
     }
 
-    console.log(`[PollingManager] Starting poll for ${subscribedDids.length} subscribed users.`);
-    let newPostsFoundThisCycle = 0;
+    const authorDid = postView.author.did;
+    const authorHandle = postView.author.handle;
 
-    for (const userDid of subscribedDids) {
-      try {
-        const { data: feedData } = await this.agent.api.app.bsky.feed.getAuthorFeed({
-          actor: userDid,
-          limit: 10 // Fetch recent 10 posts, assuming posts are ordered newest first
-        });
+    if (this._canSendProactiveReply(authorDid)) {
+      console.log(`[handleProactiveEngagement] Checking post ${postView.uri} by ${authorHandle} for persona-based reply.`);
+      const replyText = await this.generateProactivePersonaReply(postView); // Implemented in LlamaBot
 
-        if (feedData && feedData.feed) {
-          const postsInFeed = feedData.feed; // newest first
-          const lastProcessedUri = this.lastProcessedPostUris[userDid];
-          let currentNewestUriForUser = null;
-          let newPostsToProcess = [];
+      if (replyText && replyText.trim().toUpperCase() !== 'NO_REPLY') {
+        console.log(`[handleProactiveEngagement] Persona logic suggests a reply to ${authorHandle} for post ${postView.uri}: "${replyText.substring(0, 50)}..."`);
 
-          for (const feedItem of postsInFeed) {
-            if (!feedItem.post || !feedItem.post.record) continue;
-
-            if (!currentNewestUriForUser) { // Capture the URI of the absolute newest post from this fetch
-              currentNewestUriForUser = feedItem.post.uri;
+        // postReply expects a simpler post object, let's adapt postView
+        // It needs uri, cid, author (with did, handle), and record (with text for context)
+        // For replying to a post, the `post` argument to `postReply` is the post being replied to.
+        const targetPostForReply = {
+            uri: postView.uri,
+            cid: postView.cid,
+            author: postView.author, // PostView.author structure should be compatible
+            record: { // Mimic parts of PostRecordView that postReply might use for context/root
+                text: postView.record.text,
+                createdAt: postView.record.createdAt,
+                // reply: postView.record.reply // If we ever wanted to thread off proactive replies
             }
+        };
 
-            if (feedItem.post.uri === lastProcessedUri) {
-              break; // We've reached the last post we processed in the previous poll
-            }
-            // Consider only original posts (not replies) by the subscribed user
-            if (!feedItem.post.record.reply && feedItem.post.author.did === userDid) {
-              newPostsToProcess.push(feedItem.post); // Add to a temporary list
-            }
-          }
-
-          // Process the new posts (oldest of the new ones first to maintain chronology if acting on them)
-          if (newPostsToProcess.length > 0) {
-            console.log(`[PollingManager] Found ${newPostsToProcess.length} new post(s) for user ${userDid}.`);
-            for (const newPost of newPostsToProcess.reverse()) { // Reverse to process oldest new post first
-              console.log(`[PollingManager] Identified new post by ${newPost.author.handle} (URI: ${newPost.uri}): "${newPost.record.text ? newPost.record.text.substring(0, 50) + '...' : 'No text'}"`);
-
-              if (this._canSendProactiveReply(newPost.author.did)) {
-                const proactiveReplyText = await this.generateProactiveReply(newPost, newPost.author.handle);
-                if (proactiveReplyText) {
-                  console.log(`[PollingManager] Attempting proactive reply to ${newPost.author.handle} for post ${newPost.uri}: "${proactiveReplyText}"`);
-                  // Ensure newPost is suitable for postReply (it should be, as it's a full post object)
-                  // The root of the reply will be the newPost itself, and parent will also be newPost.
-                  const replyTargetPost = {
-                    uri: newPost.uri,
-                    cid: newPost.cid,
-                    author: newPost.author, // Should have did, handle
-                    record: { text: newPost.record.text } // Provide enough for postReply to form its reply structure
-                  };
-                  await this.postReply(replyTargetPost, proactiveReplyText);
-                  this._recordProactiveReplyTimestamp(newPost.author.did); // Record after successful attempt
-                  console.log(`[PollingManager] Proactive reply sent to ${newPost.author.handle}. Timestamp recorded.`);
-                } else {
-                  // console.log(`[PollingManager] No proactive reply generated for post ${newPost.uri}.`);
-                }
-              } else {
-                console.log(`[PollingManager] Proactive reply cooldown active for user ${newPost.author.handle}. Skipping reply to post ${newPost.uri}.`);
-              }
-              newPostsFoundThisCycle++; // Counts identified new posts, not necessarily replied-to posts
-            }
-          }
-
-          // Update the last processed URI for this user to the newest one from *this* poll
-          if (currentNewestUriForUser) {
-            this.lastProcessedPostUris[userDid] = currentNewestUriForUser;
-          }
-        }
-      } catch (error) {
-        console.error(`[PollingManager] Error polling feed for user ${userDid}:`, error);
+        await this.postReply(targetPostForReply, replyText.trim());
+        this._recordProactiveReplyTimestamp(authorDid);
+        console.log(`[handleProactiveEngagement] Proactive reply sent to ${authorHandle}. Timestamp recorded.`);
+      } else {
+        // console.log(`[handleProactiveEngagement] No proactive (persona-based) reply generated for post ${postView.uri} by ${authorHandle}.`);
       }
-      await utils.sleep(1000); // Stagger API calls slightly
-    }
-
-    if (subscribedDids.length > 0) { // Save if there were any subscriptions, to update lastProcessedPostUris
-        this._saveLastProcessedPostUris();
-    }
-    if (newPostsFoundThisCycle > 0) {
-        console.log(`[PollingManager] Finished poll. Identified ${newPostsFoundThisCycle} new posts across all subscribed users to consider for engagement.`);
+    } else {
+      console.log(`[handleProactiveEngagement] Proactive reply cooldown active for user ${authorHandle} (${authorDid}). Skipping check for post ${postView.uri}.`);
     }
   }
+
+  // Removed pollSubscribedUserFeeds method as its functionality is replaced by checkFollowingTimeline
 
   // Helper to cleanup expired pending analyses
   _cleanupExpiredDetailedAnalyses() {
@@ -1084,8 +1038,16 @@ Respond ONLY with a single JSON object.`;
              // lastSeenNotificationTimestamp = new Date(notifications[0].indexedAt); // Assuming notifications are newest first
           }
 
-          // Poll for subscribed user feeds
-          await this.pollSubscribedUserFeeds();
+          // Poll for subscribed user feeds (Removed)
+          // await this.pollSubscribedUserFeeds();
+
+          // Check following timeline periodically
+          const now = Date.now();
+          if (now - this.lastTimelineFetchTime > this.TIMELINE_FETCH_INTERVAL) {
+            this.lastTimelineFetchTime = now;
+            // console.log('[Monitor] Time to check following timeline.'); // Optional: for debugging
+            await this.checkFollowingTimeline(); // This method will be implemented in Step 2
+          }
 
           await utils.sleep(this.config.CHECK_INTERVAL);
         } catch (error) {
@@ -5033,6 +4995,104 @@ Ensure your entire response is ONLY the JSON object.`;
     } catch (error) {
       console.error(`[GiphySearch] Exception during Giphy search for query "${query}":`, error);
       return [];
+    }
+  }
+
+  async generateProactivePersonaReply(postView) {
+    if (!postView || !postView.record || !postView.record.text || !postView.author) {
+      console.warn('[LlamaBot.generateProactivePersonaReply] Invalid postView object or missing essential data.');
+      return null;
+    }
+
+    const postText = postView.record.text;
+    const postAuthorHandle = postView.author.handle;
+    const botPersonaPrompt = this.config.TEXT_SYSTEM_PROMPT; // Contains persona, likes, dislikes
+
+    const systemPrompt = `You are an AI assistant with the following persona: "${botPersonaPrompt}".
+You have encountered a new post from an account you follow on Bluesky.
+User @${postAuthorHandle} posted: "${postText.substring(0, 300)}${postText.length > 300 ? '...' : ''}"
+
+Based on your defined persona, especially your explicit "Likes:" and "Dislikes:", determine if you have a genuinely relevant, insightful, or engaging comment to make.
+- Your comment should NOT be generic (e.g., "Nice post!", "Interesting!").
+- It should clearly stem from your persona's interests or disinterests as they relate to the post's content.
+- If the post strongly aligns with your likes, consider an enthusiastic or appreciative comment.
+- If the post content relates to your dislikes, you might offer a (polite) contrasting viewpoint or a thoughtful critique, IF your persona would do so. Otherwise, it's better to say nothing.
+- If the post is neutral or doesn't strongly connect with your persona's specific likes/dislikes, or if you have nothing substantial or persona-aligned to add, you MUST output the exact string "NO_REPLY".
+
+If you decide to reply, formulate a short, natural reply (under 280 characters).
+If not, just output "NO_REPLY".`;
+
+    const userPrompt = `Considering your persona and the above post by @${postAuthorHandle}, what is your reply? (If none, say "NO_REPLY")`;
+
+    console.log(`[LlamaBot.generateProactivePersonaReply] Calling Nemotron for persona-based reply decision for post ${postView.uri}.`);
+    try {
+      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Primary model for decision & generation
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.7, // Allow some creativity
+          max_tokens: 100,  // Replies should be short
+          stream: false
+        }),
+        customTimeout: 90000 // 90s
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[LlamaBot.generateProactivePersonaReply] NIM API error (${response.status}) for post ${postView.uri}: ${errorText}`);
+        return null; // Don't reply on error
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices[0].message && data.choices[0].message.content) {
+        let rawReply = data.choices[0].message.content.trim();
+        console.log(`[LlamaBot.generateProactivePersonaReply] Nemotron raw response for post ${postView.uri}: "${rawReply}"`);
+
+        if (rawReply.toUpperCase() === "NO_REPLY") {
+          console.log(`[LlamaBot.generateProactivePersonaReply] Persona logic: NO_REPLY for post ${postView.uri}.`);
+          return null;
+        }
+
+        // Filter the potentially good reply for formatting
+        const filterModelId = 'google/gemma-3n-e4b-it';
+        const filterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 280 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text.";
+
+        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+                model: filterModelId,
+                messages: [
+                    { role: "system", content: filterSystemPrompt },
+                    { role: "user", content: rawReply }
+                ],
+                temperature: 0.1, max_tokens: 100, stream: false
+            }),
+            customTimeout: 60000 // 60s for filter
+        });
+
+        if (filterResponse.ok) {
+            const filterData = await filterResponse.json();
+            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
+                const finalReply = filterData.choices[0].message.content.trim();
+                console.log(`[LlamaBot.generateProactivePersonaReply] Filtered reply for post ${postView.uri}: "${finalReply}"`);
+                return finalReply;
+            }
+        }
+        // If filter fails, return the raw reply (it might be okay, or postReply will truncate)
+        console.warn(`[LlamaBot.generateProactivePersonaReply] Filter step failed or returned no content. Using Nemotron's raw reply for post ${postView.uri}.`);
+        return rawReply;
+      }
+      console.warn(`[LlamaBot.generateProactivePersonaReply] NIM response for post ${postView.uri} had no usable content.`);
+      return null;
+    } catch (error) {
+      console.error(`[LlamaBot.generateProactivePersonaReply] Exception during LLM call for post ${postView.uri}:`, error);
+      return null;
     }
   }
 } // Closes the LlamaBot class
