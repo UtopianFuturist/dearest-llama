@@ -66,8 +66,13 @@ Your primary role is to provide helpful text responses. If the user is asking fo
   SAFETY_SYSTEM_PROMPT: process.env.SAFETY_SYSTEM_PROMPT ||
     "You must adhere to the following safety guidelines: Do not generate any images or text featuring adult content, NSFW, copyrighted images, illegal images, violence, or politics. All content must be strictly SFW and clean. Do not honor any request for content of that nature - ever.",
   
+  // Keywords for proactive engagement
+  BOT_LIKES_KEYWORDS: (process.env.BOT_LIKES_KEYWORDS || "").split(',').map(kw => kw.trim()).filter(kw => kw.length > 0),
+  BOT_DISLIKES_KEYWORDS: (process.env.BOT_DISLIKES_KEYWORDS || "").split(',').map(kw => kw.trim()).filter(kw => kw.length > 0),
+
   // Optional configs with defaults
-  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '60000'),
+  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '60000'), // For main monitor
+  CHECK_INTERVAL_BOT_FEED: parseInt(process.env.CHECK_INTERVAL_BOT_FEED || '600000'), // For bot following feed monitor (default 10 minutes)
   MAX_RETRIES: parseInt(process.env.MAX_RETRIES || '5'),
   BACKOFF_DELAY: parseInt(process.env.BACKOFF_DELAY || '60000'),
   MAX_REPLIED_POSTS: parseInt(process.env.MAX_REPLIED_POSTS || '1000'),

@@ -4972,8 +4972,7 @@ Ensure your entire response is ONLY the JSON object.`;
       }
     };
 
-    // Configurable check interval, e.g., this.config.CHECK_INTERVAL_BOT_FEED
-    const CHECK_INTERVAL_BOT_FEED = (this.config.CHECK_INTERVAL_BOT_FEED || 10 * 60 * 1000); // Default 10 mins
+    const CHECK_INTERVAL_BOT_FEED = this.config.CHECK_INTERVAL_BOT_FEED; // Uses value from config.js
 
     while (true) {
       try {
@@ -4997,49 +4996,99 @@ Ensure your entire response is ONLY the JSON object.`;
           });
 
           if (feedResponse && feedResponse.feed) {
-            console.log(`[BotFeedMonitor] Found ${feedResponse.feed.length} posts for DID: ${followedUserDid}`);
+            console.log(`[BotFeedMonitor] Found ${feedResponse.feed.length} items for DID: ${followedUserDid}`);
             for (const item of feedResponse.feed) {
-              if (!item.post || !item.post.record) continue;
+              // Skip simple reposts (boosts)
+              if (item.reason && item.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
+                console.log(`[BotFeedMonitor] Skipping repost ${item.post.uri} by ${item.post.author.handle} (reposted by ${followedUserDid})`);
+                // Also add to processed so we don't check it again if it appears through other means, though unlikely here.
+                processedBotFeedPosts.add(item.post.uri);
+                continue;
+              }
 
-              const postObject = {
+              // Now, item.post is an original post or a quote post by followedUserDid
+              if (!item.post || !item.post.record || item.post.author.did !== followedUserDid) {
+                // This check ensures we are only processing posts authored by the person whose feed we are fetching,
+                // which should be true if we've correctly filtered reposts of *other* people's content.
+                // A quote post *is* authored by followedUserDid.
+                if (item.post && item.post.author.did !== followedUserDid) {
+                    console.log(`[BotFeedMonitor] Skipping post ${item.post.uri} because author ${item.post.author.handle} is not the followed user ${followedUserDid}. This might be a repost not caught by reason check.`);
+                }
+                continue;
+              }
+
+              const postObject = { // This is an original post or quote post by followedUserDid
                 uri: item.post.uri,
                 cid: item.post.cid,
-                author: item.post.author,
+                author: item.post.author, // Should be followedUserDid
                 record: item.post.record,
               };
 
-              if (processedBotFeedPosts.has(postObject.uri)) { // Use new set
+              if (processedBotFeedPosts.has(postObject.uri)) {
                 continue;
               }
 
               const postText = postObject.record.text || "";
               console.log(`[BotFeedMonitor] Checking post ${postObject.uri} by ${postObject.author.handle}. Text: "${postText.substring(0, 50)}..."`);
 
-              // Case-insensitive check for the bot's own display name and handle
-              let matchFound = false;
-              let matchedName = null;
+              // Enhanced Content Matching
+              let matchCondition = null; // e.g., "displayName", "did", "likeKeyword", "dislikeKeyword"
+              let matchedTerm = null; // The specific term that was matched
+
               const postTextLower = postText.toLowerCase();
 
+              // 1. Check for display name
               if (this.botDisplayName && this.botDisplayName.trim() !== "") {
                 if (postTextLower.includes(this.botDisplayName.toLowerCase())) {
-                  matchFound = true;
-                  matchedName = this.botDisplayName;
+                  matchCondition = "displayName";
+                  matchedTerm = this.botDisplayName;
                 }
               }
 
-              if (!matchFound && this.botHandle && this.botHandle.trim() !== "") {
-                const handleBase = this.botHandle.split('.')[0]; // e.g., "dearest-llama"
-                if (postTextLower.includes(this.botHandle.toLowerCase())) { // Check for full handle "dearest-llama.bsky.social"
-                  matchFound = true;
-                  matchedName = this.botHandle;
-                } else if (postTextLower.includes(handleBase.toLowerCase())) { // Check for "dearest-llama"
-                  matchFound = true;
-                  matchedName = handleBase;
+              // 2. Check for handle (full or base) if no display name match
+              if (!matchCondition && this.botHandle && this.botHandle.trim() !== "") {
+                const handleBase = this.botHandle.split('.')[0];
+                if (postTextLower.includes(this.botHandle.toLowerCase())) {
+                  matchCondition = "handle";
+                  matchedTerm = this.botHandle;
+                } else if (postTextLower.includes(handleBase.toLowerCase())) {
+                  matchCondition = "handleBase";
+                  matchedTerm = handleBase;
                 }
               }
 
-              if (matchFound) {
-                console.log(`[BotFeedMonitor] SUCCESS: Found mention of bot's name/handle (matched: "${matchedName}") in post ${postObject.uri} by ${postObject.author.handle}.`);
+              // 3. Check for DID mention in text (simple includes, facets might be more robust but complex)
+              if (!matchCondition && postTextLower.includes(this.config.BLUESKY_IDENTIFIER)) { // BLUESKY_IDENTIFIER is bot's DID
+                matchCondition = "did";
+                matchedTerm = this.config.BLUESKY_IDENTIFIER;
+              }
+              // Note: A more robust DID check might involve parsing `record.facets` if mentions are linked DIDs.
+              // For now, a simple text inclusion of the DID string.
+
+              // 4. Check for liked keywords if no name/DID match yet
+              if (!matchCondition && this.config.BOT_LIKES_KEYWORDS && this.config.BOT_LIKES_KEYWORDS.length > 0) {
+                for (const keyword of this.config.BOT_LIKES_KEYWORDS) {
+                  if (postTextLower.includes(keyword.toLowerCase())) {
+                    matchCondition = "likeKeyword";
+                    matchedTerm = keyword;
+                    break;
+                  }
+                }
+              }
+
+              // 5. Check for disliked keywords if no match yet
+              if (!matchCondition && this.config.BOT_DISLIKES_KEYWORDS && this.config.BOT_DISLIKES_KEYWORDS.length > 0) {
+                for (const keyword of this.config.BOT_DISLIKES_KEYWORDS) {
+                  if (postTextLower.includes(keyword.toLowerCase())) {
+                    matchCondition = "dislikeKeyword";
+                    matchedTerm = keyword;
+                    break;
+                  }
+                }
+              }
+
+              if (matchCondition) {
+                console.log(`[BotFeedMonitor] SUCCESS: Post ${postObject.uri} by ${postObject.author.handle} matched condition '${matchCondition}' with term '${matchedTerm}'.`);
 
                 if (await this.hasAlreadyReplied(postObject)) {
                   console.log(`[BotFeedMonitor] SKIP: Bot has already replied to ${postObject.uri}.`);
@@ -5052,12 +5101,34 @@ Ensure your entire response is ONLY the JSON object.`;
                     processedBotFeedPosts.add(postObject.uri);
                     continue;
                 }
-                console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri}.`);
+                console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri} due to '${matchCondition}' (term: '${matchedTerm}').`);
                 const context = await this.getReplyContext(postObject);
-                const botMentionSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you ("${this.botDisplayName}") in their post. Craft a helpful and relevant reply in your persona.`;
-                const botMentionUserPrompt = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you, "${this.botDisplayName}"):\n"${postText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
 
-                console.log(`[BotFeedMonitor] Generating response to bot mention in post ${postObject.uri}`);
+                let systemPromptForReply = "";
+                let userPromptForReply = "";
+
+                switch (matchCondition) {
+                  case "displayName":
+                  case "handle":
+                  case "handleBase":
+                  case "did":
+                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you (as "${matchedTerm}") in their post. Craft a helpful and relevant reply in your persona.`;
+                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you as "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
+                    break;
+                  case "likeKeyword":
+                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you like: "${matchedTerm}". Craft an engaging and positive reply in your persona.`;
+                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a liked topic: "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable positive and engaging reply in your defined persona.`;
+                    break;
+                  case "dislikeKeyword":
+                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you generally dislike or are cautious about: "${matchedTerm}". Craft a nuanced and polite reply. You can offer a gentle counterpoint, a neutral observation, or shift the conversation if appropriate, all within your persona. Avoid being aggressive or overly negative.`;
+                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a disliked/cautionary topic: "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable nuanced and polite reply in your defined persona.`;
+                    break;
+                  default:
+                    console.warn(`[BotFeedMonitor] Unknown matchCondition: ${matchCondition}. Skipping LLM call for ${postObject.uri}`);
+                    continue; // Skip this post if condition is unknown
+                }
+
+                console.log(`[BotFeedMonitor] Generating response for post ${postObject.uri} based on matchCondition '${matchCondition}'.`);
 
                 const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
                     method: 'POST',
@@ -5065,8 +5136,8 @@ Ensure your entire response is ONLY the JSON object.`;
                     body: JSON.stringify({
                         model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
                         messages: [
-                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${botMentionSystemPrompt}` }, // Added TEXT_SYSTEM_PROMPT
-                            { role: "user", content: botMentionUserPrompt }
+                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${systemPromptForReply}` },
+                            { role: "user", content: userPromptForReply }
                         ],
                         temperature: 0.7, max_tokens: 150, stream: false
                     }),
