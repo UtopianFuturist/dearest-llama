@@ -2,8 +2,6 @@ import { AtpAgent } from '@atproto/api';
 import config from './config.js';
 import fetch from 'node-fetch';
 import express from 'express';
-import fs from 'fs';
-import path from 'path';
 
 // Add express to your package.json dependencies
 const app = express();
@@ -192,28 +190,88 @@ class BaseBot {
     this.repliedPosts = new Set();
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
-
-    this.adminDid = null; // To be resolved in authenticate()
+    this.adminDid = null; // Will be resolved in authenticate()
     this.followingCache = { dids: [], lastFetched: 0, ttl: 15 * 60 * 1000 }; // Cache for bot's following list
 
     this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
     this.lastProcessedPostUris = this._loadLastProcessedPostUris();
 
+    // New rate limiting properties for proactive engagement
+    this.DAILY_PROACTIVE_REPLY_LIMIT = config.DAILY_PROACTIVE_REPLY_LIMIT || 5; // Default to 5 if not set
     this.proactiveReplyTimestampsFilePath = path.join(process.cwd(), 'proactive_reply_timestamps.json');
-    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps();
-    this.DAILY_PROACTIVE_REPLY_LIMIT = 5;
-
-    this.lastFollowedPollTime = 0;
-    this.FOLLOWED_POLL_INTERVAL = 5 * 60 * 1000; // 5 minutes, configurable
+    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps(); // { did: { date: "YYYY-MM-DD", count: N }, ... }
   }
 
+  _loadProactiveReplyTimestamps() {
+    try {
+      if (fs.existsSync(this.proactiveReplyTimestampsFilePath)) {
+        const data = fs.readFileSync(this.proactiveReplyTimestampsFilePath, 'utf-8');
+        const timestamps = JSON.parse(data);
+        // Optional: Clean up old dates if necessary, but for now, just load as is.
+        // Users not replied to in a long time will naturally pass the daily check.
+        console.log(`[RateLimit] Loaded proactive reply timestamps for ${Object.keys(timestamps).length} users.`);
+        return timestamps;
+      }
+    } catch (error) {
+      console.error('[RateLimit] Error loading proactive reply timestamps:', error);
+    }
+    console.log('[RateLimit] No existing proactive reply timestamps file found. Starting empty.');
+    return {};
+  }
+
+  _saveProactiveReplyTimestamps() {
+    try {
+      fs.writeFileSync(this.proactiveReplyTimestampsFilePath, JSON.stringify(this.proactiveReplyTimestamps, null, 2), 'utf-8');
+      // console.log(`[RateLimit] Saved proactive reply timestamps.`);
+    } catch (error) {
+      console.error('[RateLimit] Error saving proactive reply timestamps:', error);
+    }
+  }
+
+  _getTodayDateString() {
+    return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  }
+
+  _canSendProactiveReply(userDid) {
+    if (this.adminDid && userDid === this.adminDid) {
+      console.log(`[RateLimit] Admin user ${userDid} bypasses proactive reply rate limit.`);
+      return true; // Admin bypasses rate limit
+    }
+
+    const todayStr = this._getTodayDateString();
+    const userData = this.proactiveReplyTimestamps[userDid];
+
+    if (userData && userData.date === todayStr) {
+      if (userData.count >= this.DAILY_PROACTIVE_REPLY_LIMIT) {
+        console.log(`[RateLimit] Daily proactive reply limit reached for user ${userDid} (count: ${userData.count}, limit: ${this.DAILY_PROACTIVE_REPLY_LIMIT}) on ${todayStr}.`);
+        return false;
+      }
+    }
+    // If no data for today, or count is less than limit, they can receive a reply.
+    return true;
+  }
+
+  _recordProactiveReplyTimestamp(userDid) {
+    const todayStr = this._getTodayDateString();
+    if (!this.proactiveReplyTimestamps[userDid] || this.proactiveReplyTimestamps[userDid].date !== todayStr) {
+      // Reset or initialize for the new day
+      this.proactiveReplyTimestamps[userDid] = { date: todayStr, count: 1 };
+    } else {
+      // Increment count for today
+      this.proactiveReplyTimestamps[userDid].count++;
+    }
+    console.log(`[RateLimit] Recorded proactive reply for user ${userDid}. Today's count: ${this.proactiveReplyTimestamps[userDid].count} on ${todayStr}.`);
+    this._saveProactiveReplyTimestamps();
+  }
+
+  // Helper to cleanup expired pending analyses
   _loadLastProcessedPostUris() {
     try {
       if (fs.existsSync(this.lastProcessedPostUrisFilePath)) {
         const data = fs.readFileSync(this.lastProcessedPostUrisFilePath, 'utf-8');
         const jsonData = JSON.parse(data);
         console.log(`[PollingManager] Loaded ${Object.keys(jsonData).length} users' last processed post URIs.`);
-        return jsonData;
+        return jsonData; // Should be an object like { did: uri, ... }
       }
     } catch (error) {
       console.error('[PollingManager] Error loading last processed post URIs:', error);
@@ -225,220 +283,54 @@ class BaseBot {
   _saveLastProcessedPostUris() {
     try {
       fs.writeFileSync(this.lastProcessedPostUrisFilePath, JSON.stringify(this.lastProcessedPostUris, null, 2), 'utf-8');
+      // console.log(`[PollingManager] Saved last processed post URIs to ${this.lastProcessedPostUrisFilePath}`);
     } catch (error) {
       console.error('[PollingManager] Error saving last processed post URIs:', error);
     }
   }
 
-  _loadProactiveReplyTimestamps() {
-    try {
-      if (fs.existsSync(this.proactiveReplyTimestampsFilePath)) {
-        const data = fs.readFileSync(this.proactiveReplyTimestampsFilePath, 'utf-8');
-        const jsonData = JSON.parse(data);
-        for (const did in jsonData) {
-          if (typeof jsonData[did] !== 'object' || jsonData[did] === null || typeof jsonData[did].date !== 'string' || typeof jsonData[did].count !== 'number') {
-            console.warn(`[RateLimitProactive] Invalid data structure for user ${did} in timestamps file. Resetting.`);
-            delete jsonData[did];
-          }
-        }
-        console.log(`[RateLimitProactive] Loaded ${Object.keys(jsonData).length} users' proactive reply daily counts.`);
-        return jsonData;
-      }
-    } catch (error) {
-      console.error('[RateLimitProactive] Error loading proactive reply timestamps:', error);
-    }
-    console.log('[RateLimitProactive] No existing proactive reply timestamps file found. Starting empty.');
-    return {};
-  }
-
-  _saveProactiveReplyTimestamps() {
-    try {
-      fs.writeFileSync(this.proactiveReplyTimestampsFilePath, JSON.stringify(this.proactiveReplyTimestamps, null, 2), 'utf-8');
-    } catch (error) {
-      console.error('[RateLimitProactive] Error saving proactive reply timestamps:', error);
-    }
-  }
-
-  _canSendProactiveReply(userDid) {
-    if (this.adminDid && userDid === this.adminDid) {
-      // console.log(`[RateLimitProactive] Admin user ${userDid} bypasses proactive reply rate limit for this check.`);
-      return true; // Admin replies are not subject to this specific limit
-    }
-    const entry = this.proactiveReplyTimestamps[userDid];
-    const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-    if (!entry || entry.date !== currentDate) {
-      return true;
-    }
-    return entry.count < this.DAILY_PROACTIVE_REPLY_LIMIT;
-  }
-
-  _recordProactiveReplyTimestamp(userDid) {
-    if (this.adminDid && userDid === this.adminDid) {
-      // console.log(`[RateLimitProactive] Not recording proactive reply timestamp for admin user ${userDid}.`);
-      return; // Do not record for admin if they have separate/no limits by this system
-    }
-    const currentDate = new Date().toISOString().split('T')[0];
-    let entry = this.proactiveReplyTimestamps[userDid];
-    if (!entry || entry.date !== currentDate) {
-      this.proactiveReplyTimestamps[userDid] = { date: currentDate, count: 1 };
-    } else {
-      entry.count++;
-    }
-    this._saveProactiveReplyTimestamps();
-    console.log(`[RateLimitProactive] Recorded proactive reply for ${userDid}. Date: ${currentDate}, Count: ${this.proactiveReplyTimestamps[userDid].count}`);
-  }
-
   async getBotFollowingDids() {
     const now = Date.now();
     if (this.followingCache && now - this.followingCache.lastFetched < this.followingCache.ttl) {
+      // console.log('[FollowList] Using cached following list.');
       return this.followingCache.dids;
     }
+
     console.log('[FollowList] Fetching bot\'s following list...');
-    if (!this.agent || !this.agent.did) {
+    if (!this.agent || !this.agent.did) { // Ensure agent and agent.did are available
         console.error('[FollowList] Agent DID not available. Cannot fetch follows.');
-        this.followingCache = { dids: [], lastFetched: now, ttl: 15 * 60 * 1000 }; // Reset cache time
+        this.followingCache = { dids: [], lastFetched: now, ttl: this.followingCache.ttl }; // Update timestamp to prevent rapid retries
         return [];
     }
-    let follows = [];
+
+    let followsDids = [];
     let cursor;
     try {
       do {
         const response = await this.agent.api.app.bsky.graph.getFollows({
-          actor: this.agent.did,
-          limit: 100,
+          actor: this.agent.did, // Use the bot's own DID
+          limit: 100, // Max limit per page
           cursor: cursor
         });
         if (response.success && response.data.follows) {
-          follows = follows.concat(response.data.follows.map(follow => follow.did));
+          followsDids = followsDids.concat(response.data.follows.map(follow => follow.did));
           cursor = response.data.cursor;
         } else {
-          console.warn('[FollowList] Failed to fetch a page of follows.');
-          cursor = null;
+          console.warn('[FollowList] Failed to fetch a page of follows or no follows data in page.');
+          cursor = null; // Stop on error or no more data
         }
-      } while (cursor && follows.length < 1000); // Increased safety break
-      this.followingCache = { dids: follows, lastFetched: now, ttl: 15 * 60 * 1000 };
-      console.log(`[FollowList] Fetched ${follows.length} DIDs from bot's following list.`);
-      return follows;
+      } while (cursor && followsDids.length < 1000); // Safety break for very large follow lists (e.g., max 10 pages)
+
+      this.followingCache = { dids: followsDids, lastFetched: now, ttl: this.followingCache.ttl };
+      console.log(`[FollowList] Fetched ${followsDids.length} DIDs from bot's following list.`);
+      return followsDids;
     } catch (error) {
       console.error('[FollowList] Error fetching bot\'s following list:', error);
-      this.followingCache.lastFetched = now; // Update timestamp even on error to prevent rapid retries
-      return this.followingCache.dids; // Return possibly stale cache
+      this.followingCache.lastFetched = now; // Update timestamp even on error to prevent rapid retries on persistent errors
+      return this.followingCache.dids; // Return possibly stale cache if available, else empty
     }
   }
 
-  async pollTrackedUserFeeds() {
-    const adminDID = this.adminDid; // Resolved during authenticate
-    let followedDids = await this.getBotFollowingDids();
-
-    let didsToPoll = [];
-    if (adminDID) {
-      didsToPoll.push(adminDID);
-    }
-    if (followedDids && followedDids.length > 0) {
-      didsToPoll = didsToPoll.concat(followedDids.filter(did => did !== adminDID)); // Avoid duplicates
-    }
-    didsToPoll = [...new Set(didsToPoll)]; // Final de-duplication
-
-    if (didsToPoll.length === 0) {
-      // console.log('[PollTracked] No DIDs to poll (neither admin nor followed users found).');
-      return;
-    }
-
-    console.log(`[PollTracked] Starting poll for ${didsToPoll.length} DIDs (Admin: ${adminDID ? 'Yes' : 'No'}, Followed: ${followedDids.length}).`);
-    let newPostsFoundThisCycle = 0;
-
-    for (const userDid of didsToPoll) {
-      try {
-        const { data: feedData } = await this.agent.api.app.bsky.feed.getAuthorFeed({
-          actor: userDid,
-          limit: 10
-        });
-
-        if (feedData && feedData.feed) {
-          const postsInFeed = feedData.feed;
-          const lastProcessedUri = this.lastProcessedPostUris[userDid];
-          let currentNewestUriForUserInThisPoll = null;
-          let newPostsToProcessForThisUser = [];
-
-          for (const feedItem of postsInFeed) {
-            if (!feedItem.post || !feedItem.post.record) continue;
-            if (!currentNewestUriForUserInThisPoll) {
-              currentNewestUriForUserInThisPoll = feedItem.post.uri;
-            }
-            if (feedItem.post.uri === lastProcessedUri) break;
-            if (!feedItem.post.record.reply && feedItem.post.author.did === userDid) {
-              newPostsToProcessForThisUser.push(feedItem.post);
-            }
-          }
-
-          if (newPostsToProcessForThisUser.length > 0) {
-            console.log(`[PollTracked] Found ${newPostsToProcessForThisUser.length} new post(s) for ${userDid === adminDID ? 'Admin user' : 'followed user'} ${userDid}.`);
-            for (const newPostObject of newPostsToProcessForThisUser.reverse()) {
-              console.log(`[PollTracked] Identified new post by ${newPostObject.author.handle} (URI: ${newPostObject.uri}): "${newPostObject.record.text ? newPostObject.record.text.substring(0, 50) + '...' : 'No text'}"`);
-              if (userDid === adminDID) {
-                await this.handleAdminProactiveEngagement(newPostObject);
-              } else {
-                await this.handleProactiveEngagement(newPostObject);
-              }
-              newPostsFoundThisCycle++;
-            }
-          }
-          if (currentNewestUriForUserInThisPoll) {
-            this.lastProcessedPostUris[userDid] = currentNewestUriForUserInThisPoll;
-          }
-        }
-      } catch (error) {
-        console.error(`[PollTracked] Error polling feed for user ${userDid}:`, error);
-      }
-      await utils.sleep(1000);
-    }
-
-    if (didsToPoll.length > 0) {
-        this._saveLastProcessedPostUris();
-    }
-    if (newPostsFoundThisCycle > 0) {
-        console.log(`[PollTracked] Finished poll. Identified ${newPostsFoundThisCycle} new posts to consider.`);
-    }
-  }
-
-  async handleAdminProactiveEngagement(postObject) {
-    // MVP: Just log admin posts for now. Can be expanded with specific command parsing.
-    console.log(`[AdminPostMonitor] Admin @${postObject.author.handle} posted: "${postObject.record.text ? postObject.record.text.substring(0,100) + '...' : 'No text'}" (URI: ${postObject.uri})`);
-    // Example: if (postObject.record.text.includes("!bot-status")) { await this.postReply(postObject, "Status: All systems nominal!"); }
-  }
-
-  async handleProactiveEngagement(postView) {
-    if (!postView || !postView.author || !postView.author.did) {
-      console.warn('[handleProactiveEngagement] Invalid postView received.');
-      return;
-    }
-    const authorDid = postView.author.did;
-    const authorHandle = postView.author.handle;
-
-    if (this._canSendProactiveReply(authorDid)) {
-      const replyText = await this.generateProactivePersonaReply(postView);
-      if (replyText && replyText.trim().toUpperCase() !== 'NO_REPLY') {
-        console.log(`[handleProactiveEngagement] Persona logic suggests reply to ${authorHandle} for ${postView.uri}: "${replyText.substring(0, 50)}..."`);
-        const targetPostForReply = {
-            uri: postView.uri,
-            cid: postView.cid,
-            author: postView.author,
-            record: { text: postView.record.text, createdAt: postView.record.createdAt }
-        };
-        await this.postReply(targetPostForReply, replyText.trim());
-        this._recordProactiveReplyTimestamp(authorDid);
-      }
-    } else {
-      // console.log(`[handleProactiveEngagement] Daily limit reached or cooldown for ${authorHandle}.`);
-    }
-  }
-
-  async generateProactivePersonaReply(postView) {
-    console.warn('[BaseBot] generateProactivePersonaReply needs to be implemented by a child class.');
-    return null;
-  }
-
-  // Helper to cleanup expired pending analyses
   _cleanupExpiredDetailedAnalyses() {
     const now = Date.now();
     for (const [key, value] of this.pendingDetailedAnalyses.entries()) {
