@@ -1324,8 +1324,8 @@ Respond ONLY with a single JSON object.`;
       RateLimit.check();
       RateLimit.check();
       const CHAR_LIMIT_PER_POST = 300; // Bluesky's actual limit
-      const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
-      const MAX_PARTS = 3;
+      const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/4]" (length is same)
+      const MAX_PARTS = 4; // Changed from 3 to 4
       let textParts = [];
       let postedPartUris = []; // Initialize array to store URIs of posted parts
       let lastSuccessfulCid = null; // Added to store the CID of the last successfully posted part
