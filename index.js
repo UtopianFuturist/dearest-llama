@@ -5078,7 +5078,7 @@ Ensure your entire response is ONLY the JSON object.`;
 
 // Initialize and run the bot
 async function startBots() {
-  const agent = new AtpAgent({ service: 'httpsky.social' });
+  const agent = new AtpAgent({ service: 'https://bsky.social' });
   const llamaBot = new LlamaBot({
     ...config,
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
