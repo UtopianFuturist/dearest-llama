@@ -5095,12 +5095,15 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
           let postsCursor;
           const { data: feedResponse } = await this.agent.api.app.bsky.feed.getAuthorFeed({
             actor: followedUserDid,
-            limit: 20, // Check recent 20 posts per followed user
+            limit: 10, // Check recent 10 posts per followed user
             // cursor: postsCursor; // Not managing deep pagination for each followed user for now to keep it simple
           });
 
           if (feedResponse && feedResponse.feed) {
             console.log(`[BotFeedMonitor] Found ${feedResponse.feed.length} items for DID: ${followedUserDid}`);
+            let repliesSentToThisUserThisScan = 0; // Counter for replies to this specific user in this scan
+            const MAX_REPLIES_PER_USER_PER_SCAN = 2;
+
             for (const item of feedResponse.feed) {
               // Skip simple reposts (boosts)
               if (item.reason && item.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
@@ -5304,25 +5307,45 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                         }
 
                         if (responseText) {
-                            await this.postReply(postObject, responseText);
-                            this._recordProactiveReplyTimestamp(postObject.author.did);
-                            console.log(`[BotFeedMonitor] Replied to bot mention in post ${postObject.uri}`);
+                            if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
+                                console.log(`[BotFeedMonitor] MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle} (DID: ${postObject.author.did}) during this scan. Skipping further replies to this user in this scan.`);
+                            } else {
+                                await this.postReply(postObject, responseText);
+                                this._recordProactiveReplyTimestamp(postObject.author.did); // This still counts towards daily limit
+                                repliesSentToThisUserThisScan++;
+                                console.log(`[BotFeedMonitor] Replied to post ${postObject.uri} (user: ${postObject.author.handle}). Replies to this user this scan: ${repliesSentToThisUserThisScan}/${MAX_REPLIES_PER_USER_PER_SCAN}.`);
+                            }
                         }
                     }
                 } else {
                     console.error(`[BotFeedMonitor] NIM API error generating response for bot mention: ${nimResponse.status}`);
                 }
                 processedBotFeedPosts.add(postObject.uri); // Use new set
-              } else {
+              } else if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
+                  console.log(`[BotFeedMonitor] MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle} (DID: ${postObject.author.did}) before processing post ${postObject.uri}. Skipping this post and further posts for this user in this scan.`);
+                  // No 'continue' here, as we want to break the inner loop for this user if the limit is hit.
+                  // However, the loop structure is `for (const item of feedResponse.feed)`, so we can't easily break
+                  // for *just this user* and continue with the next user.
+                  // The current implementation will just skip replying to further posts from this user in this scan.
+                  // To break for the user, the outer loop `for (const followedUserDid of botFollowsDids)` would need restructuring
+                  // or a flag set here to break from the inner loop.
+                  // For now, it will iterate all posts but skip replies past the limit.
+                  // If the limit is reached, we should still add old posts to processed set.
+                  const postDate = new Date(postObject.record.createdAt);
+                  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+                  if (postDate < twoDaysAgo) {
+                      processedBotFeedPosts.add(postObject.uri);
+                  }
+              } else { // This 'else' corresponds to 'if (canProactivelyReply)' being false
                 const postDate = new Date(postObject.record.createdAt);
                 const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
                 if (postDate < twoDaysAgo) {
                     processedBotFeedPosts.add(postObject.uri); // Use new set
                 }
               }
-            }
-          }
-          await utils.sleep(2000);
+            } // End of for (const item of feedResponse.feed)
+          } // End of if (feedResponse && feedResponse.feed)
+          await utils.sleep(2000); // Delay between processing different followed users
         }
         saveProcessedBotFeedPosts(); // Use new save function
         console.log(`[BotFeedMonitor] Finished bot following feed scan. Waiting for ${CHECK_INTERVAL_BOT_FEED / 1000 / 60} minutes.`);
