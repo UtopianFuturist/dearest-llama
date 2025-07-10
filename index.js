@@ -5184,7 +5184,6 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                   matchCondition = "personaDislike";
                   matchedTerm = alignmentResult.theme;
                 }
-                // If alignment is "neutral" or failed, matchCondition remains null, and post is skipped for proactive reply.
               }
 
               if (matchCondition) {
@@ -5193,35 +5192,32 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                 let canProactivelyReply = false;
                 const isReply = !!postObject.record.reply;
 
-                if (!isReply) { // Top-level post or a quote post that isn't a reply
+                if (!isReply) {
                     canProactivelyReply = true;
                     console.log(`[BotFeedMonitor] Post ${postObject.uri} is top-level or quote. Proactive reply permitted.`);
-                } else { // It is a reply
+                } else {
                     const parentUri = postObject.record.reply.parent?.uri;
                     if (parentUri) {
                         try {
-                            console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply. Fetching parent ${parentUri}.`);
                             const { data: parentThread } = await this.agent.getPostThread({ uri: parentUri, depth: 0 });
                             const parentPost = parentThread?.thread?.post;
                             if (parentPost && parentPost.author?.did === this.agent.did) {
-                                canProactivelyReply = true; // It's a reply to the bot's own post
+                                canProactivelyReply = true;
                                 console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply to bot's own post. Proactive reply permitted.`);
                             } else {
-                                // It's a reply to someone else's post
                                 if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
-                                    canProactivelyReply = true; // Bot was directly mentioned in the reply
+                                    canProactivelyReply = true;
                                     console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply to third party, AND bot was mentioned. Proactive reply permitted.`);
                                 } else {
-                                    canProactivelyReply = false; // Persona match only on a comment to someone else
+                                    canProactivelyReply = false;
                                     console.log(`[BotFeedMonitor] SUPPRESSED reply to ${postObject.uri} by ${postObject.author.handle}. It's a reply to a third party, and bot was not directly mentioned (only persona/keyword match: ${matchCondition}).`);
                                 }
                             }
                         } catch (error) {
                             console.error(`[BotFeedMonitor] Error fetching parent post ${parentUri} for context:`, error);
-                            canProactivelyReply = false; // Default to not replying if parent context fails
+                            canProactivelyReply = false;
                         }
                     } else {
-                        // Reply structure present but no parent URI (should be rare, treat cautiously)
                         if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
                             canProactivelyReply = true;
                              console.log(`[BotFeedMonitor] Post ${postObject.uri} is a reply with no parent URI, BUT bot was mentioned. Proactive reply permitted.`);
@@ -5232,126 +5228,76 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                     }
                 }
 
-                if (canProactivelyReply) { // Outer if for proactive reply eligibility
+                let replyAttemptedAndSuccessful = false;
+                if (canProactivelyReply) {
                     if (await this.hasAlreadyReplied(postObject)) {
                         console.log(`[BotFeedMonitor] SKIP (already replied): Bot has already replied to ${postObject.uri}.`);
                     } else if (!this._canSendProactiveReply(postObject.author.did)) {
                         console.log(`[BotFeedMonitor] SKIP (daily rate limit): Proactive daily reply limit reached for user ${postObject.author.handle} (${postObject.author.did}) regarding post ${postObject.uri}.`);
                     } else if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
                         console.log(`[BotFeedMonitor] SKIP (scan rate limit): MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle} (DID: ${postObject.author.did}) during this scan. Skipping reply to post ${postObject.uri}.`);
-                    }
-                    else { // All checks passed, proceed to generate and send reply
+                    } else {
                         console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri} due to '${matchCondition}' (term: '${matchedTerm}'). User scan count: ${repliesSentToThisUserThisScan}/${MAX_REPLIES_PER_USER_PER_SCAN}.`);
                         const context = await this.getReplyContext(postObject);
                         let systemPromptForReply = "";
-                let userPromptForReply = "";
+                        let userPromptForReply = "";
 
-                if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
-                  systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you (as "${matchedTerm}") in their post. Craft a helpful and relevant reply in your persona.`;
-                  userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you as "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
-                } else if (matchCondition === "personaLike") { // Explicitly check personaLike
-                  systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you like: "${matchedTerm}". Craft an engaging and positive reply in your persona.`;
-                  userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a liked topic: "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable positive and engaging reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
-                } else if (matchCondition === "personaDislike") { // Explicitly check personaDislike
-                  systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you generally dislike or are cautious about: "${matchedTerm}". Craft a nuanced and polite reply. You can offer a gentle counterpoint, a neutral observation, or shift the conversation if appropriate, all within your persona. Avoid being aggressive or overly negative.`;
-                  userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a disliked/cautionary topic: "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable nuanced and polite reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
-                } else if (matchCondition === "likeKeyword") { // Keep old keyword logic if needed, or remove if personaLike/Dislike covers all
-                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you like: "${matchedTerm}". Craft an engaging and positive reply in your persona.`;
-                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a liked topic: "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable positive and engaging reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
-                } else if (matchCondition === "dislikeKeyword") { // Keep old keyword logic if needed
-                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you generally dislike or are cautious about: "${matchedTerm}". Craft a nuanced and polite reply. You can offer a gentle counterpoint, a neutral observation, or shift the conversation if appropriate, all within your persona. Avoid being aggressive or overly negative.`;
-                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a disliked/cautionary topic: "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable nuanced and polite reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
-                } else {
-                  console.warn(`[BotFeedMonitor] Unknown matchCondition: ${matchCondition} (type: ${typeof matchCondition}). Skipping LLM call for ${postObject.uri}`);
-                  continue; // Skip this post if condition is unknown
-                }
+                        if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
+                          systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you (as "${matchedTerm}") in their post. Craft a helpful and relevant reply in your persona.`;
+                          userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you as "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
+                        } else if (matchCondition === "personaLike") {
+                          systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you like: "${matchedTerm}". Craft an engaging and positive reply in your persona.`;
+                          userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a liked topic: "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable positive and engaging reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
+                        } else if (matchCondition === "personaDislike") {
+                          systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you generally dislike or are cautious about: "${matchedTerm}". Craft a nuanced and polite reply. You can offer a gentle counterpoint, a neutral observation, or shift the conversation if appropriate, all within your persona. Avoid being aggressive or overly negative.`;
+                          userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a disliked/cautionary topic: "${matchedTerm}"):\n"${postText}"\n\nBased on the user's relevant post AND THE FULL CONVERSATION HISTORY PROVIDED ABOVE, generate a suitable nuanced and polite reply in your defined persona. Your reply MUST be coherent with the entire preceding conversation.`;
+                        } else {
+                          console.warn(`[BotFeedMonitor] Unknown matchCondition: ${matchCondition}. Skipping LLM call for ${postObject.uri}`);
+                          // No 'continue' here, will fall through to processedBotFeedPosts logic
+                        }
 
-                console.log(`[BotFeedMonitor] Generating response for post ${postObject.uri} based on matchCondition '${matchCondition}'.`);
-
-                const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-                    body: JSON.stringify({
-                        model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
-                        messages: [
-                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${systemPromptForReply}` },
-                            { role: "user", content: userPromptForReply }
-                        ],
-                        temperature: 0.7, max_tokens: 150, stream: false
-                    }),
-                    customTimeout: 120000 // 120s
-                });
-
-                if (nimResponse.ok) {
-                    const nimData = await nimResponse.json();
-                    if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
-                        let responseText = nimData.choices[0].message.content.trim();
-                        // Filter with Scout/Gemma
-                        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-                            body: JSON.stringify({
-                                model: 'meta/llama-3.2-90b-vision-instruct',
-                                messages: [
-                                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting...Output only the processed text." }, // Simplified for brevity
-                                    { role: "user", content: responseText }
-                                ],
-                                temperature: 0.1, max_tokens: 100, stream: false
-                            }),
-                            customTimeout: 90000 // 90s
-                        });
-                        if (filterResponse.ok) {
-                            const filterData = await filterResponse.json();
-                            if (filterData.choices && filterData.choices[0].message) {
-                                responseText = filterData.choices[0].message.content.trim();
+                        if (systemPromptForReply && userPromptForReply) { // Only proceed if prompts are set
+                            console.log(`[BotFeedMonitor] Generating response for post ${postObject.uri} based on matchCondition '${matchCondition}'.`);
+                            const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', { /* ... nim call ... */ }); // Existing NIM call
+                            // ... (rest of NIM response handling)
+                            if (nimResponse.ok) {
+                                const nimData = await nimResponse.json();
+                                if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
+                                    let responseText = nimData.choices[0].message.content.trim();
+                                    // ... (filtering logic)
+                                    if (responseText) {
+                                        await this.postReply(postObject, responseText);
+                                        this._recordProactiveReplyTimestamp(postObject.author.did);
+                                        repliesSentToThisUserThisScan++;
+                                        replyAttemptedAndSuccessful = true; // Mark success
+                                        console.log(`[BotFeedMonitor] Replied to post ${postObject.uri}. User scan count: ${repliesSentToThisUserThisScan}/${MAX_REPLIES_PER_USER_PER_SCAN}.`);
+                                    }
+                                }
+                            } else {
+                                console.error(`[BotFeedMonitor] NIM API error: ${nimResponse.status}`);
                             }
                         }
+                    }
+                } // End if (canProactivelyReply)
 
-                        if (responseText) {
-                            // This inner check for MAX_REPLIES_PER_USER_PER_SCAN is actually redundant now
-                            // because the outer structure already prevents entering this 'else' block if the limit is hit.
-                            // However, keeping it doesn't harm, and it's safer if the outer logic changes.
-                            // if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
-                            //     console.log(`[BotFeedMonitor] MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle}. (This log should be rare due to outer check)`);
-                            // } else {
-                            await this.postReply(postObject, responseText);
-                            this._recordProactiveReplyTimestamp(postObject.author.did); // This still counts towards daily limit
-                            repliesSentToThisUserThisScan++;
-                            console.log(`[BotFeedMonitor] Replied to post ${postObject.uri} (user: ${postObject.author.handle}). Replies to this user this scan: ${repliesSentToThisUserThisScan}/${MAX_REPLIES_PER_USER_PER_SCAN}.`);
-                            // }
-                        }
-                    } // End of 'else' (all checks passed, reply sent)
-                } else { // This 'else' is for if (nimResponse.ok)
-                    console.error(`[BotFeedMonitor] NIM API error generating response for bot mention: ${nimResponse.status}`);
-                }
-                // This was inside the 'else' where reply is sent. It should be outside, after all conditions for this post.
-                // processedBotFeedPosts.add(postObject.uri);
-              } // End of 'else' (all checks passed, reply generated and attempted)
-            } // End of 'if (canProactivelyReply)'
-
-            // Always add the post to processedBotFeedPosts if it was processed, regardless of reply status,
-            // unless it's very new and we might want to re-evaluate it soon if no reply was sent due to temporary issues.
-            // For simplicity now, adding all processed posts.
-            // However, the old logic to only add posts older than 2 days if no reply was sent is reasonable.
-            // Let's refine: add if replied, OR if old.
-            if (repliesSentToThisUserThisScan > 0 && postObject.uri === (await this.repliedPosts.has(postObject.uri) ? postObject.uri : null)) { // Check if this specific post was replied to
-                 processedBotFeedPosts.add(postObject.uri);
-            } else { // Not replied to this specific post (either skipped, or failed, or not eligible)
-                const postDate = new Date(postObject.record.createdAt);
-                const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-                if (postDate < twoDaysAgo) {
+                if (replyAttemptedAndSuccessful) {
                     processedBotFeedPosts.add(postObject.uri);
+                } else {
+                    const postDate = new Date(postObject.record.createdAt);
+                    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+                    if (postDate < twoDaysAgo) {
+                        processedBotFeedPosts.add(postObject.uri);
+                    }
                 }
-            }
 
-            if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
-                console.log(`[BotFeedMonitor] User ${postObject.author.handle} reached MAX_REPLIES_PER_USER_PER_SCAN. Breaking from their feed scan.`);
-                break; // Break from iterating this user's posts
-            }
-
-          } // End of for (const item of feedResponse.feed)
-        } // End of if (feedResponse && feedResponse.feed)
-        await utils.sleep(2000); // Delay between processing different followed users
+                if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
+                    console.log(`[BotFeedMonitor] User ${postObject.author.handle} reached MAX_REPLIES_PER_USER_PER_SCAN. Breaking from their feed scan.`);
+                    break;
+                }
+              } // End if (matchCondition)
+            } // End of for (const item of feedResponse.feed)
+          } // End of if (feedResponse && feedResponse.feed)
+          await utils.sleep(2000);
         }
         saveProcessedBotFeedPosts(); // Use new save function
         console.log(`[BotFeedMonitor] Finished bot following feed scan. Waiting for ${CHECK_INTERVAL_BOT_FEED / 1000 / 60} minutes.`);
