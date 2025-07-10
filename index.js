@@ -5095,12 +5095,15 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
           let postsCursor;
           const { data: feedResponse } = await this.agent.api.app.bsky.feed.getAuthorFeed({
             actor: followedUserDid,
-            limit: 20, // Check recent 20 posts per followed user
+            limit: 10, // Check recent 10 posts per followed user
             // cursor: postsCursor; // Not managing deep pagination for each followed user for now to keep it simple
           });
 
           if (feedResponse && feedResponse.feed) {
             console.log(`[BotFeedMonitor] Found ${feedResponse.feed.length} items for DID: ${followedUserDid}`);
+            let repliesSentToThisUserThisScan = 0; // Counter for replies to this specific user in this scan
+            const MAX_REPLIES_PER_USER_PER_SCAN = 2;
+
             for (const item of feedResponse.feed) {
               // Skip simple reposts (boosts)
               if (item.reason && item.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
@@ -5229,15 +5232,16 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                     }
                 }
 
-                if (canProactivelyReply) {
+                if (canProactivelyReply) { // Outer if for proactive reply eligibility
                     if (await this.hasAlreadyReplied(postObject)) {
                         console.log(`[BotFeedMonitor] SKIP (already replied): Bot has already replied to ${postObject.uri}.`);
-                        // No continue here, will fall through to add to processedBotFeedPosts
                     } else if (!this._canSendProactiveReply(postObject.author.did)) {
-                        console.log(`[BotFeedMonitor] SKIP (rate limit): Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}) regarding post ${postObject.uri}.`);
-                        // No continue here, will fall through to add to processedBotFeedPosts
-                    } else {
-                        console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri} due to '${matchCondition}' (term: '${matchedTerm}').`);
+                        console.log(`[BotFeedMonitor] SKIP (daily rate limit): Proactive daily reply limit reached for user ${postObject.author.handle} (${postObject.author.did}) regarding post ${postObject.uri}.`);
+                    } else if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
+                        console.log(`[BotFeedMonitor] SKIP (scan rate limit): MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle} (DID: ${postObject.author.did}) during this scan. Skipping reply to post ${postObject.uri}.`);
+                    }
+                    else { // All checks passed, proceed to generate and send reply
+                        console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri} due to '${matchCondition}' (term: '${matchedTerm}'). User scan count: ${repliesSentToThisUserThisScan}/${MAX_REPLIES_PER_USER_PER_SCAN}.`);
                         const context = await this.getReplyContext(postObject);
                         let systemPromptForReply = "";
                 let userPromptForReply = "";
@@ -5304,25 +5308,50 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                         }
 
                         if (responseText) {
+                            // This inner check for MAX_REPLIES_PER_USER_PER_SCAN is actually redundant now
+                            // because the outer structure already prevents entering this 'else' block if the limit is hit.
+                            // However, keeping it doesn't harm, and it's safer if the outer logic changes.
+                            // if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
+                            //     console.log(`[BotFeedMonitor] MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle}. (This log should be rare due to outer check)`);
+                            // } else {
                             await this.postReply(postObject, responseText);
-                            this._recordProactiveReplyTimestamp(postObject.author.did);
-                            console.log(`[BotFeedMonitor] Replied to bot mention in post ${postObject.uri}`);
+                            this._recordProactiveReplyTimestamp(postObject.author.did); // This still counts towards daily limit
+                            repliesSentToThisUserThisScan++;
+                            console.log(`[BotFeedMonitor] Replied to post ${postObject.uri} (user: ${postObject.author.handle}). Replies to this user this scan: ${repliesSentToThisUserThisScan}/${MAX_REPLIES_PER_USER_PER_SCAN}.`);
+                            // }
                         }
-                    }
-                } else {
+                    } // End of 'else' (all checks passed, reply sent)
+                } else { // This 'else' is for if (nimResponse.ok)
                     console.error(`[BotFeedMonitor] NIM API error generating response for bot mention: ${nimResponse.status}`);
                 }
-                processedBotFeedPosts.add(postObject.uri); // Use new set
-              } else {
+                // This was inside the 'else' where reply is sent. It should be outside, after all conditions for this post.
+                // processedBotFeedPosts.add(postObject.uri);
+              } // End of 'else' (all checks passed, reply generated and attempted)
+            } // End of 'if (canProactivelyReply)'
+
+            // Always add the post to processedBotFeedPosts if it was processed, regardless of reply status,
+            // unless it's very new and we might want to re-evaluate it soon if no reply was sent due to temporary issues.
+            // For simplicity now, adding all processed posts.
+            // However, the old logic to only add posts older than 2 days if no reply was sent is reasonable.
+            // Let's refine: add if replied, OR if old.
+            if (repliesSentToThisUserThisScan > 0 && postObject.uri === (await this.repliedPosts.has(postObject.uri) ? postObject.uri : null)) { // Check if this specific post was replied to
+                 processedBotFeedPosts.add(postObject.uri);
+            } else { // Not replied to this specific post (either skipped, or failed, or not eligible)
                 const postDate = new Date(postObject.record.createdAt);
                 const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
                 if (postDate < twoDaysAgo) {
-                    processedBotFeedPosts.add(postObject.uri); // Use new set
+                    processedBotFeedPosts.add(postObject.uri);
                 }
-              }
             }
-          }
-          await utils.sleep(2000);
+
+            if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
+                console.log(`[BotFeedMonitor] User ${postObject.author.handle} reached MAX_REPLIES_PER_USER_PER_SCAN. Breaking from their feed scan.`);
+                break; // Break from iterating this user's posts
+            }
+
+          } // End of for (const item of feedResponse.feed)
+        } // End of if (feedResponse && feedResponse.feed)
+        await utils.sleep(2000); // Delay between processing different followed users
         }
         saveProcessedBotFeedPosts(); // Use new save function
         console.log(`[BotFeedMonitor] Finished bot following feed scan. Waiting for ${CHECK_INTERVAL_BOT_FEED / 1000 / 60} minutes.`);
