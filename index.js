@@ -194,8 +194,13 @@ class BaseBot {
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
     // Removed subscription file properties
     // Removed lastProcessedPostUris properties and methods as timeline cursor is used now
+    // Removed lastProcessedPostUris properties and methods as timeline cursor is used now
     // this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
     // this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // { userDid: lastUri }
+    this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
+    this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // Re-introducing for per-user polling
+
+    this.followingCache = { dids: [], lastFetched: 0, ttl: 15 * 60 * 1000 }; // Cache for bot's following list
 
     // Timeline properties
     this.lastTimelineFetchTime = 0;
@@ -203,9 +208,34 @@ class BaseBot {
     this.timelineCursor = null; // In-memory for MVP
 
     this.proactiveReplyTimestampsFilePath = path.join(process.cwd(), 'proactive_reply_timestamps.json');
-    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps(); // { userDid: timestamp }
-    this.PROACTIVE_REPLY_COOLDOWN = 6 * 60 * 60 * 1000; // 6 hours
+    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps(); // Now { userDid: { date: "YYYY-MM-DD", count: N } }
+    // this.PROACTIVE_REPLY_COOLDOWN = 6 * 60 * 60 * 1000; // Obsolete, replaced by daily limit
+    this.DAILY_PROACTIVE_REPLY_LIMIT = 5; // Configurable daily limit per user
     // this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY = ["image generation", "meme", "bluesky api", "nasa apod", "youtube search", "giphy search", "web search", "bot help", "readme"]; // Obsolete
+  }
+
+  _loadLastProcessedPostUris() {
+    try {
+      if (fs.existsSync(this.lastProcessedPostUrisFilePath)) {
+        const data = fs.readFileSync(this.lastProcessedPostUrisFilePath, 'utf-8');
+        const jsonData = JSON.parse(data);
+        console.log(`[PollingManager] Loaded ${Object.keys(jsonData).length} users' last processed post URIs.`);
+        return jsonData; // Should be an object like { did: uri, ... }
+      }
+    } catch (error) {
+      console.error('[PollingManager] Error loading last processed post URIs:', error);
+    }
+    console.log('[PollingManager] No existing last processed post URIs file found or error loading. Starting empty.');
+    return {};
+  }
+
+  _saveLastProcessedPostUris() {
+    try {
+      fs.writeFileSync(this.lastProcessedPostUrisFilePath, JSON.stringify(this.lastProcessedPostUris, null, 2), 'utf-8');
+      // console.log(`[PollingManager] Saved last processed post URIs to ${this.lastProcessedPostUrisFilePath}`);
+    } catch (error) {
+      console.error('[PollingManager] Error saving last processed post URIs:', error);
+    }
   }
 
   _loadProactiveReplyTimestamps() {
@@ -213,7 +243,14 @@ class BaseBot {
       if (fs.existsSync(this.proactiveReplyTimestampsFilePath)) {
         const data = fs.readFileSync(this.proactiveReplyTimestampsFilePath, 'utf-8');
         const jsonData = JSON.parse(data);
-        console.log(`[RateLimitProactive] Loaded ${Object.keys(jsonData).length} users' proactive reply timestamps.`);
+        // Basic validation for the new structure
+        for (const did in jsonData) {
+          if (typeof jsonData[did] !== 'object' || jsonData[did] === null || typeof jsonData[did].date !== 'string' || typeof jsonData[did].count !== 'number') {
+            console.warn(`[RateLimitProactive] Invalid data structure for user ${did} in timestamps file. Resetting entry.`);
+            delete jsonData[did]; // Or handle migration/reset more gracefully
+          }
+        }
+        console.log(`[RateLimitProactive] Loaded ${Object.keys(jsonData).length} users' proactive reply daily counts.`);
         return jsonData;
       }
     } catch (error) {
@@ -232,16 +269,28 @@ class BaseBot {
   }
 
   _canSendProactiveReply(userDid) {
-    const lastReplyTime = this.proactiveReplyTimestamps[userDid];
-    if (!lastReplyTime) {
-      return true; // Never replied proactively
+    const entry = this.proactiveReplyTimestamps[userDid];
+    const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+    if (!entry || entry.date !== currentDate) {
+      return true; // No entry for today, or entry is for a previous day
     }
-    return (Date.now() - lastReplyTime) > this.PROACTIVE_REPLY_COOLDOWN;
+    return entry.count < this.DAILY_PROACTIVE_REPLY_LIMIT;
   }
 
   _recordProactiveReplyTimestamp(userDid) {
-    this.proactiveReplyTimestamps[userDid] = Date.now();
+    const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    let entry = this.proactiveReplyTimestamps[userDid];
+
+    if (!entry || entry.date !== currentDate) {
+      // New day or new user
+      this.proactiveReplyTimestamps[userDid] = { date: currentDate, count: 1 };
+    } else {
+      // Same day, increment count
+      entry.count++;
+    }
     this._saveProactiveReplyTimestamps();
+    console.log(`[RateLimitProactive] Recorded proactive reply for ${userDid}. Date: ${currentDate}, Count: ${this.proactiveReplyTimestamps[userDid].count}`);
   }
 
   // Old generateProactiveReply (keyword/question-based) removed.
@@ -250,18 +299,119 @@ class BaseBot {
   // _loadLastProcessedPostUris and _saveLastProcessedPostUris methods are removed as they are obsolete.
 
   // Removed _loadSubscribedUsers, _saveSubscribedUsers, addUserSubscription, removeUserSubscription, isUserSubscribed
+  // getSubscribedUsers is also removed as it's replaced by getBotFollowingDids
 
-  getSubscribedUsers() { // Now reads from environment variable
-    const trackedDidsEnv = process.env.BLUESKY_TRACKED_DIDS;
-    if (trackedDidsEnv && trackedDidsEnv.trim() !== "") {
-      const dids = trackedDidsEnv.split(',').map(did => did.trim()).filter(did => did.startsWith('did:plc:'));
-      if (dids.length > 0) {
-        // console.log(`[EnvTrack] Tracking ${dids.length} DIDs from BLUESKY_TRACKED_DIDS environment variable.`);
-        return dids;
-      }
+  async pollFollowedUserFeeds() {
+    // This method replaces the old pollSubscribedUserFeeds and checkFollowingTimeline
+    // It gets DIDs from the bot's own following list and polls each user's feed.
+
+    const followedDids = await this.getBotFollowingDids();
+    if (!followedDids || followedDids.length === 0) {
+      // console.log('[PollFollows] Bot is not following anyone, or failed to fetch list. Skipping poll.');
+      return;
     }
-    // console.log('[EnvTrack] BLUESKY_TRACKED_DIDS environment variable is not set or empty, or contains no valid DIDs. No users will be proactively tracked.');
-    return [];
+
+    console.log(`[PollFollows] Starting poll for ${followedDids.length} followed users.`);
+    let newPostsFoundThisCycle = 0;
+
+    for (const userDid of followedDids) {
+      try {
+        const { data: feedData } = await this.agent.api.app.bsky.feed.getAuthorFeed({
+          actor: userDid,
+          limit: 10 // Fetch recent 10 posts, newest first
+        });
+
+        if (feedData && feedData.feed) {
+          const postsInFeed = feedData.feed; // newest first
+          const lastProcessedUri = this.lastProcessedPostUris[userDid];
+          let currentNewestUriForUserInThisPoll = null;
+          let newPostsToProcessForThisUser = [];
+
+          for (const feedItem of postsInFeed) {
+            if (!feedItem.post || !feedItem.post.record) continue;
+
+            if (!currentNewestUriForUserInThisPoll) {
+              currentNewestUriForUserInThisPoll = feedItem.post.uri;
+            }
+
+            if (feedItem.post.uri === lastProcessedUri) {
+              break;
+            }
+
+            // Consider only original posts (not replies) by the followed user
+            // And ensure it's not a post by the bot itself (e.g. if bot follows itself for some reason)
+            if (!feedItem.post.record.reply && feedItem.post.author.did === userDid && feedItem.post.author.did !== this.agent.did) {
+              newPostsToProcessForThisUser.push(feedItem.post);
+            }
+          }
+
+          if (newPostsToProcessForThisUser.length > 0) {
+            console.log(`[PollFollows] Found ${newPostsToProcessForThisUser.length} new post(s) for followed user ${userDid}.`);
+            // Process oldest of the new ones first
+            for (const newPostObject of newPostsToProcessForThisUser.reverse()) {
+              console.log(`[PollFollows] Identified new post by ${newPostObject.author.handle} (URI: ${newPostObject.uri}): "${newPostObject.record.text ? newPostObject.record.text.substring(0, 50) + '...' : 'No text'}"`);
+              await this.handleProactiveEngagement(newPostObject); // Call the existing engagement handler
+              newPostsFoundThisCycle++;
+            }
+          }
+
+          if (currentNewestUriForUserInThisPoll) {
+            this.lastProcessedPostUris[userDid] = currentNewestUriForUserInThisPoll;
+          }
+        }
+      } catch (error) {
+        console.error(`[PollFollows] Error polling feed for user ${userDid}:`, error);
+      }
+      await utils.sleep(1000); // Stagger API calls slightly
+    }
+
+    if (followedDids.length > 0) {
+        this._saveLastProcessedPostUris();
+    }
+    if (newPostsFoundThisCycle > 0) {
+        console.log(`[PollFollows] Finished poll. Identified ${newPostsFoundThisCycle} new posts from followed users to consider for engagement.`);
+    }
+  }
+
+  async getBotFollowingDids() {
+    const now = Date.now();
+    if (this.followingCache && now - this.followingCache.lastFetched < this.followingCache.ttl) {
+      // console.log('[FollowList] Using cached following list.');
+      return this.followingCache.dids;
+    }
+
+    console.log('[FollowList] Fetching bot\'s following list...');
+    if (!this.agent || !this.agent.did) {
+        console.error('[FollowList] Agent DID not available. Cannot fetch follows.');
+        return [];
+    }
+
+    let follows = [];
+    let cursor;
+    try {
+      do {
+        const response = await this.agent.api.app.bsky.graph.getFollows({
+          actor: this.agent.did,
+          limit: 100, // Max limit
+          cursor: cursor
+        });
+        if (response.success && response.data.follows) {
+          follows = follows.concat(response.data.follows.map(follow => follow.did));
+          cursor = response.data.cursor;
+        } else {
+          console.warn('[FollowList] Failed to fetch a page of follows or no follows data.');
+          cursor = null; // Stop on error or no data
+        }
+      } while (cursor && follows.length < 500); // Safety break for very large follow lists, adjust as needed
+
+      this.followingCache = { dids: follows, lastFetched: now, ttl: 15 * 60 * 1000 };
+      console.log(`[FollowList] Fetched ${follows.length} DIDs from bot's following list.`);
+      return follows;
+    } catch (error) {
+      console.error('[FollowList] Error fetching bot\'s following list:', error);
+      // Return stale cache if available on error, otherwise empty
+      return this.followingCache ? this.followingCache.dids : [];
+    }
   }
 
   async checkFollowingTimeline() {
