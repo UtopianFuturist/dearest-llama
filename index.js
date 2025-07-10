@@ -1355,8 +1355,6 @@ Respond ONLY with a single JSON object.`;
   async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png') {
     try {
       RateLimit.check();
-      RateLimit.check();
-      RateLimit.check();
       const CHAR_LIMIT_PER_POST = 300; // Bluesky's actual limit
       const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/4]" (length is same)
       const MAX_PARTS = 4; // Changed from 3 to 4
@@ -3574,7 +3572,7 @@ Output only the processed text. This is an internal formatting step; do not ment
       console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
     } // Closes the catch block of generateResponse
-  } // Closes the generateResponse method async generateResponse(post, context) {
+  } // Closes the generateResponse method
 
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
