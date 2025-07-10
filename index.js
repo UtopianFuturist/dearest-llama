@@ -2,6 +2,8 @@ import { AtpAgent } from '@atproto/api';
 import config from './config.js';
 import fetch from 'node-fetch';
 import express from 'express';
+import path from 'path';
+import fs from 'fs';
 
 // Add express to your package.json dependencies
 const app = express();
