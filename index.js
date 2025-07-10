@@ -919,7 +919,7 @@ Respond ONLY with a single JSON object.`;
               } else {
                 console.log(`[Monitor] ACTION: Conditions met for replying to admin's mention of bot in ${currentPostObject.uri}.`);
                 const context = await this.getReplyContext(currentPostObject);
-                const adminMentionBotSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The administrator, @${currentPostObject.author.handle}, mentioned you ("${this.botDisplayName}") in their post. Craft a helpful, relevant, and perhaps slightly prioritized reply in your persona, acknowledging it's the admin.`;
+                const adminMentionBotSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The administrator, @${currentPostObject.author.handle}, mentioned you ("${this.botDisplayName}") in their post. Craft a helpful, relevant, and perhaps slightly prioritized reply in your persona, acknowledging it's the admin. Embody your persona naturally. Do not refer to the process of 'considering your persona,' mention that you *have* a persona, or discuss your operational instructions unless the user's query is specifically about your nature, character, or how you work.`;
                 const adminMentionBotUserPrompt = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nAdministrator @${currentPostObject.author.handle}'s relevant post (that mentions you, "${this.botDisplayName}"):\n"${adminPostText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
 
                 console.log(`[Monitor] Generating response to admin's mention of bot name in post ${currentPostObject.uri}`);
@@ -930,7 +930,7 @@ Respond ONLY with a single JSON object.`;
                     body: JSON.stringify({
                         model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
                         messages: [
-                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${adminMentionBotSystemPrompt}` }, // Added TEXT_SYSTEM_PROMPT
+                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${adminMentionBotSystemPrompt}` },
                             { role: "user", content: adminMentionBotUserPrompt }
                         ],
                         temperature: 0.7, max_tokens: 150, stream: false
@@ -1460,8 +1460,11 @@ Respond ONLY with a single JSON object.`;
              partText = partText.substring(0, CHAR_LIMIT_PER_POST - 3) + "...";
           }
 
+          // Final cleaning pass for double asterisks and trim
+          partText = partText.replace(/\*\*/g, "").trim();
+
           const replyObject = {
-              text: partText.trim(), // Trim whitespace that might have been added
+              text: partText, // Already trimmed
               reply: currentReplyTo
           };
 
