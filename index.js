@@ -2,6 +2,8 @@ import { AtpAgent } from '@atproto/api';
 import config from './config.js';
 import fetch from 'node-fetch';
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 
 // Add express to your package.json dependencies
 const app = express();
@@ -190,6 +192,280 @@ class BaseBot {
     this.repliedPosts = new Set();
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
+    this.subscribedUsersFilePath = path.join(process.cwd(), 'subscribed_users.json');
+    this.subscribedUserDids = this._loadSubscribedUsers();
+    this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
+    this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // { userDid: lastUri }
+    this.lastPollTime = 0;
+    this.POLL_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+    this.proactiveReplyTimestampsFilePath = path.join(process.cwd(), 'proactive_reply_timestamps.json');
+    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps(); // { userDid: timestamp }
+    this.PROACTIVE_REPLY_COOLDOWN = 6 * 60 * 60 * 1000; // 6 hours
+    this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY = ["image generation", "meme", "bluesky api", "nasa apod", "youtube search", "giphy search", "web search", "bot help", "readme"]; // Example keywords
+  }
+
+  _loadProactiveReplyTimestamps() {
+    try {
+      if (fs.existsSync(this.proactiveReplyTimestampsFilePath)) {
+        const data = fs.readFileSync(this.proactiveReplyTimestampsFilePath, 'utf-8');
+        const jsonData = JSON.parse(data);
+        console.log(`[RateLimitProactive] Loaded ${Object.keys(jsonData).length} users' proactive reply timestamps.`);
+        return jsonData;
+      }
+    } catch (error) {
+      console.error('[RateLimitProactive] Error loading proactive reply timestamps:', error);
+    }
+    console.log('[RateLimitProactive] No existing proactive reply timestamps file found. Starting empty.');
+    return {};
+  }
+
+  _saveProactiveReplyTimestamps() {
+    try {
+      fs.writeFileSync(this.proactiveReplyTimestampsFilePath, JSON.stringify(this.proactiveReplyTimestamps, null, 2), 'utf-8');
+    } catch (error) {
+      console.error('[RateLimitProactive] Error saving proactive reply timestamps:', error);
+    }
+  }
+
+  _canSendProactiveReply(userDid) {
+    const lastReplyTime = this.proactiveReplyTimestamps[userDid];
+    if (!lastReplyTime) {
+      return true; // Never replied proactively
+    }
+    return (Date.now() - lastReplyTime) > this.PROACTIVE_REPLY_COOLDOWN;
+  }
+
+  _recordProactiveReplyTimestamp(userDid) {
+    this.proactiveReplyTimestamps[userDid] = Date.now();
+    this._saveProactiveReplyTimestamps();
+  }
+
+  async generateProactiveReply(postObject, postAuthorHandle) {
+    if (!postObject || !postObject.record || !postObject.author || !postAuthorHandle) {
+      return null;
+    }
+
+    const postText = postObject.record.text || "";
+    const postAuthorDid = postObject.author.did;
+
+    // Check if the post is a reply to the bot itself. If so, it's not "proactive" in the same sense.
+    // The main notification handler should deal with direct replies/mentions.
+    // This proactive logic is for brand new posts by a subscribed user, not directed at the bot.
+    if (postObject.record.reply) {
+        // More detailed check: is it a reply to one of *our* bot's posts?
+        // For now, a simple check: if it's any reply, we might skip proactive engagement
+        // as it's part of an existing thread. The polling already filters for non-replies.
+        // This check is a safeguard if a reply somehow gets here.
+        // console.log(`[ProactiveReplyGen] Post ${postObject.uri} is a reply, skipping proactive engagement.`);
+        // return null;
+        // The pollSubscribedUserFeeds filters out replies, so this check might be redundant here
+        // but good for direct calls if this function were used elsewhere.
+    }
+
+    // Check rate limit for this user
+    if (!this._canSendProactiveReply(postAuthorDid)) {
+      console.log(`[ProactiveReplyGen] Cooldown active for user ${postAuthorHandle} (${postAuthorDid}). Skipping proactive reply.`);
+      return null;
+    }
+
+    // Logic 1: Post contains a question mark (and is not a reply to the bot)
+    if (postText.includes("?") && (!postObject.record.reply || postObject.record.reply.parent?.author?.handle !== this.config.BLUESKY_IDENTIFIER)) {
+      console.log(`[ProactiveReplyGen] Post by ${postAuthorHandle} contains a question. Offering help.`);
+      //this._recordProactiveReplyTimestamp(postAuthorDid); // Record *after* deciding to reply
+      return `@${postAuthorHandle} That's an interesting question! If you'd like me to try and find some information on that, or help in other ways, just let me know by replying to this message with more details or a specific request!`;
+    }
+
+    // Logic 2: Post mentions specific keywords
+    const lowerPostText = postText.toLowerCase();
+    for (const keyword of this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY) {
+      if (lowerPostText.includes(keyword.toLowerCase())) {
+        console.log(`[ProactiveReplyGen] Post by ${postAuthorHandle} mentions keyword: "${keyword}". Offering capability info.`);
+        //this._recordProactiveReplyTimestamp(postAuthorDid); // Record *after* deciding to reply
+        return `@${postAuthorHandle} I noticed your post about "${keyword}". I have some capabilities related to that (like ${keyword} tasks, searching, etc.). Feel free to ask if I can assist with anything!`;
+      }
+    }
+
+    // console.log(`[ProactiveReplyGen] No proactive reply conditions met for post ${postObject.uri} by ${postAuthorHandle}.`);
+    return null; // No conditions met
+  }
+
+  _loadLastProcessedPostUris() {
+    try {
+      if (fs.existsSync(this.lastProcessedPostUrisFilePath)) {
+        const data = fs.readFileSync(this.lastProcessedPostUrisFilePath, 'utf-8');
+        const jsonData = JSON.parse(data);
+        console.log(`[PollingManager] Loaded ${Object.keys(jsonData).length} users' last processed post URIs.`);
+        return jsonData; // Should be an object like { did: uri, ... }
+      }
+    } catch (error) {
+      console.error('[PollingManager] Error loading last processed post URIs:', error);
+    }
+    console.log('[PollingManager] No existing last processed post URIs file found or error loading. Starting empty.');
+    return {};
+  }
+
+  _saveLastProcessedPostUris() {
+    try {
+      fs.writeFileSync(this.lastProcessedPostUrisFilePath, JSON.stringify(this.lastProcessedPostUris, null, 2), 'utf-8');
+      // console.log(`[PollingManager] Saved last processed post URIs to ${this.lastProcessedPostUrisFilePath}`);
+    } catch (error) {
+      console.error('[PollingManager] Error saving last processed post URIs:', error);
+    }
+  }
+
+  _loadSubscribedUsers() {
+    try {
+      if (fs.existsSync(this.subscribedUsersFilePath)) {
+        const data = fs.readFileSync(this.subscribedUsersFilePath, 'utf-8');
+        const jsonData = JSON.parse(data);
+        if (Array.isArray(jsonData.subscribedUserDids)) {
+          console.log(`[SubscriptionManager] Loaded ${jsonData.subscribedUserDids.length} subscribed users.`);
+          return new Set(jsonData.subscribedUserDids);
+        }
+      }
+    } catch (error) {
+      console.error('[SubscriptionManager] Error loading subscribed users:', error);
+    }
+    console.log('[SubscriptionManager] No existing subscribed users file found or error loading. Starting with empty set.');
+    return new Set();
+  }
+
+  _saveSubscribedUsers() {
+    try {
+      const dataToSave = { subscribedUserDids: Array.from(this.subscribedUserDids) };
+      fs.writeFileSync(this.subscribedUsersFilePath, JSON.stringify(dataToSave, null, 2), 'utf-8');
+      console.log(`[SubscriptionManager] Saved ${this.subscribedUserDids.size} subscribed users to ${this.subscribedUsersFilePath}`);
+    } catch (error) {
+      console.error('[SubscriptionManager] Error saving subscribed users:', error);
+    }
+  }
+
+  addUserSubscription(userDid) {
+    if (!userDid) return false;
+    if (this.subscribedUserDids.has(userDid)) {
+      console.log(`[SubscriptionManager] User ${userDid} is already subscribed.`);
+      return false; // Already subscribed
+    }
+    this.subscribedUserDids.add(userDid);
+    this._saveSubscribedUsers();
+    console.log(`[SubscriptionManager] User ${userDid} subscribed.`);
+    return true;
+  }
+
+  removeUserSubscription(userDid) {
+    if (!userDid) return false;
+    if (!this.subscribedUserDids.has(userDid)) {
+      console.log(`[SubscriptionManager] User ${userDid} was not subscribed.`);
+      return false; // Not found
+    }
+    this.subscribedUserDids.delete(userDid);
+    this._saveSubscribedUsers();
+    console.log(`[SubscriptionManager] User ${userDid} unsubscribed.`);
+    return true;
+  }
+
+  isUserSubscribed(userDid) {
+    if (!userDid) return false;
+    return this.subscribedUserDids.has(userDid);
+  }
+
+  getSubscribedUsers() {
+    return Array.from(this.subscribedUserDids);
+  }
+
+  async pollSubscribedUserFeeds() {
+    const now = Date.now();
+    if (now - this.lastPollTime < this.POLL_INTERVAL) {
+      return; // Not time to poll yet
+    }
+    this.lastPollTime = now;
+
+    const subscribedDids = this.getSubscribedUsers();
+    if (subscribedDids.length === 0) {
+      return;
+    }
+
+    console.log(`[PollingManager] Starting poll for ${subscribedDids.length} subscribed users.`);
+    let newPostsFoundThisCycle = 0;
+
+    for (const userDid of subscribedDids) {
+      try {
+        const { data: feedData } = await this.agent.api.app.bsky.feed.getAuthorFeed({
+          actor: userDid,
+          limit: 10 // Fetch recent 10 posts, assuming posts are ordered newest first
+        });
+
+        if (feedData && feedData.feed) {
+          const postsInFeed = feedData.feed; // newest first
+          const lastProcessedUri = this.lastProcessedPostUris[userDid];
+          let currentNewestUriForUser = null;
+          let newPostsToProcess = [];
+
+          for (const feedItem of postsInFeed) {
+            if (!feedItem.post || !feedItem.post.record) continue;
+
+            if (!currentNewestUriForUser) { // Capture the URI of the absolute newest post from this fetch
+              currentNewestUriForUser = feedItem.post.uri;
+            }
+
+            if (feedItem.post.uri === lastProcessedUri) {
+              break; // We've reached the last post we processed in the previous poll
+            }
+            // Consider only original posts (not replies) by the subscribed user
+            if (!feedItem.post.record.reply && feedItem.post.author.did === userDid) {
+              newPostsToProcess.push(feedItem.post); // Add to a temporary list
+            }
+          }
+
+          // Process the new posts (oldest of the new ones first to maintain chronology if acting on them)
+          if (newPostsToProcess.length > 0) {
+            console.log(`[PollingManager] Found ${newPostsToProcess.length} new post(s) for user ${userDid}.`);
+            for (const newPost of newPostsToProcess.reverse()) { // Reverse to process oldest new post first
+              console.log(`[PollingManager] Identified new post by ${newPost.author.handle} (URI: ${newPost.uri}): "${newPost.record.text ? newPost.record.text.substring(0, 50) + '...' : 'No text'}"`);
+
+              if (this._canSendProactiveReply(newPost.author.did)) {
+                const proactiveReplyText = await this.generateProactiveReply(newPost, newPost.author.handle);
+                if (proactiveReplyText) {
+                  console.log(`[PollingManager] Attempting proactive reply to ${newPost.author.handle} for post ${newPost.uri}: "${proactiveReplyText}"`);
+                  // Ensure newPost is suitable for postReply (it should be, as it's a full post object)
+                  // The root of the reply will be the newPost itself, and parent will also be newPost.
+                  const replyTargetPost = {
+                    uri: newPost.uri,
+                    cid: newPost.cid,
+                    author: newPost.author, // Should have did, handle
+                    record: { text: newPost.record.text } // Provide enough for postReply to form its reply structure
+                  };
+                  await this.postReply(replyTargetPost, proactiveReplyText);
+                  this._recordProactiveReplyTimestamp(newPost.author.did); // Record after successful attempt
+                  console.log(`[PollingManager] Proactive reply sent to ${newPost.author.handle}. Timestamp recorded.`);
+                } else {
+                  // console.log(`[PollingManager] No proactive reply generated for post ${newPost.uri}.`);
+                }
+              } else {
+                console.log(`[PollingManager] Proactive reply cooldown active for user ${newPost.author.handle}. Skipping reply to post ${newPost.uri}.`);
+              }
+              newPostsFoundThisCycle++; // Counts identified new posts, not necessarily replied-to posts
+            }
+          }
+
+          // Update the last processed URI for this user to the newest one from *this* poll
+          if (currentNewestUriForUser) {
+            this.lastProcessedPostUris[userDid] = currentNewestUriForUser;
+          }
+        }
+      } catch (error) {
+        console.error(`[PollingManager] Error polling feed for user ${userDid}:`, error);
+      }
+      await utils.sleep(1000); // Stagger API calls slightly
+    }
+
+    if (subscribedDids.length > 0) { // Save if there were any subscriptions, to update lastProcessedPostUris
+        this._saveLastProcessedPostUris();
+    }
+    if (newPostsFoundThisCycle > 0) {
+        console.log(`[PollingManager] Finished poll. Identified ${newPostsFoundThisCycle} new posts across all subscribed users to consider for engagement.`);
+    }
   }
 
   // Helper to cleanup expired pending analyses
@@ -735,6 +1011,50 @@ Respond ONLY with a single JSON object.`;
               // The existing getReplyContext uses post.uri and post.record.reply.
             };
 
+            // Handle subscription commands first
+            let isSubscriptionCmdHandled = false;
+            const postTextLower = currentPostObject.record.text?.toLowerCase() || "";
+            const botMentionIdentifier = `@${this.config.BLUESKY_IDENTIFIER.toLowerCase()}`;
+
+            // Check if it's a direct command to the bot (not a reply to someone else where bot is just mentioned)
+            const isDirectCommand = postTextLower.startsWith(botMentionIdentifier) && !currentPostObject.record.reply;
+
+            if (isDirectCommand) {
+              const commandPart = postTextLower.substring(botMentionIdentifier.length).trim();
+              if (commandPart === "subscribe my posts") {
+                if (await this.hasAlreadyReplied(currentPostObject)) {
+                    console.log(`[SubCmd] Already replied to subscribe command post ${currentPostObject.uri}. Skipping.`);
+                } else {
+                    const success = this.addUserSubscription(currentPostObject.author.did);
+                    if (success) {
+                        await this.postReply(currentPostObject, "You're now subscribed! I'll keep an eye on your new posts and try to engage if I see something relevant. You can say '@me unsubscribe my posts' (mentioning me directly) anytime to stop.");
+                    } else {
+                        await this.postReply(currentPostObject, "You're already subscribed to my proactive engagement feature!");
+                    }
+                    this.repliedPosts.add(currentPostObject.uri); // Mark as replied
+                }
+                isSubscriptionCmdHandled = true;
+              } else if (commandPart === "unsubscribe my posts") {
+                 if (await this.hasAlreadyReplied(currentPostObject)) {
+                    console.log(`[SubCmd] Already replied to unsubscribe command post ${currentPostObject.uri}. Skipping.`);
+                } else {
+                    const success = this.removeUserSubscription(currentPostObject.author.did);
+                    if (success) {
+                        await this.postReply(currentPostObject, "You've been unsubscribed. I won't proactively engage with your new posts anymore.");
+                    } else {
+                        await this.postReply(currentPostObject, "You weren't subscribed to begin with.");
+                    }
+                    this.repliedPosts.add(currentPostObject.uri); // Mark as replied
+                }
+                isSubscriptionCmdHandled = true;
+              }
+            }
+
+            if (isSubscriptionCmdHandled) {
+                console.log(`[Monitor] Subscription command handled for post ${currentPostObject.uri}. Skipping further processing for this post.`);
+                continue; // Skip other processing if it was a subscription command
+            }
+
             let isAdminCmdHandled = false;
             if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
                 currentPostObject.record.text &&
@@ -851,6 +1171,10 @@ Respond ONLY with a single JSON object.`;
           if (notifications.length > 0) {
              // lastSeenNotificationTimestamp = new Date(notifications[0].indexedAt); // Assuming notifications are newest first
           }
+
+          // Poll for subscribed user feeds
+          await this.pollSubscribedUserFeeds();
+
           await utils.sleep(this.config.CHECK_INTERVAL);
         } catch (error) {
           console.error('Error in monitoring loop:', error);
