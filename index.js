@@ -4944,6 +4944,93 @@ Ensure your entire response is ONLY the JSON object.`;
     }
   }
 
+  async getPersonaAlignment(postText, postAuthorHandle) {
+    if (!postText || postText.trim() === "") {
+      return { alignment: "neutral", theme: "empty post" };
+    }
+
+    // Using a specific, potentially faster model for this classification if desired,
+    // or could use Nemotron with a very specific prompt.
+    // For now, let's use a generic model like Gemma for this, with a focused system prompt.
+    const modelId = 'google/gemma-3n-e4b-it';
+    const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
+
+    const systemPromptForAlignment = `You are an AI content analyzer. Your task is to determine if a given Bluesky post aligns with the general persona, interests, likes, or dislikes of another AI, "Dearest Llama". Dearest Llama's persona is described as: "${this.config.TEXT_SYSTEM_PROMPT}".
+
+Analyze the following post text by user @${postAuthorHandle}:
+"${postText.substring(0, 500)}${postText.length > 500 ? '...' : ''}"
+
+Based ONLY on Dearest Llama's persona description and the post text, decide the alignment:
+1.  If the post discusses topics Dearest Llama would likely be very interested in, agree with, or find positive (based on its persona), output:
+    {"alignment": "positive", "theme": "briefly describe the matching theme/topic, e.g., 'AI ethics discussion' or 'enthusiasm for llamas'"}
+2.  If the post discusses topics Dearest Llama might be cautious about, want to offer a polite counter-perspective on, or generally 'dislikes' (based on its persona, avoiding aggression), output:
+    {"alignment": "negative_cautious", "theme": "briefly describe the theme, e.g., 'concerns about AI misuse' or 'negativity towards open dialogue'"}
+3.  Otherwise (if the post is neutral, irrelevant to the persona, or unclear), output:
+    {"alignment": "neutral", "theme": "general content" | "unclear alignment"}
+
+Respond ONLY with a single JSON object. Focus on strong alignments derived from the persona.
+Do not infer likes/dislikes beyond what the persona description implies.
+Example: If persona mentions liking "constructive dialogue", a post full of insults might be "negative_cautious" with theme "unconstructive communication".
+Example: If persona mentions interest in "technology", a post about "new AI breakthroughs" might be "positive" with theme "AI breakthroughs".`;
+
+    const userPromptForAlignment = `Post text by @${postAuthorHandle} for alignment check: "${postText.substring(0, 500)}${postText.length > 500 ? '...' : ''}"\n\nYour JSON output:`;
+
+    const defaultResponse = { alignment: "neutral", theme: "alignment check failed" };
+
+    try {
+      console.log(`[PersonaAlign] Calling ${modelId} for post by @${postAuthorHandle}: "${postText.substring(0, 70)}..."`);
+      const response = await fetchWithRetries(endpointUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: "system", content: systemPromptForAlignment },
+            { role: "user", content: userPromptForAlignment }
+          ],
+          temperature: 0.3, // Lower temp for more deterministic classification
+          max_tokens: 100,
+          stream: false
+        }),
+        customTimeout: 90000 // 90s
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[PersonaAlign] API error (${response.status}) for model ${modelId}: ${errorText}`);
+        return defaultResponse;
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices[0].message && data.choices[0].message.content) {
+        let rawContent = data.choices[0].message.content.trim();
+        const jsonMatch = rawContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+        let jsonString = jsonMatch ? jsonMatch[1] : (rawContent.startsWith("{") && rawContent.endsWith("}") ? rawContent : null);
+
+        if (jsonString) {
+          try {
+            const parsedJson = JSON.parse(jsonString);
+            if (parsedJson.alignment && parsedJson.theme) {
+              console.log(`[PersonaAlign] Alignment for post by @${postAuthorHandle}: ${parsedJson.alignment}, Theme: ${parsedJson.theme}`);
+              return parsedJson;
+            }
+            console.warn(`[PersonaAlign] Parsed JSON missing 'alignment' or 'theme': ${jsonString}`);
+          } catch (e) {
+            console.error(`[PersonaAlign] Error parsing JSON from ${modelId}: ${e.message}. JSON string: "${jsonString}"`);
+          }
+        } else {
+            console.warn(`[PersonaAlign] Could not extract JSON from ${modelId} response: "${rawContent}"`)
+        }
+      } else {
+        console.error(`[PersonaAlign] Unexpected response format from ${modelId}: ${JSON.stringify(data)}`);
+      }
+      return defaultResponse;
+    } catch (error) {
+      console.error(`[PersonaAlign] Exception in getPersonaAlignment with ${modelId}: ${error.message}`);
+      return defaultResponse;
+    }
+  }
+
   async monitorBotFollowingFeed() {
     console.log('[BotFeedMonitor] Starting bot following feed monitor...');
     if (!this.botDisplayName) { // Check if bot's display name is available
@@ -5065,26 +5152,19 @@ Ensure your entire response is ONLY the JSON object.`;
               // Note: A more robust DID check might involve parsing `record.facets` if mentions are linked DIDs.
               // For now, a simple text inclusion of the DID string.
 
-              // 4. Check for liked keywords if no name/DID match yet
-              if (!matchCondition && this.config.BOT_LIKES_KEYWORDS && this.config.BOT_LIKES_KEYWORDS.length > 0) {
-                for (const keyword of this.config.BOT_LIKES_KEYWORDS) {
-                  if (postTextLower.includes(keyword.toLowerCase())) {
-                    matchCondition = "likeKeyword";
-                    matchedTerm = keyword;
-                    break;
-                  }
-                }
-              }
+              // Keyword checking loops removed.
 
-              // 5. Check for disliked keywords if no match yet
-              if (!matchCondition && this.config.BOT_DISLIKES_KEYWORDS && this.config.BOT_DISLIKES_KEYWORDS.length > 0) {
-                for (const keyword of this.config.BOT_DISLIKES_KEYWORDS) {
-                  if (postTextLower.includes(keyword.toLowerCase())) {
-                    matchCondition = "dislikeKeyword";
-                    matchedTerm = keyword;
-                    break;
-                  }
+              // If no direct mention, check for persona alignment
+              if (!matchCondition) {
+                const alignmentResult = await this.getPersonaAlignment(postText, postObject.author.handle);
+                if (alignmentResult.alignment === "positive") {
+                  matchCondition = "personaLike";
+                  matchedTerm = alignmentResult.theme;
+                } else if (alignmentResult.alignment === "negative_cautious") {
+                  matchCondition = "personaDislike";
+                  matchedTerm = alignmentResult.theme;
                 }
+                // If alignment is "neutral" or failed, matchCondition remains null, and post is skipped for proactive reply.
               }
 
               if (matchCondition) {
