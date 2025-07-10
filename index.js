@@ -192,26 +192,19 @@ class BaseBot {
     this.repliedPosts = new Set();
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
-    // Removed subscription file properties
-    // Removed lastProcessedPostUris properties and methods as timeline cursor is used now
-    // Removed lastProcessedPostUris properties and methods as timeline cursor is used now
-    // this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
-    // this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // { userDid: lastUri }
-    this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
-    this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // Re-introducing for per-user polling
 
+    this.adminDid = null; // To be resolved in authenticate()
     this.followingCache = { dids: [], lastFetched: 0, ttl: 15 * 60 * 1000 }; // Cache for bot's following list
 
-    // Timeline properties
-    this.lastTimelineFetchTime = 0;
-    this.TIMELINE_FETCH_INTERVAL = 2 * 60 * 1000; // 2 minutes, configurable
-    this.timelineCursor = null; // In-memory for MVP
+    this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
+    this.lastProcessedPostUris = this._loadLastProcessedPostUris();
 
     this.proactiveReplyTimestampsFilePath = path.join(process.cwd(), 'proactive_reply_timestamps.json');
-    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps(); // Now { userDid: { date: "YYYY-MM-DD", count: N } }
-    // this.PROACTIVE_REPLY_COOLDOWN = 6 * 60 * 60 * 1000; // Obsolete, replaced by daily limit
-    this.DAILY_PROACTIVE_REPLY_LIMIT = 5; // Configurable daily limit per user
-    // this.BOT_KEYWORDS_FOR_PROACTIVE_REPLY = ["image generation", "meme", "bluesky api", "nasa apod", "youtube search", "giphy search", "web search", "bot help", "readme"]; // Obsolete
+    this.proactiveReplyTimestamps = this._loadProactiveReplyTimestamps();
+    this.DAILY_PROACTIVE_REPLY_LIMIT = 5;
+
+    this.lastFollowedPollTime = 0;
+    this.FOLLOWED_POLL_INTERVAL = 5 * 60 * 1000; // 5 minutes, configurable
   }
 
   _loadLastProcessedPostUris() {
@@ -220,19 +213,18 @@ class BaseBot {
         const data = fs.readFileSync(this.lastProcessedPostUrisFilePath, 'utf-8');
         const jsonData = JSON.parse(data);
         console.log(`[PollingManager] Loaded ${Object.keys(jsonData).length} users' last processed post URIs.`);
-        return jsonData; // Should be an object like { did: uri, ... }
+        return jsonData;
       }
     } catch (error) {
       console.error('[PollingManager] Error loading last processed post URIs:', error);
     }
-    console.log('[PollingManager] No existing last processed post URIs file found or error loading. Starting empty.');
+    console.log('[PollingManager] No existing last processed post URIs file found. Starting empty.');
     return {};
   }
 
   _saveLastProcessedPostUris() {
     try {
       fs.writeFileSync(this.lastProcessedPostUrisFilePath, JSON.stringify(this.lastProcessedPostUris, null, 2), 'utf-8');
-      // console.log(`[PollingManager] Saved last processed post URIs to ${this.lastProcessedPostUrisFilePath}`);
     } catch (error) {
       console.error('[PollingManager] Error saving last processed post URIs:', error);
     }
@@ -243,11 +235,10 @@ class BaseBot {
       if (fs.existsSync(this.proactiveReplyTimestampsFilePath)) {
         const data = fs.readFileSync(this.proactiveReplyTimestampsFilePath, 'utf-8');
         const jsonData = JSON.parse(data);
-        // Basic validation for the new structure
         for (const did in jsonData) {
           if (typeof jsonData[did] !== 'object' || jsonData[did] === null || typeof jsonData[did].date !== 'string' || typeof jsonData[did].count !== 'number') {
-            console.warn(`[RateLimitProactive] Invalid data structure for user ${did} in timestamps file. Resetting entry.`);
-            delete jsonData[did]; // Or handle migration/reset more gracefully
+            console.warn(`[RateLimitProactive] Invalid data structure for user ${did} in timestamps file. Resetting.`);
+            delete jsonData[did];
           }
         }
         console.log(`[RateLimitProactive] Loaded ${Object.keys(jsonData).length} users' proactive reply daily counts.`);
@@ -269,262 +260,183 @@ class BaseBot {
   }
 
   _canSendProactiveReply(userDid) {
+    if (this.adminDid && userDid === this.adminDid) {
+      // console.log(`[RateLimitProactive] Admin user ${userDid} bypasses proactive reply rate limit for this check.`);
+      return true; // Admin replies are not subject to this specific limit
+    }
     const entry = this.proactiveReplyTimestamps[userDid];
     const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-
     if (!entry || entry.date !== currentDate) {
-      return true; // No entry for today, or entry is for a previous day
+      return true;
     }
     return entry.count < this.DAILY_PROACTIVE_REPLY_LIMIT;
   }
 
   _recordProactiveReplyTimestamp(userDid) {
-    const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    if (this.adminDid && userDid === this.adminDid) {
+      // console.log(`[RateLimitProactive] Not recording proactive reply timestamp for admin user ${userDid}.`);
+      return; // Do not record for admin if they have separate/no limits by this system
+    }
+    const currentDate = new Date().toISOString().split('T')[0];
     let entry = this.proactiveReplyTimestamps[userDid];
-
     if (!entry || entry.date !== currentDate) {
-      // New day or new user
       this.proactiveReplyTimestamps[userDid] = { date: currentDate, count: 1 };
     } else {
-      // Same day, increment count
       entry.count++;
     }
     this._saveProactiveReplyTimestamps();
     console.log(`[RateLimitProactive] Recorded proactive reply for ${userDid}. Date: ${currentDate}, Count: ${this.proactiveReplyTimestamps[userDid].count}`);
   }
 
-  // Old generateProactiveReply (keyword/question-based) removed.
-  // Replaced by generateProactivePersonaReply in LlamaBot.
-
-  // _loadLastProcessedPostUris and _saveLastProcessedPostUris methods are removed as they are obsolete.
-
-  // Removed _loadSubscribedUsers, _saveSubscribedUsers, addUserSubscription, removeUserSubscription, isUserSubscribed
-  // getSubscribedUsers is also removed as it's replaced by getBotFollowingDids
-
-  async pollFollowedUserFeeds() {
-    // This method replaces the old pollSubscribedUserFeeds and checkFollowingTimeline
-    // It gets DIDs from the bot's own following list and polls each user's feed.
-
-    const followedDids = await this.getBotFollowingDids();
-    if (!followedDids || followedDids.length === 0) {
-      // console.log('[PollFollows] Bot is not following anyone, or failed to fetch list. Skipping poll.');
-      return;
-    }
-
-    console.log(`[PollFollows] Starting poll for ${followedDids.length} followed users.`);
-    let newPostsFoundThisCycle = 0;
-
-    for (const userDid of followedDids) {
-      try {
-        const { data: feedData } = await this.agent.api.app.bsky.feed.getAuthorFeed({
-          actor: userDid,
-          limit: 10 // Fetch recent 10 posts, newest first
-        });
-
-        if (feedData && feedData.feed) {
-          const postsInFeed = feedData.feed; // newest first
-          const lastProcessedUri = this.lastProcessedPostUris[userDid];
-          let currentNewestUriForUserInThisPoll = null;
-          let newPostsToProcessForThisUser = [];
-
-          for (const feedItem of postsInFeed) {
-            if (!feedItem.post || !feedItem.post.record) continue;
-
-            if (!currentNewestUriForUserInThisPoll) {
-              currentNewestUriForUserInThisPoll = feedItem.post.uri;
-            }
-
-            if (feedItem.post.uri === lastProcessedUri) {
-              break;
-            }
-
-            // Consider only original posts (not replies) by the followed user
-            // And ensure it's not a post by the bot itself (e.g. if bot follows itself for some reason)
-            if (!feedItem.post.record.reply && feedItem.post.author.did === userDid && feedItem.post.author.did !== this.agent.did) {
-              newPostsToProcessForThisUser.push(feedItem.post);
-            }
-          }
-
-          if (newPostsToProcessForThisUser.length > 0) {
-            console.log(`[PollFollows] Found ${newPostsToProcessForThisUser.length} new post(s) for followed user ${userDid}.`);
-            // Process oldest of the new ones first
-            for (const newPostObject of newPostsToProcessForThisUser.reverse()) {
-              console.log(`[PollFollows] Identified new post by ${newPostObject.author.handle} (URI: ${newPostObject.uri}): "${newPostObject.record.text ? newPostObject.record.text.substring(0, 50) + '...' : 'No text'}"`);
-              await this.handleProactiveEngagement(newPostObject); // Call the existing engagement handler
-              newPostsFoundThisCycle++;
-            }
-          }
-
-          if (currentNewestUriForUserInThisPoll) {
-            this.lastProcessedPostUris[userDid] = currentNewestUriForUserInThisPoll;
-          }
-        }
-      } catch (error) {
-        console.error(`[PollFollows] Error polling feed for user ${userDid}:`, error);
-      }
-      await utils.sleep(1000); // Stagger API calls slightly
-    }
-
-    if (followedDids.length > 0) {
-        this._saveLastProcessedPostUris();
-    }
-    if (newPostsFoundThisCycle > 0) {
-        console.log(`[PollFollows] Finished poll. Identified ${newPostsFoundThisCycle} new posts from followed users to consider for engagement.`);
-    }
-  }
-
   async getBotFollowingDids() {
     const now = Date.now();
     if (this.followingCache && now - this.followingCache.lastFetched < this.followingCache.ttl) {
-      // console.log('[FollowList] Using cached following list.');
       return this.followingCache.dids;
     }
-
     console.log('[FollowList] Fetching bot\'s following list...');
     if (!this.agent || !this.agent.did) {
         console.error('[FollowList] Agent DID not available. Cannot fetch follows.');
+        this.followingCache = { dids: [], lastFetched: now, ttl: 15 * 60 * 1000 }; // Reset cache time
         return [];
     }
-
     let follows = [];
     let cursor;
     try {
       do {
         const response = await this.agent.api.app.bsky.graph.getFollows({
           actor: this.agent.did,
-          limit: 100, // Max limit
+          limit: 100,
           cursor: cursor
         });
         if (response.success && response.data.follows) {
           follows = follows.concat(response.data.follows.map(follow => follow.did));
           cursor = response.data.cursor;
         } else {
-          console.warn('[FollowList] Failed to fetch a page of follows or no follows data.');
-          cursor = null; // Stop on error or no data
+          console.warn('[FollowList] Failed to fetch a page of follows.');
+          cursor = null;
         }
-      } while (cursor && follows.length < 500); // Safety break for very large follow lists, adjust as needed
-
+      } while (cursor && follows.length < 1000); // Increased safety break
       this.followingCache = { dids: follows, lastFetched: now, ttl: 15 * 60 * 1000 };
       console.log(`[FollowList] Fetched ${follows.length} DIDs from bot's following list.`);
       return follows;
     } catch (error) {
       console.error('[FollowList] Error fetching bot\'s following list:', error);
-      // Return stale cache if available on error, otherwise empty
-      return this.followingCache ? this.followingCache.dids : [];
+      this.followingCache.lastFetched = now; // Update timestamp even on error to prevent rapid retries
+      return this.followingCache.dids; // Return possibly stale cache
     }
   }
 
-  async checkFollowingTimeline() {
-    console.log(`[TimelineCheck] Checking following timeline. Current cursor: ${this.timelineCursor}`);
-    try {
-      const response = await this.agent.api.app.bsky.feed.getTimeline({
-        limit: 30, // Fetch a decent number to catch up if needed
-        cursor: this.timelineCursor
-      });
+  async pollTrackedUserFeeds() {
+    const adminDID = this.adminDid; // Resolved during authenticate
+    let followedDids = await this.getBotFollowingDids();
 
-      if (response.success && response.data.feed) {
-        if (response.data.cursor) {
-          this.timelineCursor = response.data.cursor;
-          // TODO: Persist this.timelineCursor to a file (e.g., timeline_cursor.json)
-          // For MVP, if bot restarts, it will re-fetch from the beginning of the timeline,
-          // but rate limiting and repliedPosts set should prevent re-engagement on very recent items.
+    let didsToPoll = [];
+    if (adminDID) {
+      didsToPoll.push(adminDID);
+    }
+    if (followedDids && followedDids.length > 0) {
+      didsToPoll = didsToPoll.concat(followedDids.filter(did => did !== adminDID)); // Avoid duplicates
+    }
+    didsToPoll = [...new Set(didsToPoll)]; // Final de-duplication
+
+    if (didsToPoll.length === 0) {
+      // console.log('[PollTracked] No DIDs to poll (neither admin nor followed users found).');
+      return;
+    }
+
+    console.log(`[PollTracked] Starting poll for ${didsToPoll.length} DIDs (Admin: ${adminDID ? 'Yes' : 'No'}, Followed: ${followedDids.length}).`);
+    let newPostsFoundThisCycle = 0;
+
+    for (const userDid of didsToPoll) {
+      try {
+        const { data: feedData } = await this.agent.api.app.bsky.feed.getAuthorFeed({
+          actor: userDid,
+          limit: 10
+        });
+
+        if (feedData && feedData.feed) {
+          const postsInFeed = feedData.feed;
+          const lastProcessedUri = this.lastProcessedPostUris[userDid];
+          let currentNewestUriForUserInThisPoll = null;
+          let newPostsToProcessForThisUser = [];
+
+          for (const feedItem of postsInFeed) {
+            if (!feedItem.post || !feedItem.post.record) continue;
+            if (!currentNewestUriForUserInThisPoll) {
+              currentNewestUriForUserInThisPoll = feedItem.post.uri;
+            }
+            if (feedItem.post.uri === lastProcessedUri) break;
+            if (!feedItem.post.record.reply && feedItem.post.author.did === userDid) {
+              newPostsToProcessForThisUser.push(feedItem.post);
+            }
+          }
+
+          if (newPostsToProcessForThisUser.length > 0) {
+            console.log(`[PollTracked] Found ${newPostsToProcessForThisUser.length} new post(s) for ${userDid === adminDID ? 'Admin user' : 'followed user'} ${userDid}.`);
+            for (const newPostObject of newPostsToProcessForThisUser.reverse()) {
+              console.log(`[PollTracked] Identified new post by ${newPostObject.author.handle} (URI: ${newPostObject.uri}): "${newPostObject.record.text ? newPostObject.record.text.substring(0, 50) + '...' : 'No text'}"`);
+              if (userDid === adminDID) {
+                await this.handleAdminProactiveEngagement(newPostObject);
+              } else {
+                await this.handleProactiveEngagement(newPostObject);
+              }
+              newPostsFoundThisCycle++;
+            }
+          }
+          if (currentNewestUriForUserInThisPoll) {
+            this.lastProcessedPostUris[userDid] = currentNewestUriForUserInThisPoll;
+          }
         }
-
-        if (response.data.feed.length === 0) {
-          // console.log('[TimelineCheck] No new posts in the timeline.');
-          return;
-        }
-
-        console.log(`[TimelineCheck] Fetched ${response.data.feed.length} items from timeline.`);
-
-        for (const feedViewPost of response.data.feed) {
-          const post = feedViewPost.post;
-
-          // 1. Filter out posts by the bot itself
-          if (post.author.did === this.agent.did) {
-            // console.log(`[TimelineCheck] Skipping own post: ${post.uri}`);
-            continue;
-          }
-
-          // 2. Filter out replies for MVP proactive engagement
-          if (post.record.reply) {
-            // console.log(`[TimelineCheck] Skipping reply: ${post.uri}`);
-            continue;
-          }
-
-          // 3. Filter out reposts
-          if (feedViewPost.reason && feedViewPost.reason.$type === 'app.bsky.feed.defs#reasonRepost') {
-            // console.log(`[TimelineCheck] Skipping repost: ${post.uri} (reposted by ${feedViewPost.reason.by.handle})`);
-            continue;
-          }
-
-          // Ensure it's a standard post record we can process
-          if (post.record.$type !== 'app.bsky.feed.post') {
-             console.log(`[TimelineCheck] Skipping non-standard post record type ${post.record.$type} for post ${post.uri}`);
-             continue;
-          }
-
-          console.log(`[TimelineCheck] Potential proactive engagement candidate: Post ${post.uri} by ${post.author.handle}`);
-          // Pass the full PostView object as it contains author profile, embeds etc.
-          await this.handleProactiveEngagement(post);
-        }
-      } else {
-        console.warn('[TimelineCheck] Failed to fetch timeline or feed data is missing:', response.error || 'No error info');
+      } catch (error) {
+        console.error(`[PollTracked] Error polling feed for user ${userDid}:`, error);
       }
-    } catch (error) {
-      console.error('[TimelineCheck] Error fetching/processing timeline:', error);
+      await utils.sleep(1000);
+    }
+
+    if (didsToPoll.length > 0) {
+        this._saveLastProcessedPostUris();
+    }
+    if (newPostsFoundThisCycle > 0) {
+        console.log(`[PollTracked] Finished poll. Identified ${newPostsFoundThisCycle} new posts to consider.`);
     }
   }
 
-  async generateProactivePersonaReply(postView) {
-    // This method should be implemented by child classes (e.g., LlamaBot)
-    // to generate a response based on the bot's persona and the post content.
-    console.warn('[BaseBot] generateProactivePersonaReply not implemented in BaseBot. Child class should override.');
-    return null; // Or throw new Error('Not implemented');
+  async handleAdminProactiveEngagement(postObject) {
+    // MVP: Just log admin posts for now. Can be expanded with specific command parsing.
+    console.log(`[AdminPostMonitor] Admin @${postObject.author.handle} posted: "${postObject.record.text ? postObject.record.text.substring(0,100) + '...' : 'No text'}" (URI: ${postObject.uri})`);
+    // Example: if (postObject.record.text.includes("!bot-status")) { await this.postReply(postObject, "Status: All systems nominal!"); }
   }
 
   async handleProactiveEngagement(postView) {
     if (!postView || !postView.author || !postView.author.did) {
-      console.warn('[handleProactiveEngagement] Invalid postView object received.');
+      console.warn('[handleProactiveEngagement] Invalid postView received.');
       return;
     }
-
     const authorDid = postView.author.did;
     const authorHandle = postView.author.handle;
 
     if (this._canSendProactiveReply(authorDid)) {
-      console.log(`[handleProactiveEngagement] Checking post ${postView.uri} by ${authorHandle} for persona-based reply.`);
-      const replyText = await this.generateProactivePersonaReply(postView); // Implemented in LlamaBot
-
+      const replyText = await this.generateProactivePersonaReply(postView);
       if (replyText && replyText.trim().toUpperCase() !== 'NO_REPLY') {
-        console.log(`[handleProactiveEngagement] Persona logic suggests a reply to ${authorHandle} for post ${postView.uri}: "${replyText.substring(0, 50)}..."`);
-
-        // postReply expects a simpler post object, let's adapt postView
-        // It needs uri, cid, author (with did, handle), and record (with text for context)
-        // For replying to a post, the `post` argument to `postReply` is the post being replied to.
+        console.log(`[handleProactiveEngagement] Persona logic suggests reply to ${authorHandle} for ${postView.uri}: "${replyText.substring(0, 50)}..."`);
         const targetPostForReply = {
             uri: postView.uri,
             cid: postView.cid,
-            author: postView.author, // PostView.author structure should be compatible
-            record: { // Mimic parts of PostRecordView that postReply might use for context/root
-                text: postView.record.text,
-                createdAt: postView.record.createdAt,
-                // reply: postView.record.reply // If we ever wanted to thread off proactive replies
-            }
+            author: postView.author,
+            record: { text: postView.record.text, createdAt: postView.record.createdAt }
         };
-
         await this.postReply(targetPostForReply, replyText.trim());
         this._recordProactiveReplyTimestamp(authorDid);
-        console.log(`[handleProactiveEngagement] Proactive reply sent to ${authorHandle}. Timestamp recorded.`);
-      } else {
-        // console.log(`[handleProactiveEngagement] No proactive (persona-based) reply generated for post ${postView.uri} by ${authorHandle}.`);
       }
     } else {
-      console.log(`[handleProactiveEngagement] Proactive reply cooldown active for user ${authorHandle} (${authorDid}). Skipping check for post ${postView.uri}.`);
+      // console.log(`[handleProactiveEngagement] Daily limit reached or cooldown for ${authorHandle}.`);
     }
   }
 
-  // Removed pollSubscribedUserFeeds method as its functionality is replaced by checkFollowingTimeline
+  async generateProactivePersonaReply(postView) {
+    console.warn('[BaseBot] generateProactivePersonaReply needs to be implemented by a child class.');
+    return null;
+  }
 
   // Helper to cleanup expired pending analyses
   _cleanupExpiredDetailedAnalyses() {
@@ -554,13 +466,11 @@ class BaseBot {
 
     const systemPrompt = `You are an AI assistant that helps decide if a user's query needs clarification before the main bot attempts a full response or action.
 Analyze the USER QUERY provided.
-A CONVERSATION CONTEXT might also be provided (oldest to newest messages). If the USER QUERY refers to something "previous", "that thing", "the image/gif/post", check the CONVERSATION CONTEXT.
-- If the context contains a recent message from the bot itself with an image, GIF (external link), or quoted post that the user is likely referring to, assume the user means that. In this case, clarification might NOT be needed if the reference is clear from context.
-- If the context is ambiguous or doesn't clarify the reference, then ask for clarification.
+Consider if the query is too vague, ambiguous, could have multiple common interpretations leading to different actions, or is missing key information needed for a specific tool (like image generation, web search, etc.).
 
 Rules:
-1. If the query is clear and actionable (considering context if provided), or a simple greeting/statement, respond with: {"needs_clarification": false, "clarification_question": null}
-2. If the query IS ambiguous or incomplete (even after considering context):
+1. If the query is clear and actionable, or a simple greeting/statement, respond with: {"needs_clarification": false, "clarification_question": null}
+2. If the query IS ambiguous or incomplete:
    - Formulate a single, polite, concise clarifying question to ask the user.
    - The question should help the user provide the missing information or specify their intent.
    - Respond with: {"needs_clarification": true, "clarification_question": "Your clarifying question here."}
@@ -569,61 +479,29 @@ Rules:
 
 Examples:
 User Query: "Tell me about it."
-(No context provided or context is unhelpful)
 Your JSON Output: {"needs_clarification": true, "clarification_question": "Could you please tell me what 'it' you're referring to?"}
-
-CONVERSATION CONTEXT (simplified):
-[
-  { "author": "BotHandle", "text": "I found this cool GIF!", "embeds": [{ "type": "external", "uri": "giphy.com/some-gif", "title": "Cool GIF" }] },
-  { "author": "UserHandle", "text": "Wow, that's a great one!" }
-]
-USER QUERY: "Wow, that's a great one!"
-Your JSON Output: {"needs_clarification": false, "clarification_question": null}
-
-CONVERSATION CONTEXT (simplified):
-[
-  { "author": "UserHandle", "text": "Tell me about cats." },
-  { "author": "BotHandle", "text": "Cats are fascinating creatures! They are known for their agility and playful nature." },
-  { "author": "UserHandle", "text": "What about that other thing you mentioned?" }
-]
-USER QUERY: "What about that other thing you mentioned?"
-Your JSON Output: {"needs_clarification": true, "clarification_question": "I mentioned agility and playful nature regarding cats. Could you specify which 'other thing' you're curious about, or what you were referring to?"}
 
 User Query: "Generate an image."
 Your JSON Output: {"needs_clarification": true, "clarification_question": "Sure, I can try to generate an image! What would you like me to generate?"}
 
 User Query: "Search for cats."
-Your JSON Output: {"needs_clarification": false, "clarification_question": null}
+Your JSON Output: {"needs_clarification": false, "clarification_question": null} // Actionable by search tool
 
 User Query: "What's up?"
-Your JSON Output: {"needs_clarification": false, "clarification_question": null}
+Your JSON Output: {"needs_clarification": false, "clarification_question": null} // Simple greeting
+
+User Query: "Can you help me?"
+Your JSON Output: {"needs_clarification": true, "clarification_question": "I can certainly try! What do you need help with?"}
+
+User Query: "The previous thing."
+Your JSON Output: {"needs_clarification": true, "clarification_question": "Could you remind me what specific 'previous thing' you're referring to?"}
 
 Respond ONLY with a single JSON object.`;
 
-    let userPromptForClarification = `USER QUERY: "${userQueryText}"\n\n`;
-    if (conversationContext && conversationContext.length > 0) {
-      // Simple stringification of context for the prompt.
-      // Ensure sensitive details or very long texts are handled if necessary.
-      const contextString = conversationContext.map(m => {
-        let embedText = '';
-        if (m.embeds && m.embeds.length > 0) {
-          embedText = m.embeds.map(e => {
-            let details = `[Embed: ${e.type}`;
-            if (e.title) details += ` - Title: ${e.title.substring(0,30)}`;
-            if (e.alt) details += ` - Alt: ${e.alt.substring(0,30)}`;
-            if (e.uri) details += ` - URI: ${e.uri.substring(0,40)}`;
-            if (e.recordUri) details += ` - RecordURI: ${e.recordUri.substring(0,40)}`;
-            return details + ']';
-          }).join(' ');
-        }
-        return `${m.author}: ${m.text ? m.text.substring(0, 100) : ''} ${embedText}`;
-      }).join('\n');
-      userPromptForClarification += `CONVERSATION CONTEXT (oldest to newest, last message is the user's query which is also provided above):\n${contextString}\n\n`;
-    }
-    userPromptForClarification += `YOUR JSON OUTPUT:`;
+    const userPromptForClarification = `USER QUERY: "${userQueryText}"\n\nYOUR JSON OUTPUT:`;
 
     try {
-      console.log(`[ClarificationHelper] Calling Llama 3.2 Vision for ambiguity check. Query: "${userQueryText}", Context length: ${conversationContext ? conversationContext.length : 0}`);
+      console.log(`[ClarificationHelper] Calling Llama 3.2 Vision for ambiguity check on query: "${userQueryText}"`);
       const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
@@ -1069,8 +947,6 @@ Respond ONLY with a single JSON object.`;
               // The existing getReplyContext uses post.uri and post.record.reply.
             };
 
-            // User-facing subscription commands removed as per new plan (env var based tracking)
-
             let isAdminCmdHandled = false;
             if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
                 currentPostObject.record.text &&
@@ -1187,18 +1063,6 @@ Respond ONLY with a single JSON object.`;
           if (notifications.length > 0) {
              // lastSeenNotificationTimestamp = new Date(notifications[0].indexedAt); // Assuming notifications are newest first
           }
-
-          // Poll for subscribed user feeds (Removed)
-          // await this.pollSubscribedUserFeeds();
-
-          // Check following timeline periodically
-          const now = Date.now();
-          if (now - this.lastTimelineFetchTime > this.TIMELINE_FETCH_INTERVAL) {
-            this.lastTimelineFetchTime = now;
-            // console.log('[Monitor] Time to check following timeline.'); // Optional: for debugging
-            await this.checkFollowingTimeline(); // This method will be implemented in Step 2
-          }
-
           await utils.sleep(this.config.CHECK_INTERVAL);
         } catch (error) {
           console.error('Error in monitoring loop:', error);
@@ -1225,6 +1089,29 @@ Respond ONLY with a single JSON object.`;
         password: this.config.BLUESKY_APP_PASSWORD,
       });
       console.log('Successfully authenticated with Bluesky');
+
+      // Resolve Admin Handle to DID if configured
+      if (this.config.ADMIN_BLUESKY_HANDLE) {
+        if (this.config.ADMIN_BLUESKY_HANDLE.startsWith('did:plc:')) {
+          this.adminDid = this.config.ADMIN_BLUESKY_HANDLE;
+          console.log(`[AdminDID] Admin DID configured directly: ${this.adminDid}`);
+        } else {
+          try {
+            console.log(`[AdminDID] Resolving admin handle: ${this.config.ADMIN_BLUESKY_HANDLE}`);
+            const res = await this.agent.resolveHandle({ handle: this.config.ADMIN_BLUESKY_HANDLE });
+            if (res.success && res.data.did) {
+              this.adminDid = res.data.did;
+              console.log(`[AdminDID] Successfully resolved admin handle ${this.config.ADMIN_BLUESKY_HANDLE} to DID: ${this.adminDid}`);
+            } else {
+              console.error(`[AdminDID] Failed to resolve admin handle ${this.config.ADMIN_BLUESKY_HANDLE}:`, res.error || 'Unknown error');
+            }
+          } catch (resolveError) {
+            console.error(`[AdminDID] Exception during admin handle resolution for ${this.config.ADMIN_BLUESKY_HANDLE}:`, resolveError);
+          }
+        }
+      } else {
+        console.log('[AdminDID] No ADMIN_BLUESKY_HANDLE configured.');
+      }
     } catch (error) {
       console.error('Authentication failed:', error);
       throw error;
@@ -1257,128 +1144,63 @@ Respond ONLY with a single JSON object.`;
 
       // Helper to extract image details from a record's embed
       // Now accepts authorDid to construct URLs if necessary
-      // Renamed from extractImages to extractEmbedDetails
-      const extractEmbedDetails = (record, authorDid) => {
-        const embeds = [];
-        const rawEmbed = record?.embed;
-
-        if (!rawEmbed) {
-          // console.log(`[extractEmbedDetails] No rawEmbed found in record for author DID: ${authorDid}.`);
-          return embeds;
+      const extractImages = (record, authorDid) => {
+        const images = record?.embed?.images || record?.embed?.media?.images || [];
+        // New Log 1: Initial call and raw images found
+        console.log(`[extractImages] Called. Author DID: ${authorDid}. Raw images found in embed: ${images.length}`);
+        if (images.length > 0) {
+          // New Log 2: Details of the first raw image object (if any) for inspection
+          console.log(`[extractImages] Details of first raw image object: ${JSON.stringify(images[0], null, 2)}`);
         }
 
-        // console.log(`[extractEmbedDetails] Processing rawEmbed type: ${rawEmbed.$type} for author DID: ${authorDid}`);
+        return images.map((img, idx) => {
+          let imageUrl = img.fullsize || img.thumb;
+          let cidString = null;
 
-        // Handle app.bsky.embed.images (and #view variant)
-        if (rawEmbed.$type === 'app.bsky.embed.images' || rawEmbed.$type === 'app.bsky.embed.images#view') {
-          const images = rawEmbed.images || [];
-          // console.log(`[extractEmbedDetails] Found ${images.length} direct images.`);
-          images.forEach((img, idx) => {
-            let imageUrl = img.fullsize || img.thumb;
-            let cidString = null;
+          // Log initial state for this image
+          console.log(`[extractImages DEBUG] Processing image ${idx}: Direct fullsize/thumb: ${imageUrl}, Author DID: ${authorDid}`);
+          console.log(`[extractImages DEBUG] Image ${idx} object: ${JSON.stringify(img, null, 2)}`);
 
-            if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') {
-              cidString = img.image.ref.toString();
-            } else if (img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
-              cidString = img.image.ref.$link;
-            } else if (img.image && typeof img.image.cid === 'string') {
-              cidString = img.image.cid;
-            }
 
-            if (!imageUrl && authorDid && cidString) {
-              imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
-            }
-
-            if (imageUrl) {
-              embeds.push({
-                type: 'image',
-                url: imageUrl,
-                alt: img.alt || ''
-              });
-              // console.log(`[extractEmbedDetails] Added image embed: ${imageUrl}`);
-            } else {
-              // console.log(`[extractEmbedDetails] Could not determine URL for image ${idx}. CID: ${cidString}, AuthorDID: ${authorDid}`);
-            }
-          });
-        }
-
-        // Handle app.bsky.embed.external (and #view variant)
-        else if (rawEmbed.$type === 'app.bsky.embed.external' || rawEmbed.$type === 'app.bsky.embed.external#view') {
-          const external = rawEmbed.external;
-          if (external && external.uri) {
-            embeds.push({
-              type: 'external',
-              uri: external.uri,
-              title: external.title || '',
-              description: external.description || '',
-              thumb: external.thumb?.cid ? `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${external.thumb.cid}` : (external.thumb?.uri || null) // Assuming thumb might have cid or uri
-            });
-            // console.log(`[extractEmbedDetails] Added external embed: ${external.uri}`);
-          }
-        }
-
-        // Handle app.bsky.embed.record (and #view variant)
-        else if (rawEmbed.$type === 'app.bsky.embed.record' || rawEmbed.$type === 'app.bsky.embed.record#view') {
-          const recordEmbed = rawEmbed.record;
-          if (recordEmbed && recordEmbed.uri) {
-            // For simple record embeds, we might not have full text or author handle directly without another fetch.
-            // The 'recordEmbed' here is often a LiteRecord.
-            embeds.push({
-              type: 'record',
-              recordUri: recordEmbed.uri,
-              recordCid: recordEmbed.cid || null,
-              // Attempt to get author/text if LiteRecord provides them (might be partial or missing)
-              recordAuthor: recordEmbed.author?.handle || null,
-              recordText: recordEmbed.value?.text || null, // LiteRecord often has 'value' for the actual record content
-            });
-            // console.log(`[extractEmbedDetails] Added record embed: ${recordEmbed.uri}`);
-          }
-        }
-
-        // Handle app.bsky.embed.recordWithMedia (and #view variant)
-        else if (rawEmbed.$type === 'app.bsky.embed.recordWithMedia' || rawEmbed.$type === 'app.bsky.embed.recordWithMedia#view') {
-          const recordPart = rawEmbed.record?.record; // Note the double .record for the actual record data
-          const mediaPart = rawEmbed.media;
-          let extractedMedia = null;
-
-          if (mediaPart) {
-            if ((mediaPart.$type === 'app.bsky.embed.images' || mediaPart.$type === 'app.bsky.embed.images#view') && mediaPart.images) {
-              const images = mediaPart.images.map(img => {
-                let imageUrl = img.fullsize || img.thumb;
-                let cidString = null;
-                if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') cidString = img.image.ref.toString();
-                else if (img.image?.cid) cidString = img.image.cid;
-                if (!imageUrl && authorDid && cidString) imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
-                return imageUrl ? { type: 'image', url: imageUrl, alt: img.alt || '' } : null;
-              }).filter(Boolean);
-              if (images.length > 0) extractedMedia = { type: 'images', images: images };
-            } else if ((mediaPart.$type === 'app.bsky.embed.external' || mediaPart.$type === 'app.bsky.embed.external#view') && mediaPart.external) {
-              extractedMedia = {
-                type: 'external',
-                uri: mediaPart.external.uri,
-                title: mediaPart.external.title || '',
-                description: mediaPart.external.description || '',
-                thumb: mediaPart.external.thumb?.cid ? `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${mediaPart.external.thumb.cid}` : (mediaPart.external.thumb?.uri || null)
-              };
-            }
+          // Attempt to get CID string from the .ref object (which might be a CID instance)
+          if (img.image && img.image.ref && typeof img.image.ref.toString === 'function') {
+            cidString = img.image.ref.toString();
+            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.ref.toString(): ${cidString}`);
           }
 
-          if (recordPart && recordPart.uri) {
-            embeds.push({
-              type: 'recordWithMedia',
-              record: {
-                uri: recordPart.uri,
-                cid: recordPart.cid || null,
-                authorHandle: recordPart.author?.handle || null,
-                textSnippet: recordPart.value?.text ? String(recordPart.value.text).substring(0, 100) : null,
-              },
-              media: extractedMedia
-            });
-            // console.log(`[extractEmbedDetails] Added recordWithMedia embed: Record URI ${recordPart.uri}, Media type: ${extractedMedia?.type}`);
+          // Fallback: Check for a direct $link property on img.image.ref (as seen in some LiteRecord contexts)
+          // This is less likely for the direct notification embed based on recent logs, but kept for robustness.
+          if (!cidString && img.image && img.image.ref && typeof img.image.ref.$link === 'string') {
+            cidString = img.image.ref.$link;
+            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.ref.$link: ${cidString}`);
           }
-        }
-        // console.log(`[extractEmbedDetails] Finished processing for author DID: ${authorDid}. Total embeds extracted: ${embeds.length}`);
-        return embeds;
+
+          // Fallback: Check for a direct cid string on img.image (less common for blobs, but good to have)
+          if (!cidString && img.image && typeof img.image.cid === 'string') {
+            cidString = img.image.cid;
+            console.log(`[extractImages] Image ${idx}: Extracted CID via img.image.cid: ${cidString}`);
+          }
+
+          // If we have a CID string and an author DID, construct the URL
+          if (!imageUrl && authorDid && cidString) {
+            console.log(`[extractImages] Image ${idx}: Constructing URL. Author DID: ${authorDid}, CID: ${cidString}`);
+            imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${authorDid}&cid=${cidString}`;
+          } else if (!imageUrl) {
+            // This log helps if no URL was formed via direct properties or CID methods.
+            console.log(`[extractImages] Image ${idx}: Could not determine imageUrl. authorDid: ${authorDid}, cidString: ${cidString}, Raw img.image: ${JSON.stringify(img.image, null, 2)}`);
+          }
+
+          console.log(`[extractImages] Image ${idx}: Final imageUrl for this image: ${imageUrl}, Alt: ${img.alt || ''}`);
+          return { alt: img.alt || '', url: imageUrl };
+
+        }).filter(imgObject => { // Changed variable name to avoid confusion with 'img' in map
+          const shouldRetain = !!imgObject.url;
+          if (!shouldRetain) {
+            // New Log 8: Image being filtered out
+            console.log(`[extractImages] Filtering out image due to missing/falsy URL. Image object details: ${JSON.stringify(imgObject, null, 2)}`);
+          }
+          return shouldRetain;
+        });
       };
 
       // Add current post details
@@ -1387,37 +1209,44 @@ Respond ONLY with a single JSON object.`;
         author: post.author.handle,
         text: post.record.text,
         createdAt: post.record.createdAt,
-        embeds: extractEmbedDetails(post.record, post.author.did) // Use new function and key 'embeds'
+        images: extractImages(post.record, post.author.did) // Pass current post's author DID
       });
 
       // Handle quoted post
       if (post.record.embed?.$type === 'app.bsky.embed.record' && post.record.embed.record) {
-        const quotedPostRef = post.record.embed.record;
+        const quotedPostRef = post.record.embed.record; // This is a LiteRecord, might not have .record.text directly
         const quotedPostUri = quotedPostRef.uri;
-        // console.log(`[getReplyContext] Quoted post detected: ${quotedPostUri}`);
+        console.log(`[getReplyContext] Quoted post detected: ${quotedPostUri}`);
         try {
+          // Fetch the full quoted post to get its record and author DID for image URL construction
           const { data: quotedPostThread } = await this.agent.getPostThread({ uri: quotedPostUri, depth: 0 });
           const fullQuotedPost = quotedPostThread?.thread?.post;
 
           if (fullQuotedPost && fullQuotedPost.record && fullQuotedPost.author) {
-            // console.log(`[getReplyContext] Successfully fetched full quoted post by ${fullQuotedPost.author.handle}`);
+            console.log(`[getReplyContext] Successfully fetched full quoted post by ${fullQuotedPost.author.handle}`);
+            const quotedImages = extractImages(fullQuotedPost.record, fullQuotedPost.author.did);
+
             conversation.unshift({ // Add quoted post to the beginning
               uri: fullQuotedPost.uri,
               author: fullQuotedPost.author.handle,
-              text: fullQuotedPost.record.text,
+              text: fullQuotedPost.record.text, // Text from the full record
               createdAt: fullQuotedPost.record.createdAt,
-              embeds: extractEmbedDetails(fullQuotedPost.record, fullQuotedPost.author.did) // Use new function
+              images: quotedImages
             });
           } else {
-            // console.warn(`[getReplyContext] Could not fetch full details for quoted post ${quotedPostUri}. Using LiteRecord info.`);
-            const liteRecordValue = quotedPostRef.value || {};
-            const liteRecordAuthorDid = quotedPostRef.author?.did;
+            console.warn(`[getReplyContext] Could not fetch full details for quoted post ${quotedPostUri}. Attempting to use LiteRecord info.`);
+            // Fallback: Try to use info from the LiteRecord if available
+            // Note: LiteRecord value might be a postRecord or just a basic view.
+            // Author DID might not be present on LiteRecord directly, so image URLs from CID might fail.
+            const liteRecordValue = quotedPostRef.value || {}; // .value should be the actual record content
+            const liteRecordAuthorDid = quotedPostRef.author?.did; // Attempt to get author DID from the reference
+            const quotedImages = extractImages({ embed: liteRecordValue.embed }, liteRecordAuthorDid); // Pass a compatible structure
              conversation.unshift({
               uri: quotedPostUri,
               author: quotedPostRef.author?.handle || 'unknown author',
               text: liteRecordValue?.text,
-              createdAt: liteRecordValue?.createdAt,
-              embeds: extractEmbedDetails({ embed: liteRecordValue.embed }, liteRecordAuthorDid) // Use new function
+              createdAt: liteRecordValue?.createdAt, // This might be undefined if not on LiteRecord
+              images: quotedImages
             });
           }
         } catch (error) {
@@ -1439,17 +1268,20 @@ Respond ONLY with a single JSON object.`;
             if (!parentPostInThread) break;
 
             if (!parentPostInThread.record || !parentPostInThread.author) {
-                // console.warn(`[getReplyContext] Parent post ${currentUri} missing record or author data. Skipping.`);
+                console.warn(`[getReplyContext] Parent post ${currentUri} missing record or author data. Skipping.`);
                 currentUri = parentPostInThread.record?.reply?.parent?.uri;
                 continue;
             }
+
+            // Use extractImages with the parent post's author DID
+            const parentImages = extractImages(parentPostInThread.record, parentPostInThread.author.did);
 
             conversation.unshift({
               uri: parentPostInThread.uri,
               author: parentPostInThread.author.handle,
               text: parentPostInThread.record.text,
               createdAt: parentPostInThread.record.createdAt,
-              embeds: extractEmbedDetails(parentPostInThread.record, parentPostInThread.author.did) // Use new function
+              images: parentImages
             });
 
             currentUri = parentPostInThread.record?.reply?.parent?.uri;
@@ -1462,31 +1294,10 @@ Respond ONLY with a single JSON object.`;
 
       console.log('[getReplyContext] Final conversation context structure (oldest to newest):');
       conversation.forEach((item, index) => {
-        let embedSummary = "No embeds";
-        if (item.embeds && item.embeds.length > 0) {
-          const embedTypes = item.embeds.map(e => e.type).join(', ');
-          embedSummary = `Embeds: ${item.embeds.length} (${embedTypes})`;
-        }
-        console.log(`[getReplyContext] Context[${index}]: PostURI: ${item.uri}, Author: ${item.author}, Text: "${item.text?.substring(0,70)}...", ${embedSummary}`);
-        if (item.embeds && item.embeds.length > 0) {
-          item.embeds.forEach((embed, embedIdx) => {
-            if (embed.type === 'image') {
-              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (Image): URL: ${embed.url}, Alt: ${embed.alt}`);
-            } else if (embed.type === 'external') {
-              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (External): URI: ${embed.uri}, Title: ${embed.title?.substring(0,50)}...`);
-            } else if (embed.type === 'record') {
-              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (Record): URI: ${embed.recordUri}, Author: ${embed.recordAuthor}, Text: ${embed.recordText?.substring(0,50)}...`);
-            } else if (embed.type === 'recordWithMedia') {
-              let mediaSummary = 'No media content';
-              if (embed.media?.type === 'images' && embed.media.images?.length > 0) {
-                mediaSummary = `${embed.media.images.length} image(s)`;
-              } else if (embed.media?.type === 'external') {
-                mediaSummary = `External link: ${embed.media.external?.uri}`;
-              }
-              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (RecordWithMedia): Record URI: ${embed.record?.uri}, Media: ${mediaSummary}`);
-            } else {
-              console.log(`[getReplyContext] Context[${index}] Embed[${embedIdx}] (Unknown type): ${JSON.stringify(embed)}`);
-            }
+        console.log(`[getReplyContext] Context[${index}]: PostURI: ${item.uri}, Author: ${item.author}, Text: "${item.text?.substring(0,70)}...", Images: ${item.images?.length || 0}`);
+        if (item.images?.length > 0) {
+          item.images.forEach((img, imgIdx) => {
+            console.log(`[getReplyContext] Context[${index}] Image[${imgIdx}]: URL: ${img.url}, Alt: ${img.alt}`);
           });
         }
       });
@@ -2093,7 +1904,7 @@ Your JSON Output: {"action": "none"}`;
 
     // New: Check for clarification before any other processing
     // For context, we could pass a summary of `context`, but for now, focusing on userQueryText
-    const clarificationSuggestion = await this.getClarificationSuggestion(userQueryText, context);
+    const clarificationSuggestion = await this.getClarificationSuggestion(userQueryText, null /* Pass context summary here if developed */);
     if (clarificationSuggestion.needs_clarification && clarificationSuggestion.clarification_question) {
       console.log(`[ClarificationHelper] Query needs clarification. Asking: "${clarificationSuggestion.clarification_question}"`);
       await this.postReply(post, clarificationSuggestion.clarification_question);
@@ -2737,61 +2548,30 @@ Do not make up information not present in the search results. Keep the response 
         let nemotronSearchPrompt = "";
         if (matches.length > 0) {
           const topMatch = matches[0]; // Get the single best match
-          let foundPostToEmbed = null; // Will be set if we are doing a generic embed
-          let searchSystemPrompt;
+          // const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`; // URL will be part of the embed
 
-          // Check if the user is asking about the bot's immediately preceding post with an embed
-          const isReplyToBotRecentEmbed =
-            topMatch.authorDid === this.agent.did &&
-            topMatch.uri === post.record?.reply?.parent?.uri &&
-            topMatch.embedDetails &&
-            (topMatch.embedDetails.type === 'external' || topMatch.embedDetails.type === 'image' || (topMatch.embedDetails.type === 'recordWithMedia' && topMatch.embedDetails.media));
-
-          if (isReplyToBotRecentEmbed) {
-            console.log(`[SearchHistoryRefined] User is asking about bot's own recent embed. URI: ${topMatch.uri}`);
-            let embedDescription = `an embed of type '${topMatch.embedDetails.type}'`;
-            if (topMatch.embedDetails.type === 'external' && topMatch.embedDetails.external) {
-              embedDescription = `the link titled "${topMatch.embedDetails.external.title || 'Untitled'}" (${topMatch.embedDetails.external.uri})`;
-              // Attempt to infer original Giphy search query if title suggests it
-              if (topMatch.embedDetails.external.title && topMatch.embedDetails.external.title.toLowerCase().includes("giphy gif for")) {
-                const inferredQuery = topMatch.embedDetails.external.title.split("GIPHY GIF for")[1]?.trim().replace(/"/g, '');
-                if (inferredQuery) embedDescription += ` (related to query: "${inferredQuery}")`;
-              } else if (topMatch.embedDetails.external.description && topMatch.embedDetails.external.description.toLowerCase().includes("via giphy for:")) {
-                const inferredQuery = topMatch.embedDetails.external.description.split("Via GIPHY for:")[1]?.trim().replace(/"/g, '');
-                 if (inferredQuery) embedDescription += ` (related to query: "${inferredQuery}")`;
-              }
-            } else if (topMatch.embedDetails.type === 'image' && topMatch.embedDetails.images && topMatch.embedDetails.images.length > 0) {
-              embedDescription = `the image described as "${topMatch.embedDetails.images[0].alt || 'No description'}"`;
-            }
-
-            searchSystemPrompt = `You are a helpful AI assistant. The user is asking a question ("${userQueryText}") about a specific item you (the bot) just posted. That item was: ${embedDescription}.
-Directly answer their question. For example, if they ask "Can you see it?", respond affirmatively and reference the item. If they ask "What was that for?", explain the context if you know it (e.g., from the inferred query).
-Be conversational and direct. Do NOT simply state "I found this post."`;
-
-            nemotronSearchPrompt = `User's question about my recent post: "${userQueryText}"
-My recent post contained: ${embedDescription}.
-Please provide a direct, conversational answer to the user.`;
-            // No foundPostToEmbed in this case, as we want a textual answer, not re-embedding.
-
-          } else { // Standard search history logic (embed the found post or provide URL)
-            let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
-            if (searchIntent.recency_cue) {
-              userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
-            }
-            userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
-
-            nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
-
-            if (topMatch.uri && topMatch.cid) {
-                 foundPostToEmbed = { uri: topMatch.uri, cid: topMatch.cid };
-                 searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and confirmation that a relevant post was found. Formulate a brief, natural confirmation message (e.g., 'I found this post for you:', 'This might be what you were looking for:'). The actual post will be embedded by the system, so DO NOT include the URL or any details of the post in your text response. Just a short introductory phrase.";
-            } else {
-                console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
-                const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
-                nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
-                searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and the result of your search (a URL). Your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself.";
-            }
+          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          if (searchIntent.recency_cue) {
+            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
+          userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
+
+          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
+
+          // Prepare details for embedding the found post
+          const foundPostToEmbed = {
+            uri: topMatch.uri,
+            cid: topMatch.cid
+          };
+
+          if (!foundPostToEmbed.uri || !foundPostToEmbed.cid) {
+            console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
+            // Fallback to old behavior if critical embed info is missing
+            const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
+            nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+          }
+
+
         } else { // NO MATCHES FOUND
           let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
@@ -2800,11 +2580,13 @@ Please provide a direct, conversational answer to the user.`;
           userQueryContextForNemotron += ` I searched ${searchPerformed}.`;
 
           nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nI searched ${searchPerformed} but couldn't find any posts that specifically matched your description (using keywords: ${JSON.stringify(searchIntent.keywords)}). Please formulate a polite response to the user stating this, for example: "Sorry, I looked for something matching that description ${searchPerformed} from ${searchIntent.recency_cue || 'recently'} but couldn't find it. Could you try different keywords?"`;
-          searchSystemPrompt = "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and informed that nothing was found. State that clearly and politely.";
         }
 
         console.log(`[SearchHistory] Nemotron prompt for search result: "${nemotronSearchPrompt.substring(0,300)}..."`);
-        console.log(`[SearchHistory] System prompt: "${searchSystemPrompt.substring(0,200)}..."`);
+
+        const searchSystemPrompt = matches.length > 0 && matches[0].uri && matches[0].cid
+          ? "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and confirmation that a relevant post was found. Formulate a brief, natural confirmation message (e.g., 'I found this post for you:', 'This might be what you were looking for:'). The actual post will be embedded by the system, so DO NOT include the URL or any details of the post in your text response. Just a short introductory phrase."
+          : "You are a helpful AI assistant. The user asked you to find something. You have been provided with the user's original query and the result of your search. If nothing was found, state that clearly and politely. If a post URL was found (but cannot be embedded), your response to the user MUST consist of a brief confirmation phrase and then the Post URL itself.";
 
         console.log(`NIM CALL START: Search History Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimSearchResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -3380,24 +3162,12 @@ Do not make up information not present in the search results. Keep the response 
               }
             }
             conversationHistory += `${authorRole}${timestampStr}: ${msg.text}\n`;
-            if (msg.embeds && msg.embeds.length > 0) {
-              msg.embeds.forEach(embed => {
-                if (embed.type === 'image') {
-                  conversationHistory += `[${authorRole} sent an image${embed.alt ? ` with description: ${embed.alt.substring(0,100)}` : ''}]\n`;
-                } else if (embed.type === 'external') {
-                  conversationHistory += `[${authorRole} shared a link: ${embed.title ? embed.title.substring(0,70) : embed.uri}${embed.description ? ` - Description: ${embed.description.substring(0, 50)}...` : ''}]\n`;
-                } else if (embed.type === 'record') {
-                  conversationHistory += `[${authorRole} quoted a post by ${embed.recordAuthor || 'another user'}: "${embed.recordText ? embed.recordText.substring(0, 70) + '...' : '(content not shown)'}" (URI: ${embed.recordUri})]\n`;
-                } else if (embed.type === 'recordWithMedia') {
-                  let mediaDesc = 'media content';
-                  if (embed.media?.type === 'images' && embed.media.images?.length > 0) {
-                    mediaDesc = `${embed.media.images.length} image(s)${embed.media.images[0].alt ? ` (first image alt: ${embed.media.images[0].alt.substring(0,30)}...)` : ''}`;
-                  } else if (embed.media?.type === 'external') {
-                    mediaDesc = `a link: ${embed.media.external?.title ? embed.media.external.title.substring(0,50) : embed.media.external?.uri}`;
-                  }
-                  conversationHistory += `[${authorRole} quoted a post (URI: ${embed.record?.uri}) which included ${mediaDesc}]\n`;
+            if (msg.images && msg.images.length > 0) {
+              msg.images.forEach(image => {
+                if (image.alt) {
+                  conversationHistory += `[${authorRole} sent an image with description: ${image.alt}]\n`;
                 } else {
-                  conversationHistory += `[${authorRole} included an embed of type: ${embed.type}]\n`;
+                  conversationHistory += `[${authorRole} sent an image]\n`;
                 }
               });
             }
@@ -4464,7 +4234,7 @@ PRIORITY 2: Bot Self-Help/Capabilities Query:
 }
 
 PRIORITY 3: If not an image generation or self-help command, then consider other intents:
-1. If the user is asking to FIND or RECALL a *specific item* (like a post, image, or link) from PAST INTERACTIONS (conversation history, bot's gallery), or asking about the content of such a specific past item:
+1. If searching PAST INTERACTIONS (conversation history, bot's gallery) for something specific the user or bot previously posted or saw:
 {
   "intent": "search_history",
   "target_type": "image" | "link" | "post" | "message" | "unknown",
@@ -4473,8 +4243,7 @@ PRIORITY 3: If not an image generation or self-help command, then consider other
   "recency_cue": "textual cue for recency" | null,
   "search_scope": "bot_gallery" | "conversation" | null
 }
-   - "target_type": "image" if user asks to FIND/RECALL a specific "image", "picture", "photo" previously posted/seen.
-   - This intent is less likely if the user is making a simple, direct comment or question about something the bot *just did in the immediately preceding turn*, unless they are explicitly asking to *find that item again* or asking about its source/details in a way that implies looking it up.
+   - "target_type": "image" if user asks to FIND/SEARCH FOR an "image", "picture", "photo" they or you posted/saw.
    - "keywords": EXCLUDE image generation verbs like "generate", "create", "draw", "make".
 
 2. If it's a GENERAL QUESTION *clearly asking for external information* that can be answered by a WEB SEARCH (including requests to find generic images not tied to conversation history):
@@ -5145,104 +4914,6 @@ Ensure your entire response is ONLY the JSON object.`;
     } catch (error) {
       console.error(`[GiphySearch] Exception during Giphy search for query "${query}":`, error);
       return [];
-    }
-  }
-
-  async generateProactivePersonaReply(postView) {
-    if (!postView || !postView.record || !postView.record.text || !postView.author) {
-      console.warn('[LlamaBot.generateProactivePersonaReply] Invalid postView object or missing essential data.');
-      return null;
-    }
-
-    const postText = postView.record.text;
-    const postAuthorHandle = postView.author.handle;
-    const botPersonaPrompt = this.config.TEXT_SYSTEM_PROMPT; // Contains persona, likes, dislikes
-
-    const systemPrompt = `You are an AI assistant with the following persona: "${botPersonaPrompt}".
-You have encountered a new post from an account you follow on Bluesky.
-User @${postAuthorHandle} posted: "${postText.substring(0, 300)}${postText.length > 300 ? '...' : ''}"
-
-Based on your defined persona, especially your explicit "Likes:" and "Dislikes:", determine if you have a genuinely relevant, insightful, or engaging comment to make.
-- Your comment should NOT be generic (e.g., "Nice post!", "Interesting!").
-- It should clearly stem from your persona's interests or disinterests as they relate to the post's content.
-- If the post strongly aligns with your likes, consider an enthusiastic or appreciative comment.
-- If the post content relates to your dislikes, you might offer a (polite) contrasting viewpoint or a thoughtful critique, IF your persona would do so. Otherwise, it's better to say nothing.
-- If the post is neutral or doesn't strongly connect with your persona's specific likes/dislikes, or if you have nothing substantial or persona-aligned to add, you MUST output the exact string "NO_REPLY".
-
-If you decide to reply, formulate a short, natural reply (under 280 characters).
-If not, just output "NO_REPLY".`;
-
-    const userPrompt = `Considering your persona and the above post by @${postAuthorHandle}, what is your reply? (If none, say "NO_REPLY")`;
-
-    console.log(`[LlamaBot.generateProactivePersonaReply] Calling Nemotron for persona-based reply decision for post ${postView.uri}.`);
-    try {
-      const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-        body: JSON.stringify({
-          model: 'nvidia/llama-3.3-nemotron-super-49b-v1', // Primary model for decision & generation
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt }
-          ],
-          temperature: 0.7, // Allow some creativity
-          max_tokens: 100,  // Replies should be short
-          stream: false
-        }),
-        customTimeout: 90000 // 90s
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[LlamaBot.generateProactivePersonaReply] NIM API error (${response.status}) for post ${postView.uri}: ${errorText}`);
-        return null; // Don't reply on error
-      }
-
-      const data = await response.json();
-      if (data.choices && data.choices[0].message && data.choices[0].message.content) {
-        let rawReply = data.choices[0].message.content.trim();
-        console.log(`[LlamaBot.generateProactivePersonaReply] Nemotron raw response for post ${postView.uri}: "${rawReply}"`);
-
-        if (rawReply.toUpperCase() === "NO_REPLY") {
-          console.log(`[LlamaBot.generateProactivePersonaReply] Persona logic: NO_REPLY for post ${postView.uri}.`);
-          return null;
-        }
-
-        // Filter the potentially good reply for formatting
-        const filterModelId = 'google/gemma-3n-e4b-it';
-        const filterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 280 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text.";
-
-        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-            body: JSON.stringify({
-                model: filterModelId,
-                messages: [
-                    { role: "system", content: filterSystemPrompt },
-                    { role: "user", content: rawReply }
-                ],
-                temperature: 0.1, max_tokens: 100, stream: false
-            }),
-            customTimeout: 60000 // 60s for filter
-        });
-
-        if (filterResponse.ok) {
-            const filterData = await filterResponse.json();
-            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
-                const finalReply = filterData.choices[0].message.content.trim();
-                console.log(`[LlamaBot.generateProactivePersonaReply] Filtered reply for post ${postView.uri}: "${finalReply}"`);
-                return finalReply;
-            }
-        }
-        // If filter fails, return the raw reply (it might be okay, or postReply will truncate)
-        console.warn(`[LlamaBot.generateProactivePersonaReply] Filter step failed or returned no content. Using Nemotron's raw reply for post ${postView.uri}.`);
-        return rawReply;
-      }
-      console.warn(`[LlamaBot.generateProactivePersonaReply] NIM response for post ${postView.uri} had no usable content.`);
-      return null;
-    } catch (error) {
-      console.error(`[LlamaBot.generateProactivePersonaReply] Exception during LLM call for post ${postView.uri}:`, error);
-      return null;
     }
   }
 } // Closes the LlamaBot class
