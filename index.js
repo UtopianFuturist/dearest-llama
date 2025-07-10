@@ -192,8 +192,7 @@ class BaseBot {
     this.repliedPosts = new Set();
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
-    this.subscribedUsersFilePath = path.join(process.cwd(), 'subscribed_users.json');
-    this.subscribedUserDids = this._loadSubscribedUsers();
+    // Removed subscription file properties
     this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
     this.lastProcessedPostUris = this._loadLastProcessedPostUris(); // { userDid: lastUri }
     this.lastPollTime = 0;
@@ -314,64 +313,19 @@ class BaseBot {
     }
   }
 
-  _loadSubscribedUsers() {
-    try {
-      if (fs.existsSync(this.subscribedUsersFilePath)) {
-        const data = fs.readFileSync(this.subscribedUsersFilePath, 'utf-8');
-        const jsonData = JSON.parse(data);
-        if (Array.isArray(jsonData.subscribedUserDids)) {
-          console.log(`[SubscriptionManager] Loaded ${jsonData.subscribedUserDids.length} subscribed users.`);
-          return new Set(jsonData.subscribedUserDids);
-        }
+  // Removed _loadSubscribedUsers, _saveSubscribedUsers, addUserSubscription, removeUserSubscription, isUserSubscribed
+
+  getSubscribedUsers() { // Now reads from environment variable
+    const trackedDidsEnv = process.env.BLUESKY_TRACKED_DIDS;
+    if (trackedDidsEnv && trackedDidsEnv.trim() !== "") {
+      const dids = trackedDidsEnv.split(',').map(did => did.trim()).filter(did => did.startsWith('did:plc:'));
+      if (dids.length > 0) {
+        // console.log(`[EnvTrack] Tracking ${dids.length} DIDs from BLUESKY_TRACKED_DIDS environment variable.`);
+        return dids;
       }
-    } catch (error) {
-      console.error('[SubscriptionManager] Error loading subscribed users:', error);
     }
-    console.log('[SubscriptionManager] No existing subscribed users file found or error loading. Starting with empty set.');
-    return new Set();
-  }
-
-  _saveSubscribedUsers() {
-    try {
-      const dataToSave = { subscribedUserDids: Array.from(this.subscribedUserDids) };
-      fs.writeFileSync(this.subscribedUsersFilePath, JSON.stringify(dataToSave, null, 2), 'utf-8');
-      console.log(`[SubscriptionManager] Saved ${this.subscribedUserDids.size} subscribed users to ${this.subscribedUsersFilePath}`);
-    } catch (error) {
-      console.error('[SubscriptionManager] Error saving subscribed users:', error);
-    }
-  }
-
-  addUserSubscription(userDid) {
-    if (!userDid) return false;
-    if (this.subscribedUserDids.has(userDid)) {
-      console.log(`[SubscriptionManager] User ${userDid} is already subscribed.`);
-      return false; // Already subscribed
-    }
-    this.subscribedUserDids.add(userDid);
-    this._saveSubscribedUsers();
-    console.log(`[SubscriptionManager] User ${userDid} subscribed.`);
-    return true;
-  }
-
-  removeUserSubscription(userDid) {
-    if (!userDid) return false;
-    if (!this.subscribedUserDids.has(userDid)) {
-      console.log(`[SubscriptionManager] User ${userDid} was not subscribed.`);
-      return false; // Not found
-    }
-    this.subscribedUserDids.delete(userDid);
-    this._saveSubscribedUsers();
-    console.log(`[SubscriptionManager] User ${userDid} unsubscribed.`);
-    return true;
-  }
-
-  isUserSubscribed(userDid) {
-    if (!userDid) return false;
-    return this.subscribedUserDids.has(userDid);
-  }
-
-  getSubscribedUsers() {
-    return Array.from(this.subscribedUserDids);
+    // console.log('[EnvTrack] BLUESKY_TRACKED_DIDS environment variable is not set or empty, or contains no valid DIDs. No users will be proactively tracked.');
+    return [];
   }
 
   async pollSubscribedUserFeeds() {
@@ -1011,49 +965,7 @@ Respond ONLY with a single JSON object.`;
               // The existing getReplyContext uses post.uri and post.record.reply.
             };
 
-            // Handle subscription commands first
-            let isSubscriptionCmdHandled = false;
-            const postTextLower = currentPostObject.record.text?.toLowerCase() || "";
-            const botMentionIdentifier = `@${this.config.BLUESKY_IDENTIFIER.toLowerCase()}`;
-
-            // Check if it's a direct command to the bot (not a reply to someone else where bot is just mentioned)
-            const isDirectCommand = postTextLower.startsWith(botMentionIdentifier) && !currentPostObject.record.reply;
-
-            if (isDirectCommand) {
-              const commandPart = postTextLower.substring(botMentionIdentifier.length).trim();
-              if (commandPart === "subscribe my posts") {
-                if (await this.hasAlreadyReplied(currentPostObject)) {
-                    console.log(`[SubCmd] Already replied to subscribe command post ${currentPostObject.uri}. Skipping.`);
-                } else {
-                    const success = this.addUserSubscription(currentPostObject.author.did);
-                    if (success) {
-                        await this.postReply(currentPostObject, "You're now subscribed! I'll keep an eye on your new posts and try to engage if I see something relevant. You can say '@me unsubscribe my posts' (mentioning me directly) anytime to stop.");
-                    } else {
-                        await this.postReply(currentPostObject, "You're already subscribed to my proactive engagement feature!");
-                    }
-                    this.repliedPosts.add(currentPostObject.uri); // Mark as replied
-                }
-                isSubscriptionCmdHandled = true;
-              } else if (commandPart === "unsubscribe my posts") {
-                 if (await this.hasAlreadyReplied(currentPostObject)) {
-                    console.log(`[SubCmd] Already replied to unsubscribe command post ${currentPostObject.uri}. Skipping.`);
-                } else {
-                    const success = this.removeUserSubscription(currentPostObject.author.did);
-                    if (success) {
-                        await this.postReply(currentPostObject, "You've been unsubscribed. I won't proactively engage with your new posts anymore.");
-                    } else {
-                        await this.postReply(currentPostObject, "You weren't subscribed to begin with.");
-                    }
-                    this.repliedPosts.add(currentPostObject.uri); // Mark as replied
-                }
-                isSubscriptionCmdHandled = true;
-              }
-            }
-
-            if (isSubscriptionCmdHandled) {
-                console.log(`[Monitor] Subscription command handled for post ${currentPostObject.uri}. Skipping further processing for this post.`);
-                continue; // Skip other processing if it was a subscription command
-            }
+            // User-facing subscription commands removed as per new plan (env var based tracking)
 
             let isAdminCmdHandled = false;
             if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
