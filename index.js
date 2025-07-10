@@ -5177,6 +5177,7 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
 
               if (matchCondition) {
                 console.log(`[BotFeedMonitor] SUCCESS: Post ${postObject.uri} by ${postObject.author.handle} matched condition '${matchCondition}' with term '${matchedTerm}'.`);
+                console.log(`[BotFeedMonitor] DEBUG: Before switch - matchCondition type: ${typeof matchCondition}, value: '${matchCondition}'`); // DEBUG LOG
 
                 if (await this.hasAlreadyReplied(postObject)) {
                   console.log(`[BotFeedMonitor] SKIP: Bot has already replied to ${postObject.uri}.`);
