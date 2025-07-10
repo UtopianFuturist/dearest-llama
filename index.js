@@ -5196,25 +5196,18 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                 let systemPromptForReply = "";
                 let userPromptForReply = "";
 
-                switch (matchCondition) {
-                  case "displayName":
-                  case "handle":
-                  case "handleBase":
-                  case "did":
-                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you (as "${matchedTerm}") in their post. Craft a helpful and relevant reply in your persona.`;
-                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you as "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
-                    break;
-                  case "likeKeyword":
-                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you like: "${matchedTerm}". Craft an engaging and positive reply in your persona.`;
-                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a liked topic: "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable positive and engaging reply in your defined persona.`;
-                    break;
-                  case "dislikeKeyword":
-                    systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you generally dislike or are cautious about: "${matchedTerm}". Craft a nuanced and polite reply. You can offer a gentle counterpoint, a neutral observation, or shift the conversation if appropriate, all within your persona. Avoid being aggressive or overly negative.`;
-                    userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a disliked/cautionary topic: "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable nuanced and polite reply in your defined persona.`;
-                    break;
-                  default:
-                    console.warn(`[BotFeedMonitor] Unknown matchCondition: ${matchCondition}. Skipping LLM call for ${postObject.uri}`);
-                    continue; // Skip this post if condition is unknown
+                if (matchCondition === "displayName" || matchCondition === "handle" || matchCondition === "handleBase" || matchCondition === "did") {
+                  systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you (as "${matchedTerm}") in their post. Craft a helpful and relevant reply in your persona.`;
+                  userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you as "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
+                } else if (matchCondition === "likeKeyword" || matchCondition === "personaLike") { // Added personaLike
+                  systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you like: "${matchedTerm}". Craft an engaging and positive reply in your persona.`;
+                  userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a liked topic: "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable positive and engaging reply in your defined persona.`;
+                } else if (matchCondition === "dislikeKeyword" || matchCondition === "personaDislike") { // Added personaDislike
+                  systemPromptForReply = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) posted about a topic you generally dislike or are cautious about: "${matchedTerm}". Craft a nuanced and polite reply. You can offer a gentle counterpoint, a neutral observation, or shift the conversation if appropriate, all within your persona. Avoid being aggressive or overly negative.`;
+                  userPromptForReply = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (mentions a disliked/cautionary topic: "${matchedTerm}"):\n"${postText}"\n\nBased on this, generate a suitable nuanced and polite reply in your defined persona.`;
+                } else {
+                  console.warn(`[BotFeedMonitor] Unknown matchCondition: ${matchCondition}. Skipping LLM call for ${postObject.uri}`);
+                  continue; // Skip this post if condition is unknown
                 }
 
                 console.log(`[BotFeedMonitor] Generating response for post ${postObject.uri} based on matchCondition '${matchCondition}'.`);
