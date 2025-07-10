@@ -193,6 +193,8 @@ class BaseBot {
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
     this.adminDid = null; // Will be resolved in authenticate()
+    this.agentTargetDid = null; // For the configured agent (e.g., Sydney)
+    this.agentDisplayName = null; // For the configured agent's display name
     this.followingCache = { dids: [], lastFetched: 0, ttl: 15 * 60 * 1000 }; // Cache for bot's following list
 
     this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
@@ -842,11 +844,11 @@ Respond ONLY with a single JSON object.`;
             };
 
             let isAdminCmdHandled = false;
-            if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
-                currentPostObject.record.text &&
-                currentPostObject.record.text.includes('!post')) {
+            const adminPostText = currentPostObject.record.text || "";
 
-              const commandText = currentPostObject.record.text;
+            // Check for Admin Commands first
+            if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE && adminPostText.includes('!post')) {
+              const commandText = adminPostText;
               let commandContent = "";
               let commandType = null; // 'art', 'image', 'video', or 'text'
               let commandSearchText = commandText;
@@ -880,13 +882,88 @@ Respond ONLY with a single JSON object.`;
               }
             }
 
+            // If not an admin command, or if it was an admin command but not one of the '!post' types handled above,
+            // then check for admin mentioning the AGENT_DISPLAY_NAME.
+            if (!isAdminCmdHandled && currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
+                this.agentDisplayName && adminPostText.toLowerCase().includes(this.agentDisplayName.toLowerCase())) {
+
+              console.log(`[Monitor] Admin mentioned agent "${this.agentDisplayName}" in post ${currentPostObject.uri}.`);
+              if (await this.hasAlreadyReplied(currentPostObject)) {
+                console.log(`[Monitor] Already replied to admin's agent mention post ${currentPostObject.uri}. Skipping.`);
+              } else {
+                // Similar response generation as for agent mentions in their following feed
+                const context = await this.getReplyContext(currentPostObject);
+                const adminMentionSystemPrompt = `You are ${this.config.BLUESKY_IDENTIFIER}. The admin @${currentPostObject.author.handle} mentioned "${this.agentDisplayName}" (another configured agent) in their post. Craft a helpful and relevant reply from ${this.config.BLUESKY_IDENTIFIER}'s perspective. Do not speak as "${this.agentDisplayName}".`;
+                const adminMentionUserPrompt = `Conversation Context:\n${context.map(p => `${p.author}: ${p.text}`).join('\n---\n')}\n\nAdmin @${currentPostObject.author.handle} posted: "${adminPostText}"\nThis post mentions "${this.agentDisplayName}". Generate a suitable reply as ${this.config.BLUESKY_IDENTIFIER}.`;
+
+                console.log(`[Monitor] Generating response to admin's agent mention in post ${currentPostObject.uri}`);
+
+                const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                    body: JSON.stringify({
+                        model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+                        messages: [
+                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${adminMentionSystemPrompt}` },
+                            { role: "user", content: adminMentionUserPrompt }
+                        ],
+                        temperature: 0.7, max_tokens: 150, stream: false
+                    }),
+                    customTimeout: 120000 // 120s
+                });
+
+                let responseText = null;
+                if (nimResponse.ok) {
+                    const nimData = await nimResponse.json();
+                    if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
+                        let rawNimText = nimData.choices[0].message.content.trim();
+                        // Filter with Scout/Gemma
+                        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                            body: JSON.stringify({
+                                model: 'meta/llama-3.2-90b-vision-instruct', // Using Scout for filtering
+                                messages: [
+                                     { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                                    { role: "user", content: rawNimText }
+                                ],
+                                temperature: 0.1, max_tokens: 100, stream: false
+                            }),
+                            customTimeout: 90000 // 90s
+                        });
+                        if (filterResponse.ok) {
+                            const filterData = await filterResponse.json();
+                            if (filterData.choices && filterData.choices[0].message) {
+                                responseText = filterData.choices[0].message.content.trim();
+                            } else {
+                                responseText = this.basicFormatFallback(rawNimText); // Fallback if filter structure issue
+                            }
+                        } else {
+                             responseText = this.basicFormatFallback(rawNimText); // Fallback if filter API error
+                        }
+                    }
+                } else {
+                    console.error(`[Monitor] NIM API error generating response for admin's agent mention: ${nimResponse.status}`);
+                }
+
+                if (responseText) {
+                  await this.postReply(currentPostObject, responseText);
+                  console.log(`[Monitor] Replied to admin's mention of agent in post ${currentPostObject.uri}`);
+                } else {
+                  console.error(`[Monitor] Failed to generate response for admin's agent mention.`);
+                }
+                isAdminCmdHandled = true; // Mark as handled to prevent further default processing
+              }
+            }
+
+
             if (!isAdminCmdHandled) {
               if (await this.hasAlreadyReplied(currentPostObject)) { // Pass the full post object
                 console.log(`[Monitor] Already replied to post ${currentPostObject.uri} or it's a like. Skipping.`);
                 continue;
               }
 
-              // Standard response generation for mentions, replies, quotes
+              // Standard response generation for mentions, replies, quotes to the BOT
               console.log(`[Monitor] Processing notification for post ${currentPostObject.uri} from @${currentPostObject.author.handle}, reason: ${notif.reason}`);
               const context = await this.getReplyContext(currentPostObject); // Pass the full post object
               const responseText = await this.generateResponse(currentPostObject, context); // Pass the full post object
@@ -1006,6 +1083,35 @@ Respond ONLY with a single JSON object.`;
       } else {
         console.log('[AdminDID] No ADMIN_BLUESKY_HANDLE configured.');
       }
+
+      // Infer Agent Display Name
+      if (this.config.AGENT_BLUESKY_DID) {
+        this.agentTargetDid = this.config.AGENT_BLUESKY_DID;
+        console.log(`[AgentNameInference] Agent DID configured: ${this.agentTargetDid}`);
+        try {
+          const res = await this.agent.api.app.bsky.actor.getProfile({ actor: this.agentTargetDid });
+          if (res.success && res.data) {
+            this.agentDisplayName = res.data.displayName;
+            const handle = res.data.handle;
+            if (!this.agentDisplayName && handle) {
+              // Fallback: parse from handle (e.g., "sydney" from "sydney-chat.bsky.social")
+              this.agentDisplayName = handle.split('.')[0].split('-')[0]; // Basic split, might need refinement
+              console.log(`[AgentNameInference] Agent display name was empty, inferred "${this.agentDisplayName}" from handle ${handle}.`);
+            } else if (this.agentDisplayName) {
+              console.log(`[AgentNameInference] Successfully fetched agent profile. DisplayName: "${this.agentDisplayName}", Handle: ${handle}`);
+            } else {
+              console.warn(`[AgentNameInference] Agent profile fetched, but displayName is empty and handle could not be used for fallback. Handle: ${handle}`);
+            }
+          } else {
+            console.error(`[AgentNameInference] Failed to fetch profile for agent DID ${this.agentTargetDid}:`, res.error || 'Unknown error');
+          }
+        } catch (profileError) {
+          console.error(`[AgentNameInference] Exception during agent profile fetch for ${this.agentTargetDid}:`, profileError);
+        }
+      } else {
+        console.log('[AgentNameInference] No AGENT_BLUESKY_DID configured. Agent name inference skipped.');
+      }
+
     } catch (error) {
       console.error('Authentication failed:', error);
       throw error;
@@ -4810,6 +4916,183 @@ Ensure your entire response is ONLY the JSON object.`;
       return [];
     }
   }
+
+  async monitorAgentFollowingFeed() {
+    console.log('[AgentFeedMonitor] Starting agent following feed monitor...');
+    if (!this.agentTargetDid || !this.agentDisplayName) {
+      console.warn('[AgentFeedMonitor] Agent DID or DisplayName not configured/fetched. Skipping agent feed monitoring.');
+      return;
+    }
+
+    // Use a dedicated set for processed posts from the agent's following feed
+    const processedAgentFeedPostsPath = path.join(process.cwd(), 'processed_agent_feed_posts.json');
+    let processedAgentFeedPosts = new Set();
+    try {
+      if (fs.existsSync(processedAgentFeedPostsPath)) {
+        const data = fs.readFileSync(processedAgentFeedPostsPath, 'utf-8');
+        processedAgentFeedPosts = new Set(JSON.parse(data));
+        console.log(`[AgentFeedMonitor] Loaded ${processedAgentFeedPosts.size} processed post URIs for agent's following feed.`);
+      }
+    } catch (error) {
+      console.error('[AgentFeedMonitor] Error loading processed agent feed posts:', error);
+    }
+
+    const saveProcessedAgentFeedPosts = () => {
+      try {
+        fs.writeFileSync(processedAgentFeedPostsPath, JSON.stringify(Array.from(processedAgentFeedPosts)), 'utf-8');
+      } catch (error) {
+        console.error('[AgentFeedMonitor] Error saving processed agent feed posts:', error);
+      }
+    };
+
+    const CHECK_INTERVAL_AGENT_FEED = (this.config.CHECK_INTERVAL_AGENT_FEED || 10 * 60 * 1000); // Default 10 mins
+
+    while (true) {
+      try {
+        console.log(`[AgentFeedMonitor] Checking for new posts from accounts followed by ${this.agentDisplayName} (${this.agentTargetDid}).`);
+
+        let agentFollowsDids = [];
+        let cursor;
+        do {
+          const response = await this.agent.api.app.bsky.graph.getFollows({
+            actor: this.agentTargetDid,
+            limit: 100,
+            cursor: cursor
+          });
+          if (response.success && response.data.follows) {
+            agentFollowsDids = agentFollowsDids.concat(response.data.follows.map(follow => follow.did));
+            cursor = response.data.cursor;
+          } else {
+            console.warn(`[AgentFeedMonitor] Failed to fetch a page of agent's follows or no follows data. Actor: ${this.agentTargetDid}`);
+            cursor = null;
+          }
+        } while (cursor && agentFollowsDids.length < 1000); // Safety break
+
+        console.log(`[AgentFeedMonitor] Agent ${this.agentDisplayName} follows ${agentFollowsDids.length} accounts.`);
+
+        for (const followedUserDid of agentFollowsDids) {
+          if (followedUserDid === this.config.BLUESKY_IDENTIFIER || followedUserDid === this.agentTargetDid) {
+            continue; // Skip posts from the bot itself or the agent itself
+          }
+
+          let postsCursor;
+          const { data: feedResponse } = await this.agent.api.app.bsky.feed.getAuthorFeed({
+            actor: followedUserDid,
+            limit: 20, // Check recent 20 posts per followed user
+            // cursor: postsCursor; // Not managing deep pagination for each followed user for now to keep it simple
+          });
+
+          if (feedResponse && feedResponse.feed) {
+            for (const item of feedResponse.feed) {
+              if (!item.post || !item.post.record) continue;
+
+              const postObject = {
+                uri: item.post.uri,
+                cid: item.post.cid,
+                author: item.post.author,
+                record: item.post.record,
+              };
+
+              if (processedAgentFeedPosts.has(postObject.uri)) {
+                continue;
+              }
+
+              const postText = postObject.record.text || "";
+              // Case-insensitive check for the agent's display name
+              if (this.agentDisplayName && postText.toLowerCase().includes(this.agentDisplayName.toLowerCase())) {
+                console.log(`[AgentFeedMonitor] Found mention of "${this.agentDisplayName}" in post ${postObject.uri} by ${postObject.author.handle} (followed by agent).`);
+
+                if (await this.hasAlreadyReplied(postObject)) { // Check if bot already replied to this specific post
+                  console.log(`[AgentFeedMonitor] Bot has already replied to ${postObject.uri}. Skipping.`);
+                  processedAgentFeedPosts.add(postObject.uri); // Mark as processed even if replied elsewhere
+                  continue;
+                }
+
+                // Check proactive reply rate limit for the author of the post
+                if (!this._canSendProactiveReply(postObject.author.did)) {
+                    console.log(`[AgentFeedMonitor] Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}). Skipping reply to post ${postObject.uri}.`);
+                    processedAgentFeedPosts.add(postObject.uri); // Mark as processed to avoid re-checking soon
+                    continue;
+                }
+
+                const context = await this.getReplyContext(postObject);
+                // Customize the prompt for generating a response to an agent mention
+                const agentMentionSystemPrompt = `You are ${this.config.BLUESKY_IDENTIFIER}. The user @${postObject.author.handle} (whom the agent "${this.agentDisplayName}" follows) mentioned "${this.agentDisplayName}" in their post. Craft a helpful and relevant reply from ${this.config.BLUESKY_IDENTIFIER}'s perspective. Do not speak as "${this.agentDisplayName}".`;
+                const agentMentionUserPrompt = `Conversation Context:\n${context.map(p => `${p.author}: ${p.text}`).join('\n---\n')}\n\nUser @${postObject.author.handle} posted: "${postText}"\nThis post mentions "${this.agentDisplayName}". Generate a suitable reply as ${this.config.BLUESKY_IDENTIFIER}.`;
+
+                console.log(`[AgentFeedMonitor] Generating response to agent mention in post ${postObject.uri}`);
+
+                const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                    body: JSON.stringify({
+                        model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+                        messages: [
+                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${agentMentionSystemPrompt}` },
+                            { role: "user", content: agentMentionUserPrompt }
+                        ],
+                        temperature: 0.7, max_tokens: 150, stream: false
+                    }),
+                    customTimeout: 120000 // 120s
+                });
+
+                if (nimResponse.ok) {
+                    const nimData = await nimResponse.json();
+                    if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
+                        let responseText = nimData.choices[0].message.content.trim();
+                        // Filter with Scout/Gemma
+                        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                            body: JSON.stringify({
+                                model: 'meta/llama-3.2-90b-vision-instruct',
+                                messages: [
+                                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting...Output only the processed text." }, // Simplified for brevity
+                                    { role: "user", content: responseText }
+                                ],
+                                temperature: 0.1, max_tokens: 100, stream: false
+                            }),
+                            customTimeout: 90000 // 90s
+                        });
+                        if (filterResponse.ok) {
+                            const filterData = await filterResponse.json();
+                            if (filterData.choices && filterData.choices[0].message) {
+                                responseText = filterData.choices[0].message.content.trim();
+                            }
+                        }
+
+                        if (responseText) {
+                            await this.postReply(postObject, responseText);
+                            this._recordProactiveReplyTimestamp(postObject.author.did); // Record successful proactive reply
+                            console.log(`[AgentFeedMonitor] Replied to agent mention in post ${postObject.uri}`);
+                        }
+                    }
+                } else {
+                    console.error(`[AgentFeedMonitor] NIM API error generating response for agent mention: ${nimResponse.status}`);
+                }
+                processedAgentFeedPosts.add(postObject.uri);
+              } else {
+                // If no mention, but we want to mark old posts from followed feeds as "seen" eventually.
+                // Only add to processedAgentFeedPosts if it's relatively old to avoid filling up with non-mention posts too quickly.
+                const postDate = new Date(postObject.record.createdAt);
+                const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+                if (postDate < twoDaysAgo) {
+                    processedAgentFeedPosts.add(postObject.uri);
+                }
+              }
+            }
+          }
+          await utils.sleep(2000); // Brief pause between checking different followed users
+        }
+        saveProcessedAgentFeedPosts(); // Save after each full scan of followed users
+        console.log(`[AgentFeedMonitor] Finished agent following feed scan. Waiting for ${CHECK_INTERVAL_AGENT_FEED / 1000 / 60} minutes.`);
+        await utils.sleep(CHECK_INTERVAL_AGENT_FEED);
+      } catch (error) {
+        console.error('[AgentFeedMonitor] Error in agent following feed monitoring loop:', error);
+        await utils.sleep(CHECK_INTERVAL_AGENT_FEED); // Wait before retrying
+      }
+    }
+  }
 } // Closes the LlamaBot class
 
 // Initialize and run the bot
@@ -4820,7 +5103,16 @@ async function startBots() {
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
     BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD,
   }, agent);
-  await llamaBot.monitor().catch(console.error);
+
+  // Start the main monitor for direct mentions, replies to the bot
+  llamaBot.monitor().catch(error => console.error('[MainMonitor] Main monitor crashed:', error));
+
+  // Start the agent following feed monitor
+  if (config.AGENT_BLUESKY_DID) {
+    llamaBot.monitorAgentFollowingFeed().catch(error => console.error('[AgentFeedMonitor] Agent feed monitor crashed:', error));
+  } else {
+    console.log('[AgentFeedMonitor] AGENT_BLUESKY_DID not configured. Agent following feed monitor will not start.');
+  }
 }
 
 startBots().catch(console.error);

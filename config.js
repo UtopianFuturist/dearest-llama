@@ -19,6 +19,7 @@ const validateConfig = (config) => {
     'IMGFLIP_PASSWORD',
     'YOUTUBE_API_KEY',
     'GIPHY_API_KEY',
+    'AGENT_BLUESKY_DID', // Added agent's DID
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -40,6 +41,7 @@ const config = {
   IMGFLIP_PASSWORD: process.env.IMGFLIP_PASSWORD,
   YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY,
   GIPHY_API_KEY: process.env.GIPHY_API_KEY,
+  AGENT_BLUESKY_DID: process.env.AGENT_BLUESKY_DID, // Added agent's DID
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
@@ -85,6 +87,7 @@ console.log(`[Config] Loaded IMGFLIP_USERNAME: ${config.IMGFLIP_USERNAME ? 'Exis
 console.log(`[Config] Loaded IMGFLIP_PASSWORD: ${config.IMGFLIP_PASSWORD ? 'Exists (presence will be checked)' : 'MISSING!'}`);
 console.log(`[Config] Loaded YOUTUBE_API_KEY: ${config.YOUTUBE_API_KEY ? 'Exists' : 'MISSING!'}`);
 console.log(`[Config] Loaded GIPHY_API_KEY: ${config.GIPHY_API_KEY ? 'Exists' : 'MISSING!'}`);
+console.log(`[Config] Loaded AGENT_BLUESKY_DID: ${config.AGENT_BLUESKY_DID ? 'Exists' : 'MISSING!'}`);
 
 
 export default config;
