@@ -193,6 +193,7 @@ class BaseBot {
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
     this.adminDid = null; // Will be resolved in authenticate()
+    this.botDisplayName = null; // For the bot's own display name
     this.followingCache = { dids: [], lastFetched: 0, ttl: 15 * 60 * 1000 }; // Cache for bot's following list
 
     this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
@@ -842,11 +843,11 @@ Respond ONLY with a single JSON object.`;
             };
 
             let isAdminCmdHandled = false;
-            if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
-                currentPostObject.record.text &&
-                currentPostObject.record.text.includes('!post')) {
+            const adminPostText = currentPostObject.record.text || "";
 
-              const commandText = currentPostObject.record.text;
+            // Check for Admin Commands first
+            if (currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE && adminPostText.includes('!post')) {
+              const commandText = adminPostText;
               let commandContent = "";
               let commandType = null; // 'art', 'image', 'video', or 'text'
               let commandSearchText = commandText;
@@ -880,13 +881,86 @@ Respond ONLY with a single JSON object.`;
               }
             }
 
+            // If not an admin command (like !post+art), then check if the admin is mentioning the BOT'S OWN NAME.
+            if (!isAdminCmdHandled && currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
+                this.botDisplayName && adminPostText.toLowerCase().includes(this.botDisplayName.toLowerCase())) {
+
+              console.log(`[Monitor] Admin mentioned bot's name "${this.botDisplayName}" in post ${currentPostObject.uri}.`);
+              if (await this.hasAlreadyReplied(currentPostObject)) {
+                console.log(`[Monitor] Already replied to admin's bot mention post ${currentPostObject.uri}. Skipping.`);
+              } else {
+                const context = await this.getReplyContext(currentPostObject);
+                const adminMentionBotSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The administrator, @${currentPostObject.author.handle}, mentioned you ("${this.botDisplayName}") in their post. Craft a helpful, relevant, and perhaps slightly prioritized reply in your persona, acknowledging it's the admin.`;
+                const adminMentionBotUserPrompt = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nAdministrator @${currentPostObject.author.handle}'s relevant post (that mentions you, "${this.botDisplayName}"):\n"${adminPostText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
+
+                console.log(`[Monitor] Generating response to admin's mention of bot name in post ${currentPostObject.uri}`);
+
+                const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                    body: JSON.stringify({
+                        model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+                        messages: [
+                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${adminMentionBotSystemPrompt}` }, // Added TEXT_SYSTEM_PROMPT
+                            { role: "user", content: adminMentionBotUserPrompt }
+                        ],
+                        temperature: 0.7, max_tokens: 150, stream: false
+                    }),
+                    customTimeout: 120000 // 120s
+                });
+
+                let responseText = null;
+                if (nimResponse.ok) {
+                    const nimData = await nimResponse.json();
+                    if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
+                        let rawNimText = nimData.choices[0].message.content.trim();
+                        // Filter with Scout/Gemma
+                        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                            body: JSON.stringify({
+                                model: 'meta/llama-3.2-90b-vision-instruct',
+                                messages: [
+                                     { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                                    { role: "user", content: rawNimText }
+                                ],
+                                temperature: 0.1, max_tokens: 100, stream: false
+                            }),
+                            customTimeout: 90000 // 90s
+                        });
+                        if (filterResponse.ok) {
+                            const filterData = await filterResponse.json();
+                            if (filterData.choices && filterData.choices[0].message) {
+                                responseText = filterData.choices[0].message.content.trim();
+                            } else {
+                                responseText = this.basicFormatFallback(rawNimText);
+                            }
+                        } else {
+                             responseText = this.basicFormatFallback(rawNimText);
+                        }
+                    }
+                } else {
+                    console.error(`[Monitor] NIM API error generating response for admin's mention of bot: ${nimResponse.status}`);
+                }
+
+                if (responseText) {
+                  await this.postReply(currentPostObject, responseText);
+                  console.log(`[Monitor] Replied to admin's mention of bot name in post ${currentPostObject.uri}`);
+                } else {
+                  console.error(`[Monitor] Failed to generate response for admin's mention of bot name.`);
+                }
+                isAdminCmdHandled = true; // Mark as handled to prevent further default processing
+              }
+            }
+
+
             if (!isAdminCmdHandled) {
               if (await this.hasAlreadyReplied(currentPostObject)) { // Pass the full post object
                 console.log(`[Monitor] Already replied to post ${currentPostObject.uri} or it's a like. Skipping.`);
                 continue;
               }
 
-              // Standard response generation for mentions, replies, quotes
+              // Standard response generation for mentions, replies, quotes to the BOT
               console.log(`[Monitor] Processing notification for post ${currentPostObject.uri} from @${currentPostObject.author.handle}, reason: ${notif.reason}`);
               const context = await this.getReplyContext(currentPostObject); // Pass the full post object
               const responseText = await this.generateResponse(currentPostObject, context); // Pass the full post object
@@ -1006,8 +1080,39 @@ Respond ONLY with a single JSON object.`;
       } else {
         console.log('[AdminDID] No ADMIN_BLUESKY_HANDLE configured.');
       }
+
+      // Infer Bot's Own Display Name
+      if (this.config.BLUESKY_IDENTIFIER) { // BLUESKY_IDENTIFIER is the bot's DID
+        console.log(`[BotNameInference] Bot DID configured: ${this.config.BLUESKY_IDENTIFIER}`);
+        try {
+          // this.agent.did should also be available here and be the same as BLUESKY_IDENTIFIER after login
+          const res = await this.agent.api.app.bsky.actor.getProfile({ actor: this.agent.did });
+          if (res.success && res.data) {
+            this.botDisplayName = res.data.displayName;
+            const handle = res.data.handle; // Bot's own handle
+            if (!this.botDisplayName && handle) {
+              // Fallback: parse from handle (e.g., "dearestllama" from "dearest-llama.bsky.social")
+              this.botDisplayName = handle.split('.')[0].split('-').join(''); // Basic split and join, e.g., "dearest-llama" -> "dearestllama"
+              console.log(`[BotNameInference] Bot display name was empty, inferred "${this.botDisplayName}" from its handle ${handle}.`);
+            } else if (this.botDisplayName) {
+              console.log(`[BotNameInference] Successfully fetched bot's own profile. DisplayName: "${this.botDisplayName}", Handle: ${handle}`);
+            } else {
+              // This case is unlikely if handle exists, but good to log
+              console.warn(`[BotNameInference] Bot profile fetched, but displayName is empty and handle could not be used for fallback. Handle: ${handle}`);
+            }
+          } else {
+            console.error(`[BotNameInference] Failed to fetch profile for bot's own DID ${this.agent.did}:`, res.error || 'Unknown error');
+          }
+        } catch (profileError) {
+          console.error(`[BotNameInference] Exception during bot's own profile fetch for ${this.agent.did}:`, profileError);
+        }
+      } else {
+        // This should not happen if BLUESKY_IDENTIFIER is a required config
+        console.warn('[BotNameInference] BLUESKY_IDENTIFIER (bot\'s DID) is not configured. Bot name inference skipped.');
+      }
+
     } catch (error) {
-      console.error('Authentication failed:', error);
+      console.error('Authentication and name inference failed:', error);
       throw error;
     }
   }
@@ -4810,6 +4915,165 @@ Ensure your entire response is ONLY the JSON object.`;
       return [];
     }
   }
+
+  async monitorBotFollowingFeed() {
+    console.log('[BotFeedMonitor] Starting bot following feed monitor...');
+    if (!this.botDisplayName) { // Check if bot's display name is available
+      console.warn('[BotFeedMonitor] Bot DisplayName not fetched. Skipping bot following feed monitoring.');
+      return;
+    }
+
+    // Use a dedicated set for processed posts from the bot's following feed
+    const processedBotFeedPostsPath = path.join(process.cwd(), 'processed_bot_feed_posts.json');
+    let processedBotFeedPosts = new Set();
+    try {
+      if (fs.existsSync(processedBotFeedPostsPath)) {
+        const data = fs.readFileSync(processedBotFeedPostsPath, 'utf-8');
+        processedBotFeedPosts = new Set(JSON.parse(data));
+        console.log(`[BotFeedMonitor] Loaded ${processedBotFeedPosts.size} processed post URIs for bot's own following feed.`);
+      }
+    } catch (error) {
+      console.error('[BotFeedMonitor] Error loading processed bot feed posts:', error);
+    }
+
+    const saveProcessedBotFeedPosts = () => {
+      try {
+        fs.writeFileSync(processedBotFeedPostsPath, JSON.stringify(Array.from(processedBotFeedPosts)), 'utf-8');
+      } catch (error) {
+        console.error('[BotFeedMonitor] Error saving processed bot feed posts:', error);
+      }
+    };
+
+    // Configurable check interval, e.g., this.config.CHECK_INTERVAL_BOT_FEED
+    const CHECK_INTERVAL_BOT_FEED = (this.config.CHECK_INTERVAL_BOT_FEED || 10 * 60 * 1000); // Default 10 mins
+
+    while (true) {
+      try {
+        console.log(`[BotFeedMonitor] Checking for new posts from accounts followed by this bot (${this.config.BLUESKY_IDENTIFIER}).`);
+
+        // Use existing getBotFollowingDids method which uses this.agent.did (bot's own DID)
+        const botFollowsDids = await this.getBotFollowingDids();
+
+        console.log(`[BotFeedMonitor] Bot follows ${botFollowsDids.length} accounts.`);
+
+        for (const followedUserDid of botFollowsDids) {
+          // No need to check if followedUserDid is the bot itself, as getBotFollowingDids likely doesn't return self.
+          // But if it could, a check here would be: if (followedUserDid === this.agent.did) continue;
+
+          let postsCursor;
+          const { data: feedResponse } = await this.agent.api.app.bsky.feed.getAuthorFeed({
+            actor: followedUserDid,
+            limit: 20, // Check recent 20 posts per followed user
+            // cursor: postsCursor; // Not managing deep pagination for each followed user for now to keep it simple
+          });
+
+          if (feedResponse && feedResponse.feed) {
+            for (const item of feedResponse.feed) {
+              if (!item.post || !item.post.record) continue;
+
+              const postObject = {
+                uri: item.post.uri,
+                cid: item.post.cid,
+                author: item.post.author,
+                record: item.post.record,
+              };
+
+              if (processedBotFeedPosts.has(postObject.uri)) { // Use new set
+                continue;
+              }
+
+              const postText = postObject.record.text || "";
+              // Case-insensitive check for the bot's own display name
+              if (this.botDisplayName && postText.toLowerCase().includes(this.botDisplayName.toLowerCase())) {
+                console.log(`[BotFeedMonitor] Found mention of bot's name "${this.botDisplayName}" in post ${postObject.uri} by ${postObject.author.handle} (followed by bot).`);
+
+                if (await this.hasAlreadyReplied(postObject)) {
+                  console.log(`[BotFeedMonitor] Bot has already replied to ${postObject.uri}. Skipping.`);
+                  processedBotFeedPosts.add(postObject.uri);
+                  continue;
+                }
+
+                if (!this._canSendProactiveReply(postObject.author.did)) {
+                    console.log(`[BotFeedMonitor] Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}). Skipping reply to post ${postObject.uri}.`);
+                    processedBotFeedPosts.add(postObject.uri);
+                    continue;
+                }
+
+                const context = await this.getReplyContext(postObject);
+                const botMentionSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you ("${this.botDisplayName}") in their post. Craft a helpful and relevant reply in your persona.`;
+                const botMentionUserPrompt = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you, "${this.botDisplayName}"):\n"${postText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
+
+                console.log(`[BotFeedMonitor] Generating response to bot mention in post ${postObject.uri}`);
+
+                const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                    body: JSON.stringify({
+                        model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+                        messages: [
+                            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} ${botMentionSystemPrompt}` }, // Added TEXT_SYSTEM_PROMPT
+                            { role: "user", content: botMentionUserPrompt }
+                        ],
+                        temperature: 0.7, max_tokens: 150, stream: false
+                    }),
+                    customTimeout: 120000 // 120s
+                });
+
+                if (nimResponse.ok) {
+                    const nimData = await nimResponse.json();
+                    if (nimData.choices && nimData.choices[0].message && nimData.choices[0].message.content) {
+                        let responseText = nimData.choices[0].message.content.trim();
+                        // Filter with Scout/Gemma
+                        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                            body: JSON.stringify({
+                                model: 'meta/llama-3.2-90b-vision-instruct',
+                                messages: [
+                                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting...Output only the processed text." }, // Simplified for brevity
+                                    { role: "user", content: responseText }
+                                ],
+                                temperature: 0.1, max_tokens: 100, stream: false
+                            }),
+                            customTimeout: 90000 // 90s
+                        });
+                        if (filterResponse.ok) {
+                            const filterData = await filterResponse.json();
+                            if (filterData.choices && filterData.choices[0].message) {
+                                responseText = filterData.choices[0].message.content.trim();
+                            }
+                        }
+
+                        if (responseText) {
+                            await this.postReply(postObject, responseText);
+                            this._recordProactiveReplyTimestamp(postObject.author.did);
+                            console.log(`[BotFeedMonitor] Replied to bot mention in post ${postObject.uri}`);
+                        }
+                    }
+                } else {
+                    console.error(`[BotFeedMonitor] NIM API error generating response for bot mention: ${nimResponse.status}`);
+                }
+                processedBotFeedPosts.add(postObject.uri); // Use new set
+              } else {
+                const postDate = new Date(postObject.record.createdAt);
+                const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+                if (postDate < twoDaysAgo) {
+                    processedBotFeedPosts.add(postObject.uri); // Use new set
+                }
+              }
+            }
+          }
+          await utils.sleep(2000);
+        }
+        saveProcessedBotFeedPosts(); // Use new save function
+        console.log(`[BotFeedMonitor] Finished bot following feed scan. Waiting for ${CHECK_INTERVAL_BOT_FEED / 1000 / 60} minutes.`);
+        await utils.sleep(CHECK_INTERVAL_BOT_FEED); // Use new interval variable
+      } catch (error) {
+        console.error('[BotFeedMonitor] Error in bot following feed monitoring loop:', error);
+        await utils.sleep(CHECK_INTERVAL_BOT_FEED); // Use new interval variable
+      }
+    }
+  }
 } // Closes the LlamaBot class
 
 // Initialize and run the bot
@@ -4820,7 +5084,13 @@ async function startBots() {
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
     BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD,
   }, agent);
-  await llamaBot.monitor().catch(console.error);
+
+  llamaBot.monitor().catch(error => console.error('[MainMonitor] Main monitor crashed:', error));
+
+  // Start the bot following feed monitor
+  // No specific DID check needed here as it uses the bot's own DID which is always expected to be present.
+  // However, it relies on this.botDisplayName being fetched.
+  llamaBot.monitorBotFollowingFeed().catch(error => console.error('[BotFeedMonitor] Bot feed monitor crashed:', error));
 }
 
 startBots().catch(console.error);
