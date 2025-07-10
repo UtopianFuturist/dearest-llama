@@ -194,6 +194,7 @@ class BaseBot {
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
     this.adminDid = null; // Will be resolved in authenticate()
     this.botDisplayName = null; // For the bot's own display name
+    this.botHandle = null; // For the bot's own handle
     this.followingCache = { dids: [], lastFetched: 0, ttl: 15 * 60 * 1000 }; // Cache for bot's following list
 
     this.lastProcessedPostUrisFilePath = path.join(process.cwd(), 'last_processed_post_uris.json');
@@ -881,14 +882,36 @@ Respond ONLY with a single JSON object.`;
               }
             }
 
-            // If not an admin command (like !post+art), then check if the admin is mentioning the BOT'S OWN NAME.
-            if (!isAdminCmdHandled && currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE &&
-                this.botDisplayName && adminPostText.toLowerCase().includes(this.botDisplayName.toLowerCase())) {
+            // If not an admin command (like !post+art), then check if the admin is mentioning the BOT'S OWN NAME or HANDLE.
+            let adminMentionMatch = false;
+            let adminMatchedName = null;
+            const adminPostTextLower = adminPostText.toLowerCase();
 
-              console.log(`[Monitor] Admin mentioned bot's name "${this.botDisplayName}" in post ${currentPostObject.uri}.`);
+            if (!isAdminCmdHandled && currentPostObject.author.handle === this.config.ADMIN_BLUESKY_HANDLE) {
+                if (this.botDisplayName && this.botDisplayName.trim() !== "") {
+                    if (adminPostTextLower.includes(this.botDisplayName.toLowerCase())) {
+                        adminMentionMatch = true;
+                        adminMatchedName = this.botDisplayName;
+                    }
+                }
+                if (!adminMentionMatch && this.botHandle && this.botHandle.trim() !== "") {
+                    const handleBase = this.botHandle.split('.')[0];
+                    if (adminPostTextLower.includes(this.botHandle.toLowerCase())) {
+                        adminMentionMatch = true;
+                        adminMatchedName = this.botHandle;
+                    } else if (adminPostTextLower.includes(handleBase.toLowerCase())) {
+                        adminMentionMatch = true;
+                        adminMatchedName = handleBase;
+                    }
+                }
+            }
+
+            if (adminMentionMatch) {
+              console.log(`[Monitor] SUCCESS: Admin mentioned bot's name/handle (matched: "${adminMatchedName}") in post ${currentPostObject.uri}. Admin text: "${adminPostText.substring(0,100)}..."`);
               if (await this.hasAlreadyReplied(currentPostObject)) {
-                console.log(`[Monitor] Already replied to admin's bot mention post ${currentPostObject.uri}. Skipping.`);
+                console.log(`[Monitor] SKIP: Already replied to admin's bot mention post ${currentPostObject.uri}.`);
               } else {
+                console.log(`[Monitor] ACTION: Conditions met for replying to admin's mention of bot in ${currentPostObject.uri}.`);
                 const context = await this.getReplyContext(currentPostObject);
                 const adminMentionBotSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The administrator, @${currentPostObject.author.handle}, mentioned you ("${this.botDisplayName}") in their post. Craft a helpful, relevant, and perhaps slightly prioritized reply in your persona, acknowledging it's the admin.`;
                 const adminMentionBotUserPrompt = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nAdministrator @${currentPostObject.author.handle}'s relevant post (that mentions you, "${this.botDisplayName}"):\n"${adminPostText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
@@ -1089,16 +1112,21 @@ Respond ONLY with a single JSON object.`;
           const res = await this.agent.api.app.bsky.actor.getProfile({ actor: this.agent.did });
           if (res.success && res.data) {
             this.botDisplayName = res.data.displayName;
-            const handle = res.data.handle; // Bot's own handle
-            if (!this.botDisplayName && handle) {
+            this.botHandle = res.data.handle; // Bot's own handle
+
+            if (this.botHandle) { // Log handle if present
+                console.log(`[BotNameInference] Bot Handle: ${this.botHandle}`);
+            }
+
+            if (!this.botDisplayName && this.botHandle) {
               // Fallback: parse from handle (e.g., "dearestllama" from "dearest-llama.bsky.social")
-              this.botDisplayName = handle.split('.')[0].split('-').join(''); // Basic split and join, e.g., "dearest-llama" -> "dearestllama"
-              console.log(`[BotNameInference] Bot display name was empty, inferred "${this.botDisplayName}" from its handle ${handle}.`);
+              this.botDisplayName = this.botHandle.split('.')[0].split('-').join(''); // Basic split and join, e.g., "dearest-llama" -> "dearestllama"
+              console.log(`[BotNameInference] Bot display name was empty, inferred "${this.botDisplayName}" from its handle ${this.botHandle}.`);
             } else if (this.botDisplayName) {
-              console.log(`[BotNameInference] Successfully fetched bot's own profile. DisplayName: "${this.botDisplayName}", Handle: ${handle}`);
+              console.log(`[BotNameInference] Successfully fetched bot's own profile. DisplayName: "${this.botDisplayName}".`);
             } else {
-              // This case is unlikely if handle exists, but good to log
-              console.warn(`[BotNameInference] Bot profile fetched, but displayName is empty and handle could not be used for fallback. Handle: ${handle}`);
+              // This case means displayName is empty AND handle was also empty or not processed for fallback
+              console.warn(`[BotNameInference] Bot profile fetched, but displayName is empty and handle could not be used for fallback. Handle: ${this.botHandle || 'not available'}`);
             }
           } else {
             console.error(`[BotNameInference] Failed to fetch profile for bot's own DID ${this.agent.did}:`, res.error || 'Unknown error');
@@ -4954,9 +4982,10 @@ Ensure your entire response is ONLY the JSON object.`;
         // Use existing getBotFollowingDids method which uses this.agent.did (bot's own DID)
         const botFollowsDids = await this.getBotFollowingDids();
 
-        console.log(`[BotFeedMonitor] Bot follows ${botFollowsDids.length} accounts.`);
+        console.log(`[BotFeedMonitor] Bot follows ${botFollowsDids.length} accounts. Checking their feeds for mentions of '${this.botDisplayName}'.`);
 
         for (const followedUserDid of botFollowsDids) {
+          console.log(`[BotFeedMonitor] Fetching feed for followed DID: ${followedUserDid}`);
           // No need to check if followedUserDid is the bot itself, as getBotFollowingDids likely doesn't return self.
           // But if it could, a check here would be: if (followedUserDid === this.agent.did) continue;
 
@@ -4968,6 +4997,7 @@ Ensure your entire response is ONLY the JSON object.`;
           });
 
           if (feedResponse && feedResponse.feed) {
+            console.log(`[BotFeedMonitor] Found ${feedResponse.feed.length} posts for DID: ${followedUserDid}`);
             for (const item of feedResponse.feed) {
               if (!item.post || !item.post.record) continue;
 
@@ -4983,22 +5013,46 @@ Ensure your entire response is ONLY the JSON object.`;
               }
 
               const postText = postObject.record.text || "";
-              // Case-insensitive check for the bot's own display name
-              if (this.botDisplayName && postText.toLowerCase().includes(this.botDisplayName.toLowerCase())) {
-                console.log(`[BotFeedMonitor] Found mention of bot's name "${this.botDisplayName}" in post ${postObject.uri} by ${postObject.author.handle} (followed by bot).`);
+              console.log(`[BotFeedMonitor] Checking post ${postObject.uri} by ${postObject.author.handle}. Text: "${postText.substring(0, 50)}..."`);
+
+              // Case-insensitive check for the bot's own display name and handle
+              let matchFound = false;
+              let matchedName = null;
+              const postTextLower = postText.toLowerCase();
+
+              if (this.botDisplayName && this.botDisplayName.trim() !== "") {
+                if (postTextLower.includes(this.botDisplayName.toLowerCase())) {
+                  matchFound = true;
+                  matchedName = this.botDisplayName;
+                }
+              }
+
+              if (!matchFound && this.botHandle && this.botHandle.trim() !== "") {
+                const handleBase = this.botHandle.split('.')[0]; // e.g., "dearest-llama"
+                if (postTextLower.includes(this.botHandle.toLowerCase())) { // Check for full handle "dearest-llama.bsky.social"
+                  matchFound = true;
+                  matchedName = this.botHandle;
+                } else if (postTextLower.includes(handleBase.toLowerCase())) { // Check for "dearest-llama"
+                  matchFound = true;
+                  matchedName = handleBase;
+                }
+              }
+
+              if (matchFound) {
+                console.log(`[BotFeedMonitor] SUCCESS: Found mention of bot's name/handle (matched: "${matchedName}") in post ${postObject.uri} by ${postObject.author.handle}.`);
 
                 if (await this.hasAlreadyReplied(postObject)) {
-                  console.log(`[BotFeedMonitor] Bot has already replied to ${postObject.uri}. Skipping.`);
+                  console.log(`[BotFeedMonitor] SKIP: Bot has already replied to ${postObject.uri}.`);
                   processedBotFeedPosts.add(postObject.uri);
                   continue;
                 }
 
                 if (!this._canSendProactiveReply(postObject.author.did)) {
-                    console.log(`[BotFeedMonitor] Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}). Skipping reply to post ${postObject.uri}.`);
+                    console.log(`[BotFeedMonitor] SKIP: Proactive reply limit reached for user ${postObject.author.handle} (${postObject.author.did}) regarding post ${postObject.uri}.`);
                     processedBotFeedPosts.add(postObject.uri);
                     continue;
                 }
-
+                console.log(`[BotFeedMonitor] ACTION: Conditions met for replying to ${postObject.uri}.`);
                 const context = await this.getReplyContext(postObject);
                 const botMentionSystemPrompt = `You are an AI assistant with the persona defined in the main system prompt. The user @${postObject.author.handle} (an account you follow) mentioned you ("${this.botDisplayName}") in their post. Craft a helpful and relevant reply in your persona.`;
                 const botMentionUserPrompt = `Full Conversation Context (if any, oldest first):\n${context.map(p => `${p.author}: ${p.text ? p.text.substring(0, 200) + (p.text.length > 200 ? '...' : '') : ''}`).join('\n---\n')}\n\nUser @${postObject.author.handle}'s relevant post (that mentions you, "${this.botDisplayName}"):\n"${postText}"\n\nBased on this, generate a suitable reply in your defined persona.`;
