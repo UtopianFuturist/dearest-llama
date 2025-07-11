@@ -85,7 +85,17 @@ Users can ask the bot to find specific items from their shared conversation hist
         - **Conversation History Search (`getBotUserConversationHistory`)**: For items mentioned as part of your direct conversation with the bot, or if the gallery search doesn't apply/yield results, it searches the shared interaction history. This search now looks at post text and extracted details from embeds (like image alt text or link titles).
 - **Output**: The bot will reply with a direct Bluesky URL to the found post (e.g., `https://bsky.app/profile/handle/post/rkey`) if a match is found, or a message indicating it couldn't find the requested item. Usually, only the most relevant match is returned.
 
-### 3. Web & Image Search Capability (via Google Custom Search)
+### 3. User Commands for Interaction Control
+The bot supports several commands to help users manage their interactions:
+- **`!HELP`**: Displays a list of available commands and their descriptions.
+- **`!STOP`**: Allows a user to request the bot to stop sending them messages.
+    - The bot analyzes the sentiment of the `!STOP` message.
+    - If the sentiment is negative or neutral, the user is added to a blocklist, and the bot will not interact with them further. They are informed of this and told about the `!RESUME` command.
+    - If the sentiment is positive, the user is not blocklisted, but the bot will not reply to that specific `!STOP` message.
+- **`!RESUME`**: Allows a user previously blocklisted via `!STOP` to request the bot to resume interactions. The bot will confirm if they were removed from the blocklist or inform them if they weren't on it.
+- **`!MUTE`**: Allows a user to request the bot to stop replying within the current specific conversation thread. The bot will confirm and then ignore any further messages in that thread.
+
+### 4. Web & Image Search Capability (via Google Custom Search)
 The bot can perform web page and web image searches using the Google Custom Search JSON API to answer general knowledge questions or find current information. SafeSearch (`safe=active`) is enforced for all searches.
 
 - **How to Trigger**:
@@ -107,7 +117,7 @@ The bot can perform web page and web image searches using the Google Custom Sear
     - For image searches: The bot posts up to 4 found images in a threaded reply, each with a caption. If direct image posting fails or no images are found via web search, it may post a generated image from FLUX.1-Schnell as a fallback, or a link/message if all attempts fail.
     - If no relevant information is found or the query is unsafe, it will inform the user accordingly.
 
-### 4. YouTube Video Search
+### 5. YouTube Video Search
 - **How to Trigger**: Ask the bot to search YouTube for videos, e.g.:
     - *"Search YouTube for tutorials on baking bread."*
     - *"Find YouTube videos about recent space launches."*
@@ -121,7 +131,7 @@ The bot can perform web page and web image searches using the Google Custom Sear
     - If a relevant and safe video is found, the bot posts a reply with the video title and a link card embed for the YouTube video.
     - If no videos are found, or if the content is deemed unsafe, an appropriate message is provided.
 
-### 5. Interactive User Profile Analysis (Refined)
+### 6. Interactive User Profile Analysis (Refined)
 When a user asks questions about their own Bluesky profile, recent activity, or common themes (e.g., "@botname what do you think of my profile?"), the bot employs a multi-step process:
 - **Contextual Understanding**: It first uses Llama 4 Scout to determine if the query is indeed about self-analysis.
 - **Data Fetching**: If Llama 4 Scout determines the query warrants a deeper look (`shouldFetchProfileContext`), the bot now primarily uses the **Conversational Memory** feature to fetch the recent shared history between the user and the bot. This focused context is then used for the analysis.
@@ -129,13 +139,13 @@ When a user asks questions about their own Bluesky profile, recent activity, or 
 - **Detailed Analysis on Request**: If the user replies affirmatively (e.g., "yes", "tell me more"), the bot will then post 1-3 additional messages. Each message contains a specific detailed analysis point.
     - **Improved Formatting**: These points are now phrased more naturally and conversationally. Internal list markers or labels are stripped, and the points are posted sequentially, threaded to the summary. The `... [X/Y]` suffix will only appear if a single detailed point is itself too long for one Bluesky post, indicating segments of that specific point.
 
-### 5. Like Notification Awareness
+### 7. Like Notification Awareness
 - The bot now processes 'like' notifications it receives.
 - It logs when one of its posts or replies is liked and by whom (e.g., "[Notification] Post [URI] was liked by @[likerHandle]").
 - **Important**: The bot does *not* send a reply or take any direct action on Bluesky in response to a 'like'. This is purely for awareness and logging.
 - The `likeCount` property on post objects (when available in feed views) is the recommended data source for any future features related to sorting posts by popularity, for API efficiency.
 
-### 6. NASA Astronomy Picture of the Day (APOD)
+### 8. NASA Astronomy Picture of the Day (APOD)
 - **How to Trigger**: Ask the bot for the "NASA Picture of the Day," "APOD," or similar phrases. You can also specify a date (e.g., "APOD for 2023-10-26," "NASA picture yesterday," or "APOD today").
 - **Behind the Scenes**:
     - Llama 4 Scout (`getSearchHistoryIntent`) identifies requests for APOD and extracts any specified date.
@@ -147,16 +157,16 @@ When a user asks questions about their own Bluesky profile, recent activity, or 
     - **If the APOD is a video**: A link card to the video URL (e.g., YouTube) is generated.
     - If the APOD data cannot be fetched for any reason, an error message is provided.
 
-### 8. Image Generation Coordination (Existing)
+### 9. Image Generation Coordination (Existing)
 - The bot can understand requests for image generation (e.g., "generate an image of...").
 - It coordinates with Llama 4 Scout for prompt safety checks and refinement, and then with the Together AI API (using `black-forest-labs/FLUX.1-schnell-Free`) for the actual image creation.
 - Generated images are posted back to Bluesky, attached to the bot's reply.
 
-### 9. Multi-Part Replies for Detailed Responses (Existing, with note on Detailed Analysis)
+### 10. Multi-Part Replies for Detailed Responses (Existing, with note on Detailed Analysis)
 - For complex topics or detailed analyses (like profile summaries) that exceed Bluesky's single-post character limit (approx. 300 characters), the bot can automatically split its response into multiple threaded parts (up to 3).
 - Each part is numbered for clarity, with the numbering appearing at the end of the post (e.g., `... [1/3]`, `... [2/3]`). This applies to general long responses and also if a single "Detailed Analysis Point" is too long.
 
-### 10. Persona-Driven Text Generation (Existing)
+### 11. Persona-Driven Text Generation (Existing)
 - All text responses are generated by Llama 3.3 Nemotron Super, guided by a system prompt (`TEXT_SYSTEM_PROMPT`) that defines its persona and core instructions.
 - Llama 4 Scout assists in refining the formatting of Nemotron's output to ensure it's suitable for Bluesky (e.g., character limits, emoji preservation, avoiding markdown issues).
 

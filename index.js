@@ -193,6 +193,7 @@ class BaseBot {
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
     this.sentimentAnalyzer = new Sentiment();
     this.userBlocklist = new Set(); // Users who have issued !STOP
+    this.mutedThreads = new Set(); // Root URIs of threads the bot should not reply to
   }
 
   // Helper to cleanup expired pending analyses
@@ -645,12 +646,28 @@ class BaseBot {
               continue;
             }
 
+            // Determine thread root URI for potential muting or checking if muted
+            let threadRootUri = notif.record?.reply?.root?.uri || notif.uri;
+            if (notif.reason === 'quote') { // If it's a quote of the bot, the quote itself is the start of a new thread in terms of interaction
+                threadRootUri = notif.uri;
+            }
+
+
+            // Check if thread is muted
+            if (this.mutedThreads.has(threadRootUri)) {
+              console.log(`[Monitor] Thread ${threadRootUri} is muted. Ignoring message: ${notif.uri} from @${postAuthorHandle}`);
+              // No reply, just ignore. Mark as "replied" to prevent other processing.
+              this.repliedPosts.add(notif.uri);
+              continue;
+            }
+
             // Check for !HELP command
             if (postTextContent.toLowerCase().trim() === '!help') {
               console.log(`[Monitor] !HELP command detected from @${postAuthorHandle}.`);
               const helpMessage = "Available commands:\n" +
-                                  "- `!STOP`: Ask me to stop sending you messages. I'll stop if your message seems negative or neutral.\n" +
-                                  "- `!RESUME`: Ask me to start sending you messages again if you previously used `!STOP`.\n" +
+                                  "- `!STOP`: Ask me to stop sending you messages. (Sentiment-based)\n" +
+                                  "- `!RESUME`: Ask me to start sending messages again if you used `!STOP`.\n" +
+                                  "- `!MUTE`: Ask me to stop replying in the current thread.\n" +
                                   "- `!HELP`: Show this help message.";
               // Construct a temporary post object for the postReply method
               const tempPostForHelpReply = {
@@ -693,6 +710,28 @@ class BaseBot {
                 }
               };
               await this.postReply(tempPostForResumeReply, resumeMessage);
+              this.repliedPosts.add(notif.uri); // Mark as replied
+              continue;
+            }
+
+            // Check for !MUTE command
+            if (postTextContent.toLowerCase().trim() === '!mute') {
+              console.log(`[Monitor] !MUTE command detected from @${postAuthorHandle} in thread starting with ${threadRootUri}.`);
+              this.mutedThreads.add(threadRootUri);
+              const muteMessage = "Okay, I will not reply further in this thread. If you want me to speak here again, you'll need to mention me in a new thread or use a command in a different context.";
+
+              const tempPostForMuteReply = {
+                uri: notif.uri,
+                cid: notif.cid,
+                author: notif.author,
+                record: {
+                  reply: {
+                    root: { uri: threadRootUri, cid: notif.record?.reply?.root?.cid || notif.cid }, // Ensure root is correct
+                    parent: { uri: notif.uri, cid: notif.cid }
+                  }
+                }
+              };
+              await this.postReply(tempPostForMuteReply, muteMessage);
               this.repliedPosts.add(notif.uri); // Mark as replied
               continue;
             }
@@ -4483,8 +4522,12 @@ async function runStopCommandTests(botInstance) {
 
   console.log(`\nTest 6: Simulating message from @${notif6.author.handle}: "${notif6.record.text}"`);
   if (notif6.record.text.toLowerCase().trim() === '!help') {
-    const helpText = "Available commands:\n- `!STOP`...\n- `!RESUME`...\n- `!HELP`...";
-    console.log(`Test 6: Bot would reply with: "${helpText}"`);
+    const helpText = "Available commands:\n" +
+                     "- `!STOP`: Ask me to stop sending you messages. (Sentiment-based)\n" +
+                     "- `!RESUME`: Ask me to start sending messages again if you used `!STOP`.\n" +
+                     "- `!MUTE`: Ask me to stop replying in the current thread.\n" +
+                     "- `!HELP`: Show this help message.";
+    console.log(`Test 6: Bot would reply with: "${helpText}" (Expected to include !MUTE)`);
   }
   console.log("Test 6: Help command simulation complete.");
 
@@ -4529,10 +4572,69 @@ async function runStopCommandTests(botInstance) {
   }
   console.log(`Test 8: After RESUME, blocklist contains @${notif8.author.handle}: ${testBot.userBlocklist.has(notif8.author.handle)} (Expected: false)`);
 
+  // Test Case 9: !MUTE command
+  let notif9 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif9.author = { handle: "userMute.test", did: "did:plc:muteuser" };
+  notif9.record.text = "!mute";
+  notif9.uri = "at://did:plc:test/app.bsky.feed.post/mutecmd_thread1"; // This URI will be the root for this test
+  // For this test, notif9.uri is also the rootUri since it's not a reply.
+  const thread1RootUri = notif9.uri;
+
+  console.log(`\nTest 9: Simulating !MUTE from @${notif9.author.handle} in thread ${thread1RootUri}`);
+  if (notif9.record.text.toLowerCase().trim() === '!mute') {
+    testBot.mutedThreads.add(thread1RootUri);
+    console.log(`Test 9: Thread ${thread1RootUri} ADDED to mutedThreads.`);
+    const muteConfirmMsg = `Simulated reply to ${notif9.author.handle}: Okay, I will not reply further in this thread...`;
+    console.log(muteConfirmMsg);
+  }
+  console.log(`Test 9: mutedThreads contains ${thread1RootUri}: ${testBot.mutedThreads.has(thread1RootUri)} (Expected: true)`);
+
+  // Test Case 10: Message in a muted thread
+  let notif10 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif10.author = { handle: "anotherUser.test", did: "did:plc:anotheruser" };
+  notif10.record.text = "Hello in muted thread";
+  notif10.uri = "at://did:plc:test/app.bsky.feed.post/msg_in_muted_thread";
+  // Simulate this message being a reply within thread1
+  notif10.record.reply = {
+    root: { uri: thread1RootUri, cid: "somecid1" },
+    parent: { uri: notif9.uri, cid: notif9.cid }
+  };
+  const notif10ThreadRoot = notif10.record.reply.root.uri;
+
+  console.log(`\nTest 10: Simulating message from @${notif10.author.handle} in muted thread ${notif10ThreadRoot}`);
+  let processed10 = true;
+  if (testBot.mutedThreads.has(notif10ThreadRoot)) {
+    console.log(`Test 10: Message from @${notif10.author.handle} IGNORED (thread is muted).`);
+    processed10 = false;
+  }
+  console.log(`Test 10: Message processed (should be false if thread muted): ${processed10} (Expected: false)`);
+
+  // Test Case 11: Message in a different, non-muted thread
+  let notif11 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif11.author = { handle: "userNormal.test", did: "did:plc:normaluser2" };
+  notif11.record.text = "Hi in a new thread";
+  notif11.uri = "at://did:plc:test/app.bsky.feed.post/newthreadmsg";
+  // This message is its own root
+  const thread2RootUri = notif11.uri;
+
+  console.log(`\nTest 11: Simulating message from @${notif11.author.handle} in new thread ${thread2RootUri}`);
+  let processed11 = true;
+   if (testBot.userBlocklist.has(notif11.author.handle)) { // Standard blocklist check
+    console.log(`Test 11: Message from @${notif11.author.handle} IGNORED (user is blocklisted).`);
+    processed11 = false;
+  } else if (testBot.mutedThreads.has(thread2RootUri)) { // Mute check
+    console.log(`Test 11: Message from @${notif11.author.handle} IGNORED (thread is muted, UNEXPECTED for this test).`);
+    processed11 = false;
+  }
+  console.log(`Test 11: Message processed (should be true): ${processed11} (Expected: true)`);
+  console.log(`Test 11: mutedThreads still contains ${thread1RootUri}: ${testBot.mutedThreads.has(thread1RootUri)} (Expected: true)`);
+  console.log(`Test 11: mutedThreads does not contain ${thread2RootUri}: ${!testBot.mutedThreads.has(thread2RootUri)} (Expected: true)`);
+
   console.log("\n--- Command Tests Complete ---");
-  // Clear blocklist after tests to not interfere with actual bot operation if run multiple times or if bot continues.
+  // Clear blocklist and mutedThreads after tests
   testBot.userBlocklist.clear();
-  console.log("Blocklist cleared for subsequent operations.");
+  testBot.mutedThreads.clear();
+  console.log("Blocklist and MutedThreads cleared for subsequent operations.");
 }
 
 
