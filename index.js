@@ -2417,37 +2417,77 @@ Do not make up information not present in the search results. Keep the response 
       }
       else if (searchIntent.intent === "bot_feature_inquiry") {
         console.log(`[BotFeatureInquiry] Intent detected for query: "${userQueryText}"`);
-        const adminHandle = this.config.ADMIN_BLUESKY_HANDLE;
-        const responseText = `For questions about my features or capabilities, you can check with my admin @${adminHandle} or search for "Github Dearest Llama" to find my source code and documentation!`;
+        // The user's original query is `userQueryText`
+        // The bot's persona/identity is in `this.config.TEXT_SYSTEM_PROMPT`
 
-        // Filter the response minimally, primarily for length, though it should be short.
-        const filterModelIdForFeatureInquiry = 'google/gemma-3n-e4b-it';
+        const inquirySystemPrompt = `You are an AI assistant. Your persona is defined as: "${this.config.TEXT_SYSTEM_PROMPT}". The user is asking a question about you or your capabilities. Answer the user's question based on your defined persona and general knowledge of your functions as a helpful AI. Keep the response concise and suitable for a social media post.`;
+        const inquiryUserPrompt = `User's question about me/my features: "${userQueryText}"`;
+
+        console.log(`NIM CALL START: BotFeatureInquiry for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+        const nimInquiryResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${inquirySystemPrompt}` },
+              { role: "user", content: inquiryUserPrompt }
+            ],
+            temperature: 0.7, // Slightly higher for more natural, less rigid persona responses
+            max_tokens: 200, // Enough for a concise answer about identity
+            stream: false
+          }),
+          customTimeout: 60000 // 60s
+        });
+        console.log(`NIM CALL END: BotFeatureInquiry - Status: ${nimInquiryResponse.status}`);
+
+        let responseTextToPost = "I'm having a little trouble talking about myself right now, but I'm here to help with other questions!"; // Default fallback
+
+        if (nimInquiryResponse.ok) {
+          const nimInquiryData = await nimInquiryResponse.json();
+          if (nimInquiryData.choices && nimInquiryData.choices.length > 0 && nimInquiryData.choices[0].message && nimInquiryData.choices[0].message.content) {
+            responseTextToPost = nimInquiryData.choices[0].message.content.trim();
+          } else {
+            console.error('[BotFeatureInquiry] Nvidia NIM API response for inquiry was ok, but no content found:', JSON.stringify(nimInquiryData));
+          }
+        } else {
+          const errorText = await nimInquiryResponse.text();
+          console.error(`[BotFeatureInquiry] Nvidia NIM API error for inquiry response (${nimInquiryResponse.status}) - Text: ${errorText}`);
+        }
+
+        // Filter the response from Nemotron using Gemma (standard minimal filter)
+        const filterModelIdForBotInquiry = 'google/gemma-3n-e4b-it';
         const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
 
+        console.log(`NIM CALL START: filterResponse (using ${filterModelIdForBotInquiry}) in BotFeatureInquiry`);
         const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
             body: JSON.stringify({
-              model: filterModelIdForFeatureInquiry,
+              model: filterModelIdForBotInquiry,
               messages: [
                 { role: "system", content: universalMinimalFilterPrompt },
-                { role: "user", content: responseText }
+                { role: "user", content: responseTextToPost }
               ],
-              temperature: 0.0, max_tokens: 150, // Temperature changed to 0.0
+              temperature: 0.0, max_tokens: 150,
               stream: false
             }),
             customTimeout: 30000 // 30s
         });
+        console.log(`NIM CALL END: filterResponse (using ${filterModelIdForBotInquiry}) in BotFeatureInquiry - Status: ${filterResponse.status}`);
 
         if (filterResponse.ok) {
             const filterData = await filterResponse.json();
-            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
                 await this.postReply(post, filterData.choices[0].message.content.trim());
             } else {
-                await this.postReply(post, this.basicFormatFallback(responseText, 290)); // Fallback to basic formatted
+                console.warn('[BotFeatureInquiry] Gemma filter response was ok, but no content. Posting Nemotron basic formatted.');
+                await this.postReply(post, this.basicFormatFallback(responseTextToPost, 290));
             }
         } else {
-            await this.postReply(post, this.basicFormatFallback(responseText, 290)); // Fallback to basic formatted
+            const filterErrorText = await filterResponse.text();
+            console.error(`[BotFeatureInquiry] Gemma filter API error (${filterResponse.status}) - Text: ${filterErrorText}. Posting Nemotron basic formatted.`);
+            await this.postReply(post, this.basicFormatFallback(responseTextToPost, 290));
         }
         return null; // Bot feature inquiry handled
       }
@@ -2786,17 +2826,33 @@ ${baseInstruction}`;
       // It's slightly different from the original filterSystemPromptForGenerateResponse,
       // particularly in that it does NOT have special handling for "[SUMMARY...]" tags.
       // This is the one to use if the user wants the "Llama 3.2 Vision system prompt" universally.
-      const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+      // const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
 
-      // The original filterSystemPromptForGenerateResponse was more specific for structured text.
-      // If the goal is to use the "Llama 3.2 Vision prompt" (the universalMinimalFilterPrompt) EVERYWHERE Gemma filters Nemotron,
-      // then filterSystemPromptForGenerateResponse should be replaced by universalMinimalFilterPrompt.
-      // However, if the structured prompt is still desired for generateResponse's main path due to its specific handling of summary/detail markers,
-      // then we need to be careful. The user request was "make sure Gemma 3 4B has the Llama 3.2 Vision system prompt for filtering... Nemotron Super responses".
-      // This implies the universalMinimalFilterPrompt should be used.
-      // Let's use universalMinimalFilterPrompt here for consistency with the request.
-      // If the structured output from Nemotron (with [SUMMARY] tags) is still expected AND needs special Gemma handling, this might break that part.
-      // For now, prioritizing the user's explicit request for the "Llama 3.2 Vision system prompt".
+      // New specific filter prompt for structured (summary/details) responses from Nemotron
+      const structuredResponseFilterPrompt = `ATTENTION: You are filtering a structured response from another AI. The response contains specific markers: "[SUMMARY FINDING WITH INVITATION]" and "[DETAILED ANALYSIS POINT X]" (where X is a number).
+      Your tasks are:
+      1.  **PRESERVE THE MARKERS EXACTLY** as they appear: "[SUMMARY FINDING WITH INVITATION]" and "[DETAILED ANALYSIS POINT X]". Do not alter or remove them.
+      2.  For the text *following* "[SUMMARY FINDING WITH INVITATION]" and before the first "[DETAILED ANALYSIS POINT 1]", ensure it's a concise summary (target around 250-280 characters, max 300). Truncate if necessary, prioritizing whole sentences.
+      3.  For the text *following each* "[DETAILED ANALYSIS POINT X]" marker, ensure it's a short paragraph (target around 2-4 sentences, max 290 characters for a Bluesky post). Truncate if necessary, prioritizing whole sentences.
+      4.  Perform these standard cleanups on ALL text content:
+          a. Remove any surrounding quotation marks that make the entire text (or segments) appear as a direct quote.
+          b. Remove any sender attributions like 'Bot:', 'Nemotron says:', 'AI:'.
+          c. Remove any double asterisks (\`**\`) used for emphasis.
+          d. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.
+      5.  DO NOT rephrase, summarize beyond the truncation rules, or add/remove any other content. Maintain original meaning and sentence structure as much as possible within character limits.
+      Output only the processed text with preserved markers. This is an internal formatting step; do not mention it.`;
+
+      // Determine which filter prompt to use
+      const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+      let filterSystemPromptToUse = universalMinimalFilterPrompt;
+      if (fetchContextDecision) { // This is the condition for when Nemotron generates a structured response
+        filterSystemPromptToUse = structuredResponseFilterPrompt;
+        console.log("[LlamaBot.generateResponse] Using STRUCTURED response filter prompt for Gemma.");
+      } else {
+        // universalMinimalFilterPrompt is already defined above and assigned to filterSystemPromptToUse by default
+        console.log("[LlamaBot.generateResponse] Using UNIVERSAL MINIMAL response filter prompt for Gemma.");
+      }
+
 
       let gemmaFormattedText;
       console.log(`NIM CALL START: filterResponse (using ${filterModelIdForGenerateResponse}) in generateResponse`);
@@ -2806,11 +2862,11 @@ ${baseInstruction}`;
         body: JSON.stringify({
           model: filterModelIdForGenerateResponse,
           messages: [
-            { role: "system", content: universalMinimalFilterPrompt }, // Using the Llama 3.2 Vision style prompt
+            { role: "system", content: filterSystemPromptToUse }, // Using the dynamically chosen filter prompt
             { role: "user", content: initialResponse }
           ],
           temperature: 0.0, // Temperature changed to 0.0
-          max_tokens: 450,
+          max_tokens: 1024, // Increased max_tokens for potentially longer structured responses
           stream: false
         }),
         customTimeout: 60000
