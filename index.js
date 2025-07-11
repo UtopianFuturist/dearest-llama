@@ -5278,36 +5278,7 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                                 console.error(`[BotFeedMonitor] NIM API error: ${nimResponse.status}`);
                             }
                         }
-                  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-                  if (postDate < twoDaysAgo) {
-                      processedBotFeedPosts.add(postObject.uri);
-                  }
-              } else { // This 'else' corresponds to 'if (canProactivelyReply)' being false
-                const postDate = new Date(postObject.record.createdAt);
-                const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-                if (postDate < twoDaysAgo) {
-                    processedBotFeedPosts.add(postObject.uri); // Use new set
-                }
-              }
-            } // End of for (const item of feedResponse.feed)
-          } // End of if (feedResponse && feedResponse.feed)
-          await utils.sleep(2000); // Delay between processing different followed users
-        }
-        saveProcessedBotFeedPosts(); // Use new save function
-        console.log(`[BotFeedMonitor] Finished bot following feed scan. Waiting for ${CHECK_INTERVAL_BOT_FEED / 1000 / 60} minutes.`);
-        await utils.sleep(CHECK_INTERVAL_BOT_FEED); // Use new interval variable
-      } catch (error) {
-        console.error('[BotFeedMonitor] Error in bot following feed monitoring loop:', error);
-        await utils.sleep(CHECK_INTERVAL_BOT_FEED); // Use new interval variable
-      }
-    }
-  }
-} // Closes the LlamaBot class
 
-// Initialize and run the bot
-async function startBots() {
-  const agent = new AtpAgent({ service: 'https://bsky.social' });
-  const llamaBot = new LlamaBot({
     ...config,
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
     BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD,
