@@ -5252,9 +5252,8 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                         } else {
                           console.warn(`[BotFeedMonitor] Unknown matchCondition: ${matchCondition}. Skipping LLM call for ${postObject.uri}`);
                           // No 'continue' here, will fall through to processedBotFeedPosts logic
-                        }
-
-                        if (systemPromptForReply && userPromptForReply) { // Only proceed if prompts are set
+                        }   
+                      if (systemPromptForReply && userPromptForReply) { // Only proceed if prompts are set
                             console.log(`[BotFeedMonitor] Generating response for post ${postObject.uri} based on matchCondition '${matchCondition}'.`);
                             const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', { /* ... nim call ... */ }); // Existing NIM call
                             // ... (rest of NIM response handling)
@@ -5279,16 +5278,6 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                                 console.error(`[BotFeedMonitor] NIM API error: ${nimResponse.status}`);
                             }
                         }
-                    }
-                } // End if (canProactivelyReply)
-
-                if (replyAttemptedAndSuccessful) {
-                    processedBotFeedPosts.add(postObject.uri);
-                } else {
-                    const postDate = new Date(postObject.record.createdAt);
-                    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-                    if (postDate < twoDaysAgo) {
-                        processedBotFeedPosts.add(postObject.uri);
                     }
                 }
                 processedBotFeedPosts.add(postObject.uri); // Use new set
