@@ -1054,7 +1054,7 @@ class LlamaBot extends BaseBot {
   constructor(config, agent) {
     super(config, agent);
     this.dailyProactiveReplyCounts = new Map(); // { userDid: { date: 'YYYY-MM-DD', count: N } }
-    // this.processedBotFeedPosts will be initialized in a later step as per the plan
+    this.processedBotFeedPosts = new Set(); // Initialize Set for processed feed posts
     this.MAX_DAILY_PROACTIVE_REPLIES_PER_USER = 5; // Configurable: Max proactive replies to a single user per day
     this.MAX_REPLIES_PER_USER_PER_SCAN = 2; // As per commit: Max 2 proactive replies per user per scan
   }
