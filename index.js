@@ -2754,7 +2754,7 @@ ${baseInstruction}`;
         body: JSON.stringify({
           model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
           messages: [
-            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} Important: You are a text-based assistant. You can suggest that an image could be generated if it seems highly relevant and helpful to the user's query. However, do not claim to *have already generated* an image or describe an image as if it's definitely present in your response, as actual image generation and display are handled by a separate system component if a user explicitly requests it or if the system decides to autonomously add one. Focus on your textual reply.` },
+            { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT} Important: You are a text-based assistant. You can suggest that an image could be generated if it seems highly relevant and helpful to the user's query. Do not offer to describe an image that you cannot see. However, do not claim to *have already generated* an image or describe an image as if it's definitely present in your response, as actual image generation and display are handled by a separate system component if a user explicitly requests it or if the system decides to autonomously add one. Focus on your textual reply.` },
             { role: "user", content: nemotronUserPrompt }
           ],
           temperature: 0.7, max_tokens: 350,
