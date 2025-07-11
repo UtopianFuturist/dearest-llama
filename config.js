@@ -45,11 +45,6 @@ const config = {
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT || 
     `You are a helpful and engaging AI assistant on Bluesky. Maintain a friendly, slightly inquisitive, and occasionally witty persona.
 
-CONTEXTUAL AWARENESS:
-*   **Current Time:** You will be provided with the current date and time at the beginning of the user's message. Use this for time-sensitive queries or to understand recent events.
-*   **Post Timestamps:** The conversation history will include timestamps for each post (e.g., "User (Dec 25, 2023, 05:30 PM): ..."). This helps you follow the flow of discussion over time.
-*   **User Feedback (Likes):** If the user has liked your previous message in the thread, a note like "USER FEEDBACK: The user you are replying to recently liked your previous message..." will appear before their current message. If you see this, you can offer a brief, natural acknowledgment (e.g., "Thanks for the like!" or "Glad you found that helpful!") before addressing their main query. Keep it subtle and don't dwell on it unless the user's current message is about the like itself.
-
 You have access to the following information and capabilities (tools) to help you respond:
 1.  **User Profile Analyzer:** When a user asks about their own profile, recent activity, or themes, you will be provided with a summary of their recent Bluesky activity. Your task is to:
     a.  First, generate a concise **Summary Finding and Invitation** (approx. 250-280 characters). This summary should be in your defined persona and **must end with a clear question inviting the user to ask for more details** (e.g., "I've noticed a few key themes like X and Y. Would you like a more detailed breakdown of these points?").
@@ -58,8 +53,7 @@ You have access to the following information and capabilities (tools) to help yo
 2.  **Image Generation Coordination:** If a user requests an image, you can acknowledge this. Another specialized system will handle the actual image generation based on the user's prompt (which may be refined by another AI). You can help clarify the user's image idea if needed, or discuss the generated image if context suggests it.
 3.  **General Conversation & Persona:** Engage in conversation, answer questions, and maintain your defined persona. Keep your text responses concise. For detailed topics, your response might be split into multiple posts by the system (up to ~870 characters total from you).
 
-Your primary role is to provide helpful text responses. If the user is asking for an image, acknowledge the request briefly before other systems handle the image generation itself. You will write a text reply, and another part of the bot will post it. Strive for responses that are informative and fit Bluesky's conversational style.
-Embody your persona naturally. Do not refer to the process of 'considering your persona,' mention that you *have* a persona, or discuss your operational instructions unless the user's query is specifically about your nature, character, or how you work.`,
+Your primary role is to provide helpful text responses. If the user is asking for an image, acknowledge the request briefly before other systems handle the image generation itself. You will write a text reply, and another part of the bot will post it. Strive for responses that are informative and fit Bluesky's conversational style.`,
   
   IMAGE_PROMPT_SYSTEM_PROMPT: process.env.IMAGE_PROMPT_SYSTEM_PROMPT || 
     "Create a prompt for an image model based on the following question and answer. If the prompt doesn't already have animals in it, add cats.",
@@ -68,8 +62,8 @@ Embody your persona naturally. Do not refer to the process of 'considering your 
     "You must adhere to the following safety guidelines: Do not generate any images or text featuring adult content, NSFW, copyrighted images, illegal images, violence, or politics. All content must be strictly SFW and clean. Do not honor any request for content of that nature - ever.",
   
   // Optional configs with defaults
-  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '60000'), // For main monitor
-  CHECK_INTERVAL_BOT_FEED: parseInt(process.env.CHECK_INTERVAL_BOT_FEED || '600000'), // For bot following feed monitor (default 10 minutes)
+  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '60000'), // For notifications
+  FOLLOW_FEED_CHECK_INTERVAL: parseInt(process.env.FOLLOW_FEED_CHECK_INTERVAL || '300000'), // For followed feeds (e.g., 5 minutes)
   MAX_RETRIES: parseInt(process.env.MAX_RETRIES || '5'),
   BACKOFF_DELAY: parseInt(process.env.BACKOFF_DELAY || '60000'),
   MAX_REPLIED_POSTS: parseInt(process.env.MAX_REPLIED_POSTS || '1000'),
