@@ -2961,7 +2961,7 @@ ${baseInstruction}`;
   }
 
   async getNasaApod(requestedDate = null) {
-    console.log(`[NasaApod] Fetching APOD. Requested date: ${requestedDate}`);
+    console.log(`[NasaApodCall] Initiating direct API call to NASA APOD. Requested date: ${requestedDate || 'today'}`);
     const apiKey = "DEMO_KEY"; // Using DEMO_KEY as specified
     let apiUrl = `https://api.nasa.gov/planetary/apod?api_key=${apiKey}&thumbs=true`;
 
@@ -3027,7 +3027,12 @@ ${baseInstruction}`;
   }
 
   async performGoogleWebSearch(searchQuery, freshness = null, searchType = 'webpage') {
-    console.log(`[GoogleSearch] Performing Google search. Type: ${searchType}, Query: "${searchQuery}", Freshness: ${freshness}`);
+    const lowerSearchQuery = searchQuery.toLowerCase();
+    if (lowerSearchQuery.includes("nasa") && (lowerSearchQuery.includes("apod") || lowerSearchQuery.includes("astronomy picture of the day") || lowerSearchQuery.includes("picture of the day"))) {
+      console.log(`[WebSearchForAPOD] Performing Google web search for NASA APOD-related query. Type: ${searchType}, Query: "${searchQuery}", Freshness: ${freshness}`);
+    } else {
+      console.log(`[GoogleSearch] Performing Google search. Type: ${searchType}, Query: "${searchQuery}", Freshness: ${freshness}`);
+    }
     if (!this.config.GOOGLE_CUSTOM_SEARCH_API_KEY || !this.config.GOOGLE_CUSTOM_SEARCH_CX_ID) {
       console.error("[GoogleSearch] GOOGLE_CUSTOM_SEARCH_API_KEY or GOOGLE_CUSTOM_SEARCH_CX_ID is not set. Cannot perform web search.");
       return [];
