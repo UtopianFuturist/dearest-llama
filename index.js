@@ -585,15 +585,9 @@ class BaseBot {
 
 
             if (notif.reason === 'like') {
-              if (notif.record.subject && notif.record.subject.uri) {
-                const likedPostUri = notif.record.subject.uri;
-                const likerHandle = notif.author.handle;
-                console.log(`[Notification] Post ${likedPostUri} was liked by @${likerHandle}`);
-                // Add to repliedPosts to ensure we don't try to process this 'like' as a mention/reply later
-                // if the like notification itself has a URI that might be misconstrued.
-                // However, 'like' notifications usually have their own URI, not the post's.
-                // The main check is that we don't pass 'like' records to generateResponse.
-              }
+              // Likes tracking removed as per request.
+              // The console.log statement logging the like event has been removed.
+              // No other action was being taken on likes, so this effectively removes like tracking.
               continue; // Don't process 'like' notifications further for replies
             }
 
@@ -1268,7 +1262,7 @@ class LlamaBot extends BaseBot {
       // Now, filter this response using Gemma
       const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
-      const filterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+      const standardFilterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
 
       try {
         console.log(`NIM CALL START: filterResponse (using ${filterModelId}) in generateStandalonePostFromContext`);
@@ -1278,7 +1272,7 @@ class LlamaBot extends BaseBot {
           body: JSON.stringify({
             model: filterModelId,
             messages: [
-              { role: "system", content: filterSystemPrompt },
+              { role: "system", content: standardFilterSystemPrompt },
               { role: "user", content: nemotronResponseText } // textToFilter is nemotronResponseText
             ],
             temperature: 0.1, max_tokens: 100, stream: false
@@ -1725,13 +1719,16 @@ Do not make up information not present in the search results. Keep the response 
           if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
             const synthesizedResponse = nimWebData.choices[0].message.content.trim();
             // Filter this response
+            const filterModelIdForWebSearch = 'google/gemma-3n-e4b-it'; // Using Gemma
+            const standardFilterSystemPromptForWeb = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text."; // Standard prompt
+
             const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
               body: JSON.stringify({
-                model: 'meta/llama-4-scout-17b-16e-instruct',
+                model: filterModelIdForWebSearch, // Gemma
                 messages: [
-                  { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                  { role: "system", content: standardFilterSystemPromptForWeb },
                   { role: "user", content: synthesizedResponse }
                 ],
                 temperature: 0.1, max_tokens: 100, stream: false
@@ -1743,10 +1740,10 @@ Do not make up information not present in the search results. Keep the response 
               if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
                 await this.postReply(post, filterData.choices[0].message.content.trim());
               } else {
-                await this.postReply(post, synthesizedResponse); // Fallback to unfiltered
+                await this.postReply(post, this.basicFormatFallback(synthesizedResponse)); // Fallback to basic formatted unfiltered
               }
             } else {
-              await this.postReply(post, synthesizedResponse); // Fallback to unfiltered
+              await this.postReply(post, this.basicFormatFallback(synthesizedResponse)); // Fallback to basic formatted unfiltered
             }
           } else {
             await this.postReply(post, "I searched the web based on the image text but had a little trouble putting together an answer. You could try rephrasing your question or typing out the headline if you see one!");
@@ -1847,13 +1844,16 @@ Do not make up information not present in the search results. Keep the response 
             const nimWebData = await nimWebResponse.json();
             if (nimWebData.choices && nimWebData.choices.length > 0 && nimWebData.choices[0].message && nimWebData.choices[0].message.content) {
               const synthesizedResponse = nimWebData.choices[0].message.content.trim();
+              const filterModelIdForWebSearchPage = 'google/gemma-3n-e4b-it'; // Using Gemma
+              const standardFilterSystemPromptForWebPage = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text."; // Standard prompt
+
               const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  model: filterModelIdForWebSearchPage, // Gemma
                   messages: [
-                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "system", content: standardFilterSystemPromptForWebPage },
                     { role: "user", content: synthesizedResponse }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
@@ -2025,13 +2025,16 @@ Do not make up information not present in the search results. Keep the response 
           if (nimSearchData.choices && nimSearchData.choices.length > 0 && nimSearchData.choices[0].message && nimSearchData.choices[0].message.content) {
             const baseResponseText = nimSearchData.choices[0].message.content.trim();
 
+            const filterModelIdForSearchHistory = 'google/gemma-3n-e4b-it'; // Using Gemma
+            const standardFilterSystemPromptForSearchHistory = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text."; // Standard prompt
+
             const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
                 body: JSON.stringify({
-                  model: 'meta/llama-4-scout-17b-16e-instruct',
+                  model: filterModelIdForSearchHistory, // Gemma
                   messages: [
-                    { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                    { role: "system", content: standardFilterSystemPromptForSearchHistory },
                     { role: "user", content: baseResponseText }
                   ],
                   temperature: 0.1, max_tokens: 100, stream: false
@@ -2326,6 +2329,42 @@ Do not make up information not present in the search results. Keep the response 
         }
         return null; // Giphy search handling complete
       }
+      else if (searchIntent.intent === "bot_feature_inquiry") {
+        console.log(`[BotFeatureInquiry] Intent detected for query: "${userQueryText}"`);
+        const adminHandle = this.config.ADMIN_BLUESKY_HANDLE;
+        const responseText = `For questions about my features or capabilities, you can check with my admin @${adminHandle} or search for "Github Dearest Llama" to find my source code and documentation!`;
+
+        // Filter the response minimally, primarily for length, though it should be short.
+        const filterModelIdForFeatureInquiry = 'google/gemma-3n-e4b-it';
+        const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+
+        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+              model: filterModelIdForFeatureInquiry,
+              messages: [
+                { role: "system", content: universalMinimalFilterPrompt },
+                { role: "user", content: responseText }
+              ],
+              temperature: 0.1, max_tokens: 150, // Increased max_tokens slightly for this specific response
+              stream: false
+            }),
+            customTimeout: 30000 // 30s
+        });
+
+        if (filterResponse.ok) {
+            const filterData = await filterResponse.json();
+            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
+                await this.postReply(post, filterData.choices[0].message.content.trim());
+            } else {
+                await this.postReply(post, this.basicFormatFallback(responseText, 290)); // Fallback to basic formatted
+            }
+        } else {
+            await this.postReply(post, this.basicFormatFallback(responseText, 290)); // Fallback to basic formatted
+        }
+        return null; // Bot feature inquiry handled
+      }
       // If not a search history or other specific intent, proceed with web search or original logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Consolidated web search intent detected. Query: "${searchIntent.search_query}", Type: "${searchIntent.search_type}"`);
@@ -2334,13 +2373,16 @@ Do not make up information not present in the search results. Keep the response 
         if (!isQuerySafe) {
           console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
           const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
+          const filterModelIdForUnsafeWebSearch = 'google/gemma-3n-e4b-it'; // Using Gemma
+          const standardFilterSystemPromptForUnsafeWeb = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text."; // Standard prompt
+
           const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
             body: JSON.stringify({
-              model: 'meta/llama-4-scout-17b-16e-instruct',
+              model: filterModelIdForUnsafeWebSearch, // Gemma
               messages: [
-                { role: "system", content: "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text." },
+                { role: "system", content: standardFilterSystemPromptForUnsafeWeb },
                 { role: "user", content: unsafeQueryResponse }
               ],
               temperature: 0.1, max_tokens: 100, stream: false
@@ -2352,10 +2394,10 @@ Do not make up information not present in the search results. Keep the response 
             if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
               await this.postReply(post, filterData.choices[0].message.content.trim());
             } else {
-              await this.postReply(post, unsafeQueryResponse);
+              await this.postReply(post, this.basicFormatFallback(unsafeQueryResponse));
             }
           } else {
-            await this.postReply(post, unsafeQueryResponse);
+            await this.postReply(post, this.basicFormatFallback(unsafeQueryResponse));
           }
           return null;
         }
@@ -2540,10 +2582,10 @@ Do not make up information not present in the search results. Keep the response 
                 if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
                   await this.postReply(post, filterData.choices[0].message.content.trim());
                 } else {
-                  await this.postReply(post, synthesizedResponse);
+                  await this.postReply(post, this.basicFormatFallback(synthesizedResponse));
                 }
               } else {
-                await this.postReply(post, synthesizedResponse);
+                await this.postReply(post, this.basicFormatFallback(synthesizedResponse));
               }
             } else {
               await this.postReply(post, "I searched the web but had a little trouble putting together an answer. You could try rephrasing your question!");
@@ -2652,46 +2694,60 @@ ${baseInstruction}`;
       console.log(`[LlamaBot.generateResponse] Length of initialResponse (from Nemotron) before sending to Gemma filter: ${initialResponse.length} characters.`);
 
       // Using Gemma for filtering instead of Scout
-      const filterModelId = 'google/gemma-3n-e4b-it';
-      const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
-      const filterSystemPromptForGenerateResponse = "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens).";
+      const filterModelIdForGenerateResponse = 'google/gemma-3n-e4b-it';
+      const endpointUrlForGenerateResponse = 'https://integrate.api.nvidia.com/v1/chat/completions';
+      // This is the Llama 3.2 Vision style prompt for minimal formatting.
+      // It's slightly different from the original filterSystemPromptForGenerateResponse,
+      // particularly in that it does NOT have special handling for "[SUMMARY...]" tags.
+      // This is the one to use if the user wants the "Llama 3.2 Vision system prompt" universally.
+      const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+
+      // The original filterSystemPromptForGenerateResponse was more specific for structured text.
+      // If the goal is to use the "Llama 3.2 Vision prompt" (the universalMinimalFilterPrompt) EVERYWHERE Gemma filters Nemotron,
+      // then filterSystemPromptForGenerateResponse should be replaced by universalMinimalFilterPrompt.
+      // However, if the structured prompt is still desired for generateResponse's main path due to its specific handling of summary/detail markers,
+      // then we need to be careful. The user request was "make sure Gemma 3 4B has the Llama 3.2 Vision system prompt for filtering... Nemotron Super responses".
+      // This implies the universalMinimalFilterPrompt should be used.
+      // Let's use universalMinimalFilterPrompt here for consistency with the request.
+      // If the structured output from Nemotron (with [SUMMARY] tags) is still expected AND needs special Gemma handling, this might break that part.
+      // For now, prioritizing the user's explicit request for the "Llama 3.2 Vision system prompt".
 
       let gemmaFormattedText;
-      console.log(`NIM CALL START: filterResponse (using ${filterModelId}) in generateResponse`);
-      const gemmaFilterResponse = await fetchWithRetries(endpointUrl, { // Renamed variable for clarity
+      console.log(`NIM CALL START: filterResponse (using ${filterModelIdForGenerateResponse}) in generateResponse`);
+      const gemmaFilterResponse = await fetchWithRetries(endpointUrlForGenerateResponse, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
         body: JSON.stringify({
-          model: filterModelId, // Switched to Gemma
+          model: filterModelIdForGenerateResponse,
           messages: [
-            { role: "system", content: filterSystemPromptForGenerateResponse }, // Re-using the detailed prompt
+            { role: "system", content: universalMinimalFilterPrompt }, // Using the Llama 3.2 Vision style prompt
             { role: "user", content: initialResponse }
           ],
           temperature: 0.1,
-          max_tokens: 450, // Kept max_tokens, Gemma should handle this.
+          max_tokens: 450,
           stream: false
         }),
-        customTimeout: 60000 // Kept 60s timeout, assuming Gemma is robust.
+        customTimeout: 60000
       });
-      console.log(`NIM CALL END: filterResponse (using ${filterModelId}) in generateResponse - Status: ${gemmaFilterResponse.status}`);
+      console.log(`NIM CALL END: filterResponse (using ${filterModelIdForGenerateResponse}) in generateResponse - Status: ${gemmaFilterResponse.status}`);
 
       if (!gemmaFilterResponse.ok) {
         const errorText = await gemmaFilterResponse.text();
-        console.error(`Nvidia NIM API error (filter model ${filterModelId}) (${gemmaFilterResponse.status}) - Text: ${errorText}. Falling back to basic formatter.`);
-        gemmaFormattedText = this.basicFormatFallback(initialResponse, 870); // Basic format on Nemotron's output
+        console.error(`Nvidia NIM API error (filter model ${filterModelIdForGenerateResponse}) (${gemmaFilterResponse.status}) - Text: ${errorText}. Falling back to basic formatter.`);
+        gemmaFormattedText = this.basicFormatFallback(initialResponse, 870);
       } else {
         const gemmaFilterData = await gemmaFilterResponse.json();
         if (gemmaFilterData.choices && gemmaFilterData.choices.length > 0 && gemmaFilterData.choices[0].message && gemmaFilterData.choices[0].message.content) {
           gemmaFormattedText = gemmaFilterData.choices[0].message.content;
-          console.log(`[LlamaBot.generateResponse] Filtered response from ${filterModelId}: "${gemmaFormattedText.substring(0,200)}..."`);
+          console.log(`[LlamaBot.generateResponse] Filtered response from ${filterModelIdForGenerateResponse}: "${gemmaFormattedText.substring(0,200)}..."`);
         } else {
-          console.error(`Unexpected response format from Nvidia NIM (filter model ${filterModelId}):`, JSON.stringify(gemmaFilterData), '. Falling back to basic formatter.');
-          gemmaFormattedText = this.basicFormatFallback(initialResponse, 870); // Basic format on Nemotron's output
+          console.error(`Unexpected response format from Nvidia NIM (filter model ${filterModelIdForGenerateResponse}):`, JSON.stringify(gemmaFilterData), '. Falling back to basic formatter.');
+          gemmaFormattedText = this.basicFormatFallback(initialResponse, 870);
         }
       }
 
-      const scoutFormattedText = gemmaFormattedText; // Using existing variable name for minimal diff in subsequent logic
-      console.log(`[LlamaBot.generateResponse] Final formatted text for processing (after ${filterModelId} filter): "${scoutFormattedText.substring(0,200)}..."`);
+      const scoutFormattedText = gemmaFormattedText;
+      console.log(`[LlamaBot.generateResponse] Final formatted text for processing (after ${filterModelIdForGenerateResponse} filter): "${scoutFormattedText.substring(0,200)}..."`);
 
       // Attempt to parse structured response if profile analysis was done
       // Note: an image generated for the *initial* query that leads to a summary/details flow.
@@ -3527,7 +3583,11 @@ Output a JSON object. Choose ONE of the following intent structures:
   "intent": "giphy_search",
   "search_query": "keywords for GIPHY search"
 }
-7. If NEITHER of the above: { "intent": "none" }
+7. If the query is asking about the bot's own features, capabilities, how it works, or what it can do:
+{
+  "intent": "bot_feature_inquiry"
+}
+8. If NEITHER of the above: { "intent": "none" }
 IMPORTANT RULES for "search_history":
 - "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
 - "author_filter": "user" (they sent/posted), "bot" (you sent/generated), or "any".
@@ -4249,32 +4309,35 @@ Ensure your entire response is ONLY the JSON object.`;
                 continue;
             }
 
-            // Placeholder for deciding if a reply should be attempted
-            const shouldReply = await this.shouldAttemptProactiveReply(post, user.handle); // Pass user handle for logging or context
+            // --- Proactive Reply Logic Removed ---
+            // The logic for shouldAttemptProactiveReply and sendProactiveReply has been removed
+            // to disable automatic replies to posts from followed users.
 
-            if (shouldReply) {
-              console.log(`[MonitorFollowingFeed] Attempting proactive reply to post ${post.uri} from @${user.handle}`);
-              const replySuccess = await this.sendProactiveReply(post, user.handle); // Placeholder
-
-              if (replySuccess) {
-                repliesSentThisScanForUser++;
-                dailyRepliesSentForUser++;
-                this.dailyProactiveReplyCounts.set(user.did, { date: todayStr, count: dailyRepliesSentForUser });
-                console.log(`[MonitorFollowingFeed] Proactive reply sent to ${post.uri}. Scan count for @${user.handle}: ${repliesSentThisScanForUser}. Daily count: ${dailyRepliesSentForUser}`);
-                this.processedBotFeedPosts.add(post.uri); // Add to processed set if replied to
-              }
-            } else {
-              // Post was not replied to by proactive logic.
-              // Check if it's old (older than 2 days) to add to processed set and avoid re-evaluating.
-              if (post.record?.createdAt) {
-                const postDate = new Date(post.record.createdAt);
-                const twoDaysAgo = new Date();
-                twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-                if (postDate < twoDaysAgo) {
-                  // console.log(`[MonitorFollowingFeed] Post ${post.uri} is older than 2 days and not proactively replied to. Adding to processed set.`);
-                  this.processedBotFeedPosts.add(post.uri);
+            // We still need to mark posts as processed to avoid re-evaluating them if other
+            // functionality is added to this loop in the future, or if they are very old.
+            if (!this.processedBotFeedPosts.has(post.uri)) {
+                 // Check if it's old (older than 2 days) to add to processed set.
+                if (post.record?.createdAt) {
+                    const postDate = new Date(post.record.createdAt);
+                    const twoDaysAgo = new Date();
+                    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+                    if (postDate < twoDaysAgo) {
+                    // console.log(`[MonitorFollowingFeed] Post ${post.uri} is older than 2 days. Adding to processed set.`);
+                    this.processedBotFeedPosts.add(post.uri);
+                    }
+                } else {
+                    // If no createdAt, we might add it to processed or handle differently.
+                    // For now, if it wasn't replied to and has no date, it's fine to re-evaluate next time
+                    // if some other non-reply logic was added.
+                    // However, since current function's main goal was replies, and that's removed,
+                    // we can be more liberal or simply ensure it's added if we are sure no other action will be taken.
+                    // Let's add to processedBotFeedPosts if it wasn't already replied to by reactive means,
+                    // just to ensure it's not picked up by some future logic if this function is expanded.
+                    if (!await this.hasAlreadyReplied(post)) {
+                         // console.log(`[MonitorFollowingFeed] Post ${post.uri} (no date) processed without proactive reply. Adding to processed set.`);
+                         this.processedBotFeedPosts.add(post.uri);
+                    }
                 }
-              }
             }
           } // End of for...of userPosts loop
 
@@ -4289,55 +4352,22 @@ Ensure your entire response is ONLY the JSON object.`;
       console.error('[MonitorFollowingFeed] General error in monitorBotFollowingFeed:', error);
     } finally {
       // Schedule next run - this will be handled by the main calling loop
-      console.log('[MonitorFollowingFeed] Finished scan of followed users feeds.');
+      console.log('[MonitorFollowingFeed] Finished scan of followed users feeds (auto-reply feature disabled).');
     }
   }
 
   async shouldAttemptProactiveReply(post, userHandle) {
-    // Decide if a post from a followed user is suitable for a proactive reply.
-    const botHandle = this.config.BLUESKY_IDENTIFIER;
-    const postText = post.record.text ? post.record.text.toLowerCase() : "";
-    const postUri = post.uri;
-
-    // Rule: Prioritize replies that directly mention the bot.
-    if (post.record.reply) {
-      const mentionsBot = postText.includes(`@${botHandle.toLowerCase()}`);
-      if (mentionsBot) {
-        console.log(`[shouldAttemptProactiveReply] Post ${postUri} (reply) from @${userHandle} MENTIONS the bot. HIGHEST priority for proactive consideration.`);
-        // This is a high-priority candidate. Further checks (content, sentiment) could still apply here
-        // but the fact it's a direct mention in a reply makes it very eligible.
-        return true; // Eligible for reply
-      } else {
-        // console.log(`[shouldAttemptProactiveReply] Post ${postUri} (reply) from @${userHandle} does NOT mention the bot. Skipping.`);
-        return false; // Do not proactively reply to replies not mentioning the bot.
-      }
-    } else {
-      // It's an original post by the user we follow (not a reply to anyone).
-      // These are standard candidates for proactive engagement.
-      console.log(`[shouldAttemptProactiveReply] Post ${postUri} (original) from @${userHandle} is an ORIGINAL post. Standard priority for proactive consideration.`);
-      // Further checks (content, keywords, sentiment, age) would go here.
-      // For now, original posts from followed users are considered eligible.
-      return true; // Eligible for reply
-    }
-
-    // Note: The actual sending of a reply is still controlled by sendProactiveReply and global limits.
-    // This function just determines eligibility.
-    // More sophisticated checks (content, sentiment, keywords, post age, "no bots" phrases)
-    // would be implemented here if needed, before returning true.
+    // This function is no longer called by monitorBotFollowingFeed for auto-replies.
+    // Kept for potential future use or if other parts of the system reference it,
+    // but it will currently return false to prevent proactive replies.
+    console.log(`[shouldAttemptProactiveReply] Proactive reply feature disabled. Called for post ${post.uri} from @${userHandle}. Returning false.`);
+    return false;
   }
 
   async sendProactiveReply(post, userHandle) {
-    // Placeholder: Implement actual logic to generate and send a proactive reply.
-    // This would involve calling generateResponse (or a specialized version) and postReply.
-    // For now, let's log and return false.
-    console.log(`[sendProactiveReply] Placeholder for sending reply to post ${post.uri} from @${userHandle}. Currently returning false.`);
-    // Example:
-    // const context = await this.getReplyContext(post); // Or a simplified context for proactive
-    // const responseText = await this.generateResponse(post, context); // Or a specific proactive generator
-    // if (responseText) {
-    //   const result = await this.postReply(post, responseText);
-    //   return result && result.uris.length > 0;
-    // }
+    // This function is no longer called by monitorBotFollowingFeed for auto-replies.
+    // Kept for potential future use.
+    console.log(`[sendProactiveReply] Proactive reply feature disabled. Called for post ${post.uri} from @${userHandle}. No action taken.`);
     return false;
   }
 } // Closes the LlamaBot class
