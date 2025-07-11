@@ -2,6 +2,7 @@ import { AtpAgent } from '@atproto/api';
 import config from './config.js';
 import fetch from 'node-fetch';
 import express from 'express';
+import Sentiment from 'sentiment';
 
 // Add express to your package.json dependencies
 const app = express();
@@ -190,6 +191,8 @@ class BaseBot {
     this.repliedPosts = new Set();
     this.pendingDetailedAnalyses = new Map(); // For storing detailed analysis points
     this.DETAIL_ANALYSIS_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
+    this.sentimentAnalyzer = new Sentiment();
+    this.userBlocklist = new Set(); // Users who have issued !STOP
   }
 
   // Helper to cleanup expired pending analyses
@@ -597,6 +600,39 @@ class BaseBot {
             }
 
             // Construct a 'post' object similar to what previous logic expected
+            const postAuthorHandle = notif.author.handle;
+            const postTextContent = notif.record.text || "";
+
+            // Check for !STOP command from user
+            if (postTextContent.toLowerCase().includes('!stop')) {
+              const sentimentResult = this.sentimentAnalyzer.analyze(postTextContent);
+              console.log(`[Monitor] !STOP command detected from @${postAuthorHandle}. Sentiment score: ${sentimentResult.score}`);
+              // Block if sentiment is negative or neutral (score <= 0)
+              // The 'sentiment' library scores range from negative to positive.
+              // A score of 0 is neutral. Negative scores are < 0.
+              if (sentimentResult.score <= 0) {
+                this.userBlocklist.add(postAuthorHandle);
+                console.log(`[Monitor] User @${postAuthorHandle} added to blocklist due to !STOP command with non-positive sentiment.`);
+                // Do not reply or process further.
+                // We could optionally send a confirmation, but requirement is to "not respond to them further".
+                // Marking as replied to prevent any other processing path for this specific post.
+                this.repliedPosts.add(notif.uri);
+                continue;
+              } else {
+                console.log(`[Monitor] User @${postAuthorHandle} issued !STOP, but sentiment was positive (${sentimentResult.score}). Not adding to blocklist, but will not reply to this specific !STOP message.`);
+                // Still, do not process this '!STOP' message for a normal reply.
+                this.repliedPosts.add(notif.uri);
+                continue;
+              }
+            }
+
+            // Check if user is on blocklist before any further processing
+            if (this.userBlocklist.has(postAuthorHandle)) {
+              console.log(`[Monitor] User @${postAuthorHandle} is on the blocklist. Ignoring their message: ${notif.uri}`);
+              this.repliedPosts.add(notif.uri); // Mark as "handled" to prevent accidental processing
+              continue;
+            }
+
             const currentPostObject = {
               uri: notif.uri, // URI of the post that caused the notification (e.g., the reply, the mention)
               cid: notif.cid,
@@ -4239,6 +4275,130 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 } // Closes the LlamaBot class
 
+// Test function for !STOP logic
+async function runStopCommandTests(botInstance) {
+  console.log("--- Running !STOP Command Tests ---");
+
+  const testBot = botInstance; // Use the passed bot instance
+
+  // Mock notifications for testing the !STOP logic directly
+  // These won't go through the full monitor loop's API calls,
+  // but will test the specific blocklist and sentiment logic.
+
+  const mockNotificationBase = {
+    uri: "at://did:plc:test/app.bsky.feed.post/test1",
+    cid: "bafyreiambryh4xijexr7axohozwqgfs52vqgsksg532n35jdsf7t6n2x5a",
+    reason: "mention",
+    isRead: false,
+    indexedAt: new Date().toISOString(),
+    record: {
+      $type: "app.bsky.feed.post",
+      text: "", // Will be overridden
+      createdAt: new Date().toISOString(),
+      langs: ["en"],
+    }
+  };
+
+  // Test Case 1: !STOP with negative sentiment
+  let notif1 = JSON.parse(JSON.stringify(mockNotificationBase)); // Deep copy
+  notif1.author = { handle: "userNegativeStop.test", did: "did:plc:negativestop" };
+  notif1.record.text = "This bot is annoying, !STOP messaging me";
+  notif1.uri = "at://did:plc:test/app.bsky.feed.post/negstop";
+
+  console.log(`\nTest 1: Simulating message from @${notif1.author.handle}: "${notif1.record.text}"`);
+  // Simulate the relevant part of the monitor loop
+  if (notif1.record.text.toLowerCase().includes('!stop')) {
+    const sentimentResult = testBot.sentimentAnalyzer.analyze(notif1.record.text);
+    if (sentimentResult.score <= 0) {
+      testBot.userBlocklist.add(notif1.author.handle);
+      console.log(`Test 1: @${notif1.author.handle} ADDED to blocklist (Sentiment: ${sentimentResult.score})`);
+    } else {
+      console.log(`Test 1: @${notif1.author.handle} NOT added to blocklist (Sentiment: ${sentimentResult.score})`);
+    }
+  }
+  console.log(`Test 1: Blocklist contains @${notif1.author.handle}: ${testBot.userBlocklist.has(notif1.author.handle)}`);
+
+
+  // Test Case 2: !STOP with neutral sentiment
+  let notif2 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif2.author = { handle: "userNeutralStop.test", did: "did:plc:neutralstop" };
+  notif2.record.text = "Please !STOP";
+  notif2.uri = "at://did:plc:test/app.bsky.feed.post/neutralstop";
+
+  console.log(`\nTest 2: Simulating message from @${notif2.author.handle}: "${notif2.record.text}"`);
+  if (notif2.record.text.toLowerCase().includes('!stop')) {
+    const sentimentResult = testBot.sentimentAnalyzer.analyze(notif2.record.text);
+    if (sentimentResult.score <= 0) {
+      testBot.userBlocklist.add(notif2.author.handle);
+      console.log(`Test 2: @${notif2.author.handle} ADDED to blocklist (Sentiment: ${sentimentResult.score})`);
+    } else {
+      console.log(`Test 2: @${notif2.author.handle} NOT added to blocklist (Sentiment: ${sentimentResult.score})`);
+    }
+  }
+  console.log(`Test 2: Blocklist contains @${notif2.author.handle}: ${testBot.userBlocklist.has(notif2.author.handle)}`);
+
+
+  // Test Case 3: !STOP with positive sentiment
+  let notif3 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif3.author = { handle: "userPositiveStop.test", did: "did:plc:positivestop" };
+  notif3.record.text = "Thanks for the help, but !STOP for now, cheers!";
+  notif3.uri = "at://did:plc:test/app.bsky.feed.post/posstop";
+
+  console.log(`\nTest 3: Simulating message from @${notif3.author.handle}: "${notif3.record.text}"`);
+    if (notif3.record.text.toLowerCase().includes('!stop')) {
+    const sentimentResult = testBot.sentimentAnalyzer.analyze(notif3.record.text);
+    if (sentimentResult.score <= 0) {
+      testBot.userBlocklist.add(notif3.author.handle);
+      console.log(`Test 3: @${notif3.author.handle} ADDED to blocklist (Sentiment: ${sentimentResult.score})`);
+    } else {
+      console.log(`Test 3: @${notif3.author.handle} NOT added to blocklist (Sentiment: ${sentimentResult.score})`);
+    }
+  }
+  console.log(`Test 3: Blocklist contains @${notif3.author.handle}: ${testBot.userBlocklist.has(notif3.author.handle)}`);
+
+
+  // Test Case 4: Message from a blocklisted user (userNegativeStop.test)
+  let notif4 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif4.author = { handle: "userNegativeStop.test", did: "did:plc:negativestop" }; // Same as Test 1 user
+  notif4.record.text = "Hello again";
+  notif4.uri = "at://did:plc:test/app.bsky.feed.post/blocktest";
+
+  console.log(`\nTest 4: Simulating message from blocklisted user @${notif4.author.handle}: "${notif4.record.text}"`);
+  let processed4 = true;
+  if (testBot.userBlocklist.has(notif4.author.handle)) {
+    console.log(`Test 4: Message from @${notif4.author.handle} IGNORED (user is blocklisted).`);
+    processed4 = false;
+  } else if (notif4.record.text.toLowerCase().includes('!stop')) {
+     // This case should ideally not be hit if blocklist check is first, but for completeness
+    console.log(`Test 4: Message from @${notif4.author.handle} contains !STOP and would be handled by stop logic.`);
+    processed4 = false;
+  }
+  console.log(`Test 4: Message processed (should be false if blocklisted): ${processed4}`);
+
+
+  // Test Case 5: Normal message from a non-blocklisted user
+  let notif5 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif5.author = { handle: "userNormal.test", did: "did:plc:normaluser" };
+  notif5.record.text = "Hi bot";
+  notif5.uri = "at://did:plc:test/app.bsky.feed.post/normalmsg";
+
+  console.log(`\nTest 5: Simulating message from normal user @${notif5.author.handle}: "${notif5.record.text}"`);
+  let processed5 = true;
+  if (testBot.userBlocklist.has(notif5.author.handle)) {
+    console.log(`Test 5: Message from @${notif5.author.handle} IGNORED (user is blocklisted).`);
+    processed5 = false;
+  } else if (notif5.record.text.toLowerCase().includes('!stop')) {
+    console.log(`Test 5: Message from @${notif5.author.handle} contains !STOP and would be handled by stop logic.`);
+    processed5 = false;
+  }
+  console.log(`Test 5: Message processed (should be true): ${processed5}`);
+
+  console.log("\n--- !STOP Command Tests Complete ---");
+  // Reset blocklist if needed for other tests or if bot instance is reused.
+  // testBot.userBlocklist.clear();
+}
+
+
 // Initialize and run the bot
 async function startBots() {
   const agent = new AtpAgent({ service: 'https://bsky.social' });
@@ -4247,6 +4407,9 @@ async function startBots() {
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
     BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD,
   }, agent);
+
+  // Run inline tests
+  await runStopCommandTests(llamaBot);
 
   // Start monitoring notifications
   llamaBot.monitor().catch(e => console.error("Error in main notification monitor loop:", e));
