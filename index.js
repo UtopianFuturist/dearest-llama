@@ -5278,20 +5278,6 @@ Example: If persona mentions interest in "technology", a post about "new AI brea
                                 console.error(`[BotFeedMonitor] NIM API error: ${nimResponse.status}`);
                             }
                         }
-                    }
-                }
-                processedBotFeedPosts.add(postObject.uri); // Use new set
-              } else if (repliesSentToThisUserThisScan >= MAX_REPLIES_PER_USER_PER_SCAN) {
-                  console.log(`[BotFeedMonitor] MAX_REPLIES_PER_USER_PER_SCAN (${MAX_REPLIES_PER_USER_PER_SCAN}) reached for user ${postObject.author.handle} (DID: ${postObject.author.did}) before processing post ${postObject.uri}. Skipping this post and further posts for this user in this scan.`);
-                  // No 'continue' here, as we want to break the inner loop for this user if the limit is hit.
-                  // However, the loop structure is `for (const item of feedResponse.feed)`, so we can't easily break
-                  // for *just this user* and continue with the next user.
-                  // The current implementation will just skip replying to further posts from this user in this scan.
-                  // To break for the user, the outer loop `for (const followedUserDid of botFollowsDids)` would need restructuring
-                  // or a flag set here to break from the inner loop.
-                  // For now, it will iterate all posts but skip replies past the limit.
-                  // If the limit is reached, we should still add old posts to processed set.
-                  const postDate = new Date(postObject.record.createdAt);
                   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
                   if (postDate < twoDaysAgo) {
                       processedBotFeedPosts.add(postObject.uri);
