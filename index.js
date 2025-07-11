@@ -2837,13 +2837,13 @@ ${baseInstruction}`;
       4.  Perform these standard cleanups on ALL text content:
           a. Remove any surrounding quotation marks that make the entire text (or segments) appear as a direct quote.
           b. Remove any sender attributions like 'Bot:', 'Nemotron says:', 'AI:'.
-          c. Remove any double asterisks (\`**\`) used for emphasis.
+          c. Remove any double asterisks (\`**\`) used for bold emphasis. Single asterisks used for roleplay actions (e.g., \`*smiles*\`, \`*nods*\`) should be PRESERVED.
           d. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.
       5.  DO NOT rephrase, summarize beyond the truncation rules, or add/remove any other content. Maintain original meaning and sentence structure as much as possible within character limits.
       Output only the processed text with preserved markers. This is an internal formatting step; do not mention it.`;
 
       // Determine which filter prompt to use
-      const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+      const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (\`**\`) used for bold emphasis. Single asterisks used for roleplay actions (e.g., \`*smiles*\`, \`*nods*\`) should be PRESERVED. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
       let filterSystemPromptToUse = universalMinimalFilterPrompt;
       if (fetchContextDecision) { // This is the condition for when Nemotron generates a structured response
         filterSystemPromptToUse = structuredResponseFilterPrompt;
