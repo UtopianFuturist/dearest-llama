@@ -612,15 +612,27 @@ class BaseBot {
               // A score of 0 is neutral. Negative scores are < 0.
               if (sentimentResult.score <= 0) {
                 this.userBlocklist.add(postAuthorHandle);
-                console.log(`[Monitor] User @${postAuthorHandle} added to blocklist due to !STOP command with non-positive sentiment.`);
-                // Do not reply or process further.
-                // We could optionally send a confirmation, but requirement is to "not respond to them further".
-                // Marking as replied to prevent any other processing path for this specific post.
-                this.repliedPosts.add(notif.uri);
+                const stopMessage = "You have been added to my blocklist and will no longer receive messages from me. You can use the `!RESUME` command if you change your mind.";
+                console.log(`[Monitor] User @${postAuthorHandle} added to blocklist due to !STOP command with non-positive sentiment. Score: ${sentimentResult.score}`);
+
+                // Send confirmation message about being blocked and how to resume
+                const tempPostForStopReply = {
+                  uri: notif.uri,
+                  cid: notif.cid,
+                  author: notif.author,
+                  record: {
+                    reply: {
+                      root: { uri: notif.record?.reply?.root?.uri || notif.uri, cid: notif.record?.reply?.root?.cid || notif.cid },
+                      parent: { uri: notif.uri, cid: notif.cid }
+                    }
+                  }
+                };
+                await this.postReply(tempPostForStopReply, stopMessage);
+                this.repliedPosts.add(notif.uri); // Mark as replied
                 continue;
               } else {
-                console.log(`[Monitor] User @${postAuthorHandle} issued !STOP, but sentiment was positive (${sentimentResult.score}). Not adding to blocklist, but will not reply to this specific !STOP message.`);
-                // Still, do not process this '!STOP' message for a normal reply.
+                console.log(`[Monitor] User @${postAuthorHandle} issued !STOP, but sentiment was positive (${sentimentResult.score}). Not adding to blocklist, and not replying to this specific !STOP message.`);
+                // Still, do not process this '!STOP' message for a normal reply, and don't send any confirmation.
                 this.repliedPosts.add(notif.uri);
                 continue;
               }
@@ -630,6 +642,58 @@ class BaseBot {
             if (this.userBlocklist.has(postAuthorHandle)) {
               console.log(`[Monitor] User @${postAuthorHandle} is on the blocklist. Ignoring their message: ${notif.uri}`);
               this.repliedPosts.add(notif.uri); // Mark as "handled" to prevent accidental processing
+              continue;
+            }
+
+            // Check for !HELP command
+            if (postTextContent.toLowerCase().trim() === '!help') {
+              console.log(`[Monitor] !HELP command detected from @${postAuthorHandle}.`);
+              const helpMessage = "Available commands:\n" +
+                                  "- `!STOP`: Ask me to stop sending you messages. I'll stop if your message seems negative or neutral.\n" +
+                                  "- `!RESUME`: Ask me to start sending you messages again if you previously used `!STOP`.\n" +
+                                  "- `!HELP`: Show this help message.";
+              // Construct a temporary post object for the postReply method
+              const tempPostForHelpReply = {
+                uri: notif.uri,
+                cid: notif.cid,
+                author: notif.author,
+                record: { // Mock just enough of the record for postReply to work
+                  reply: { // Ensure it's treated as a reply to the help request
+                    root: { uri: notif.record?.reply?.root?.uri || notif.uri, cid: notif.record?.reply?.root?.cid || notif.cid },
+                    parent: { uri: notif.uri, cid: notif.cid }
+                  }
+                }
+              };
+              await this.postReply(tempPostForHelpReply, helpMessage);
+              this.repliedPosts.add(notif.uri); // Mark as replied
+              continue;
+            }
+
+            // Check for !RESUME command
+            if (postTextContent.toLowerCase().trim() === '!resume') {
+              console.log(`[Monitor] !RESUME command detected from @${postAuthorHandle}.`);
+              let resumeMessage = "";
+              if (this.userBlocklist.has(postAuthorHandle)) {
+                this.userBlocklist.delete(postAuthorHandle);
+                resumeMessage = "Welcome back! You will now receive messages from me again.";
+                console.log(`[Monitor] User @${postAuthorHandle} removed from blocklist.`);
+              } else {
+                resumeMessage = "Thanks for checking in! You were not on my blocklist.";
+                console.log(`[Monitor] User @${postAuthorHandle} issued !RESUME but was not on blocklist.`);
+              }
+              const tempPostForResumeReply = {
+                uri: notif.uri,
+                cid: notif.cid,
+                author: notif.author,
+                record: {
+                  reply: {
+                    root: { uri: notif.record?.reply?.root?.uri || notif.uri, cid: notif.record?.reply?.root?.cid || notif.cid },
+                    parent: { uri: notif.uri, cid: notif.cid }
+                  }
+                }
+              };
+              await this.postReply(tempPostForResumeReply, resumeMessage);
+              this.repliedPosts.add(notif.uri); // Mark as replied
               continue;
             }
 
@@ -4307,17 +4371,25 @@ async function runStopCommandTests(botInstance) {
 
   console.log(`\nTest 1: Simulating message from @${notif1.author.handle}: "${notif1.record.text}"`);
   // Simulate the relevant part of the monitor loop
+  // For these tests, we'll directly check conditions and call blocklist/reply logic
+  // rather than fully replicating the monitor's notification iteration.
+
+  // Test Case 1: !STOP with negative sentiment
+  console.log(`\nTest 1: Simulating message from @${notif1.author.handle}: "${notif1.record.text}"`);
   if (notif1.record.text.toLowerCase().includes('!stop')) {
     const sentimentResult = testBot.sentimentAnalyzer.analyze(notif1.record.text);
+    console.log(`Test 1: Sentiment score: ${sentimentResult.score}`);
     if (sentimentResult.score <= 0) {
       testBot.userBlocklist.add(notif1.author.handle);
-      console.log(`Test 1: @${notif1.author.handle} ADDED to blocklist (Sentiment: ${sentimentResult.score})`);
+      console.log(`Test 1: @${notif1.author.handle} ADDED to blocklist.`);
+      // Simulate sending the !STOP confirmation message
+      const stopConfirmMsg = `Simulated reply to ${notif1.author.handle}: You have been added to my blocklist... You can use !RESUME...`;
+      console.log(stopConfirmMsg);
     } else {
-      console.log(`Test 1: @${notif1.author.handle} NOT added to blocklist (Sentiment: ${sentimentResult.score})`);
+      console.log(`Test 1: @${notif1.author.handle} NOT added to blocklist.`);
     }
   }
-  console.log(`Test 1: Blocklist contains @${notif1.author.handle}: ${testBot.userBlocklist.has(notif1.author.handle)}`);
-
+  console.log(`Test 1: Blocklist contains @${notif1.author.handle}: ${testBot.userBlocklist.has(notif1.author.handle)} (Expected: true)`);
 
   // Test Case 2: !STOP with neutral sentiment
   let notif2 = JSON.parse(JSON.stringify(mockNotificationBase));
@@ -4328,15 +4400,17 @@ async function runStopCommandTests(botInstance) {
   console.log(`\nTest 2: Simulating message from @${notif2.author.handle}: "${notif2.record.text}"`);
   if (notif2.record.text.toLowerCase().includes('!stop')) {
     const sentimentResult = testBot.sentimentAnalyzer.analyze(notif2.record.text);
+    console.log(`Test 2: Sentiment score: ${sentimentResult.score}`);
     if (sentimentResult.score <= 0) {
       testBot.userBlocklist.add(notif2.author.handle);
-      console.log(`Test 2: @${notif2.author.handle} ADDED to blocklist (Sentiment: ${sentimentResult.score})`);
+      console.log(`Test 2: @${notif2.author.handle} ADDED to blocklist.`);
+      const stopConfirmMsg = `Simulated reply to ${notif2.author.handle}: You have been added to my blocklist... You can use !RESUME...`;
+      console.log(stopConfirmMsg);
     } else {
-      console.log(`Test 2: @${notif2.author.handle} NOT added to blocklist (Sentiment: ${sentimentResult.score})`);
+      console.log(`Test 2: @${notif2.author.handle} NOT added to blocklist.`);
     }
   }
-  console.log(`Test 2: Blocklist contains @${notif2.author.handle}: ${testBot.userBlocklist.has(notif2.author.handle)}`);
-
+  console.log(`Test 2: Blocklist contains @${notif2.author.handle}: ${testBot.userBlocklist.has(notif2.author.handle)} (Expected: true)`);
 
   // Test Case 3: !STOP with positive sentiment
   let notif3 = JSON.parse(JSON.stringify(mockNotificationBase));
@@ -4345,19 +4419,20 @@ async function runStopCommandTests(botInstance) {
   notif3.uri = "at://did:plc:test/app.bsky.feed.post/posstop";
 
   console.log(`\nTest 3: Simulating message from @${notif3.author.handle}: "${notif3.record.text}"`);
-    if (notif3.record.text.toLowerCase().includes('!stop')) {
+  if (notif3.record.text.toLowerCase().includes('!stop')) {
     const sentimentResult = testBot.sentimentAnalyzer.analyze(notif3.record.text);
+    console.log(`Test 3: Sentiment score: ${sentimentResult.score}`);
     if (sentimentResult.score <= 0) {
       testBot.userBlocklist.add(notif3.author.handle);
-      console.log(`Test 3: @${notif3.author.handle} ADDED to blocklist (Sentiment: ${sentimentResult.score})`);
+      console.log(`Test 3: @${notif3.author.handle} ADDED to blocklist.`);
+      // Should not send !RESUME info if not blocking.
     } else {
-      console.log(`Test 3: @${notif3.author.handle} NOT added to blocklist (Sentiment: ${sentimentResult.score})`);
+      console.log(`Test 3: @${notif3.author.handle} NOT added to blocklist. Message ignored.`);
     }
   }
-  console.log(`Test 3: Blocklist contains @${notif3.author.handle}: ${testBot.userBlocklist.has(notif3.author.handle)}`);
+  console.log(`Test 3: Blocklist contains @${notif3.author.handle}: ${testBot.userBlocklist.has(notif3.author.handle)} (Expected: false)`);
 
-
-  // Test Case 4: Message from a blocklisted user (userNegativeStop.test)
+  // Test Case 4: Message from a blocklisted user (userNegativeStop.test should be on blocklist from Test 1)
   let notif4 = JSON.parse(JSON.stringify(mockNotificationBase));
   notif4.author = { handle: "userNegativeStop.test", did: "did:plc:negativestop" }; // Same as Test 1 user
   notif4.record.text = "Hello again";
@@ -4373,8 +4448,7 @@ async function runStopCommandTests(botInstance) {
     console.log(`Test 4: Message from @${notif4.author.handle} contains !STOP and would be handled by stop logic.`);
     processed4 = false;
   }
-  console.log(`Test 4: Message processed (should be false if blocklisted): ${processed4}`);
-
+  console.log(`Test 4: Message processed (should be false if blocklisted): ${processed4} (Expected: false)`);
 
   // Test Case 5: Normal message from a non-blocklisted user
   let notif5 = JSON.parse(JSON.stringify(mockNotificationBase));
@@ -4383,19 +4457,82 @@ async function runStopCommandTests(botInstance) {
   notif5.uri = "at://did:plc:test/app.bsky.feed.post/normalmsg";
 
   console.log(`\nTest 5: Simulating message from normal user @${notif5.author.handle}: "${notif5.record.text}"`);
-  let processed5 = true;
+  let processed5 = true; // Assuming it would be processed if not caught by block/stop
   if (testBot.userBlocklist.has(notif5.author.handle)) {
     console.log(`Test 5: Message from @${notif5.author.handle} IGNORED (user is blocklisted).`);
     processed5 = false;
   } else if (notif5.record.text.toLowerCase().includes('!stop')) {
     console.log(`Test 5: Message from @${notif5.author.handle} contains !STOP and would be handled by stop logic.`);
     processed5 = false;
+  } else if (notif5.record.text.toLowerCase().trim() === '!help') {
+    console.log(`Test 5: Message from @${notif5.author.handle} is !HELP. Help message would be sent.`);
+    const helpMsg = "Simulated reply to userNormal.test: Available commands...";
+    console.log(helpMsg);
+    processed5 = false; // For this test, consider it "handled" by help
+  } else if (notif5.record.text.toLowerCase().trim() === '!resume') {
+    console.log(`Test 5: Message from @${notif5.author.handle} is !RESUME. Resume logic would run.`);
+     processed5 = false; // For this test, consider it "handled" by resume
   }
-  console.log(`Test 5: Message processed (should be true): ${processed5}`);
+  console.log(`Test 5: Message processed for normal reply (should be true if not a command): ${processed5} (Expected: true for "Hi bot")`);
 
-  console.log("\n--- !STOP Command Tests Complete ---");
-  // Reset blocklist if needed for other tests or if bot instance is reused.
-  // testBot.userBlocklist.clear();
+  // Test Case 6: !HELP command
+  let notif6 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif6.author = { handle: "userHelp.test", did: "did:plc:helpuser" };
+  notif6.record.text = "!help";
+  notif6.uri = "at://did:plc:test/app.bsky.feed.post/helpcmd";
+
+  console.log(`\nTest 6: Simulating message from @${notif6.author.handle}: "${notif6.record.text}"`);
+  if (notif6.record.text.toLowerCase().trim() === '!help') {
+    const helpText = "Available commands:\n- `!STOP`...\n- `!RESUME`...\n- `!HELP`...";
+    console.log(`Test 6: Bot would reply with: "${helpText}"`);
+  }
+  console.log("Test 6: Help command simulation complete.");
+
+  // Test Case 7: !RESUME command for a blocklisted user (userNeutralStop.test should be blocklisted from Test 2)
+  let notif7 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif7.author = { handle: "userNeutralStop.test", did: "did:plc:neutralstop" };
+  notif7.record.text = "!resume";
+  notif7.uri = "at://did:plc:test/app.bsky.feed.post/resumecmd_blocked";
+
+  console.log(`\nTest 7: Simulating !RESUME from blocklisted user @${notif7.author.handle}`);
+  console.log(`Test 7: Before RESUME, blocklist contains @${notif7.author.handle}: ${testBot.userBlocklist.has(notif7.author.handle)} (Expected: true)`);
+  if (notif7.record.text.toLowerCase().trim() === '!resume') {
+    if (testBot.userBlocklist.has(notif7.author.handle)) {
+      testBot.userBlocklist.delete(notif7.author.handle);
+      console.log(`Test 7: @${notif7.author.handle} REMOVED from blocklist.`);
+      const resumeConfirmMsg = `Simulated reply to ${notif7.author.handle}: Welcome back! ...`;
+      console.log(resumeConfirmMsg);
+    } else {
+      console.log(`Test 7: @${notif7.author.handle} was NOT on blocklist.`);
+    }
+  }
+  console.log(`Test 7: After RESUME, blocklist contains @${notif7.author.handle}: ${testBot.userBlocklist.has(notif7.author.handle)} (Expected: false)`);
+
+  // Test Case 8: !RESUME command for a user NOT on the blocklist
+  let notif8 = JSON.parse(JSON.stringify(mockNotificationBase));
+  notif8.author = { handle: "userNeverBlocked.test", did: "did:plc:neverblocked" };
+  notif8.record.text = "!resume";
+  notif8.uri = "at://did:plc:test/app.bsky.feed.post/resumecmd_notblocked";
+
+  console.log(`\nTest 8: Simulating !RESUME from non-blocklisted user @${notif8.author.handle}`);
+  console.log(`Test 8: Before RESUME, blocklist contains @${notif8.author.handle}: ${testBot.userBlocklist.has(notif8.author.handle)} (Expected: false)`);
+  if (notif8.record.text.toLowerCase().trim() === '!resume') {
+    if (testBot.userBlocklist.has(notif8.author.handle)) {
+      // This path should not be taken for this test case
+      testBot.userBlocklist.delete(notif8.author.handle);
+      console.log(`Test 8: @${notif8.author.handle} REMOVED from blocklist (UNEXPECTED).`);
+    } else {
+      console.log(`Test 8: @${notif8.author.handle} was NOT on blocklist. Bot would inform them.`);
+      const notBlockedMsg = `Simulated reply to ${notif8.author.handle}: Thanks for checking in! You were not on my blocklist.`;
+      console.log(notBlockedMsg);
+    }
+  }
+  console.log(`Test 8: After RESUME, blocklist contains @${notif8.author.handle}: ${testBot.userBlocklist.has(notif8.author.handle)} (Expected: false)`);
+
+  console.log("\n--- Command Tests Complete ---");
+  // Clear blocklist after tests to not interfere with actual bot operation if run multiple times or if bot continues.
+  testBot.userBlocklist.clear();
+  console.log("Blocklist cleared for subsequent operations.");
 }
 
 
