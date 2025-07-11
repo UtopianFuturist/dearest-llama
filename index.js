@@ -4183,15 +4183,43 @@ Ensure your entire response is ONLY the JSON object.`;
   }
 
   async shouldAttemptProactiveReply(post, userHandle) {
-    // Placeholder: Implement actual logic to decide if a post is suitable for a proactive reply.
-    // This could involve checking post content, keywords, sentiment, age of post, etc.
-    // For now, let's log and return false to avoid actual replies during scaffolding.
-    console.log(`[shouldAttemptProactiveReply] Evaluating post ${post.uri} from @${userHandle}. Currently returning false.`);
-    // Example: check if post text is not too short and does not contain 'no bot'
-    // if (post.record.text && post.record.text.length > 10 && !post.record.text.toLowerCase().includes('no bot')) {
-    //   return true;
-    // }
-    return false;
+    // Decide if a post from a followed user is suitable for a proactive reply.
+    const botHandle = this.config.BLUESKY_IDENTIFIER;
+    const postText = post.record.text ? post.record.text.toLowerCase() : "";
+    const postUri = post.uri;
+
+    // Rule: Do not reply to replies unless the bot is specifically mentioned.
+    if (post.record.reply) {
+      const mentionsBot = postText.includes(`@${botHandle.toLowerCase()}`);
+      if (mentionsBot) {
+        console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is a reply that MENTIONS the bot. Eligible for proactive consideration.`);
+        // Further checks (content, sentiment, etc.) would go here.
+        // For now, let's say it's eligible based on this rule.
+      } else {
+        // console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is a reply to someone else and does NOT mention the bot. Skipping.`);
+        return false; // Do not reply to replies not mentioning the bot
+      }
+    } else {
+      // It's an original post by the user we follow (not a reply to anyone).
+      // These are generally candidates for proactive engagement.
+      console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is an ORIGINAL post. Eligible for proactive consideration.`);
+      // Further checks (content, keywords, sentiment, age) would go here.
+    }
+
+    // TODO: Implement more sophisticated checks:
+    // - Analyze post content for keywords, topics of interest, questions, sentiment.
+    // - Check post age (e.g., avoid replying to very old posts unless specifically relevant).
+    // - Avoid replying if post text is too short or seems trivial.
+    // - Check for "no bots" or similar phrases.
+
+    // For now, if it passes the reply/mention check, let's consider it (but sendProactiveReply will still return false)
+    // This allows us to see this part of the logic flow in logs.
+    // console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is deemed provisionally ELIGIBLE for proactive reply by current rules.`);
+
+    // Final decision point for this function (still overridden by sendProactiveReply returning false globally for now)
+    // For testing the flow of this function, let's return true if it reaches here.
+    // The actual reply sending is still globally disabled in sendProactiveReply.
+    return true;
   }
 
   async sendProactiveReply(post, userHandle) {
