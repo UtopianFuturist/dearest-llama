@@ -1118,8 +1118,9 @@ class LlamaBot extends BaseBot {
       let nemotronResponseText = data.choices[0].message.content.trim();
       console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${nemotronResponseText}"`);
 
-      let nemotronResponseText = data.choices[0].message.content.trim();
-      console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${nemotronResponseText}"`);
+      // The following two lines were a duplicate declaration and log, causing a SyntaxError. They have been removed.
+      // let nemotronResponseText = data.choices[0].message.content.trim();
+      // console.log(`[LlamaBot.generateStandalonePostFromContext] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${nemotronResponseText}"`);
 
       // Now, filter this response using Gemma
       const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
