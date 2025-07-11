@@ -1519,6 +1519,92 @@ class LlamaBot extends BaseBot {
     try { // START OF MAIN TRY BLOCK
       console.log(`[LlamaBot.generateResponse] Entering try block for post URI: ${post.uri}, Text: "${post.record.text ? post.record.text.substring(0, 50) + '...' : 'N/A'}"`);
       const userQueryText = post.record.text || ""; // The current user's message text, ensure it's a string
+      const lowerUserQueryTextForGenerateCheck = userQueryText.toLowerCase();
+
+      // === High-priority check for "generate image" type commands ===
+      const generateKeywords = ["generate", "create", "make", "draw", "sketch"];
+      const imageNounKeywords = ["image", "picture", "photo", "art", "artwork", "drawing", "sketch", "painting"];
+
+      let isGenerateImageRequest = false;
+      let generateKeywordUsed = "";
+      let imageNounUsed = "";
+
+      for (const gk of generateKeywords) {
+        if (lowerUserQueryTextForGenerateCheck.includes(gk)) {
+          generateKeywordUsed = gk;
+          break;
+        }
+      }
+      if (generateKeywordUsed) {
+        for (const ik of imageNounKeywords) {
+          if (lowerUserQueryTextForGenerateCheck.includes(ik)) {
+            imageNounUsed = ik;
+            isGenerateImageRequest = true;
+            break;
+          }
+        }
+      }
+
+      // Check if the query *only* contains "generate" without an image noun, but implies it (e.g. "generate a cat")
+      // This is a heuristic. A more robust solution might involve NLP or more complex keyword analysis.
+      // For now, if "generate" is present but no explicit image noun, we'll be conservative and let it pass to intent classification.
+      // The original request was "The word 'generate' in a post or reply should always trigger an image generation call"
+      // This implies if "generate" is there, it's likely an image request. Let's refine this.
+      // If "generate" is present, and it's not part of a known non-image command (e.g. "generate text", "generate response")
+      // then assume it's for an image.
+
+      if (generateKeywordUsed && !lowerUserQueryTextForGenerateCheck.includes("generate text") && !lowerUserQueryTextForGenerateCheck.includes("generate response") && !lowerUserQueryTextForGenerateCheck.includes("generate post")) {
+        // If an image noun is also present, it's definitely an image generation request.
+        // If no explicit image noun, but "generate" is there and it's not for text/response,
+        // we'll also treat it as an image generation request.
+        isGenerateImageRequest = true;
+      }
+
+
+      if (isGenerateImageRequest) {
+        console.log(`[GenerateImageDirect] Detected image generation request. Query: "${userQueryText}"`);
+        let imagePrompt = userQueryText;
+        // Attempt to strip "generate an image of", "create a picture of", etc.
+        const patternsToRemove = [];
+        generateKeywords.forEach(gk => {
+          imageNounKeywords.forEach(ik => {
+            patternsToRemove.push(new RegExp(`${gk}\\s+(an|a|the)?\\s*${ik}\\s+(of|about)?`, 'i'));
+          });
+          // Pattern for just "generate [prompt]"
+          patternsToRemove.push(new RegExp(`${gk}\\s+`, 'i'));
+        });
+
+        let cleanedPrompt = imagePrompt;
+        for (const pattern of patternsToRemove) {
+          cleanedPrompt = cleanedPrompt.replace(pattern, "").trim();
+        }
+        // Further clean common bot mentions or leading/trailing prepositions
+        cleanedPrompt = cleanedPrompt.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").replace(/^(of|about)\s+/i, "").trim();
+
+
+        if (!cleanedPrompt) {
+            console.warn("[GenerateImageDirect] Extracted prompt is empty after cleaning. Original:", userQueryText);
+            await this.postReply(post, "I think you want me to generate an image, but I couldn't understand what you want an image of. Please try rephrasing!");
+            return null;
+        }
+
+        console.log(`[GenerateImageDirect] Extracted prompt: "${cleanedPrompt}"`);
+
+        const scoutResult = await this.processImagePromptWithScout(cleanedPrompt); // Use the cleaned prompt
+        if (!scoutResult.safe) {
+          await this.postReply(post, scoutResult.reply_text || "I can't generate an image based on that request due to safety guidelines.");
+          return null;
+        }
+
+        const imageBase64 = await this.generateImage(scoutResult.image_prompt);
+        if (imageBase64) {
+          const altText = await this.describeImageWithScout(imageBase64) || `Generated image for: ${scoutResult.image_prompt}`;
+          await this.postReply(post, `Here's the image you asked me to generate for "${scoutResult.image_prompt}":`, imageBase64, altText);
+        } else {
+          await this.postReply(post, `I tried to generate an image for "${scoutResult.image_prompt}", but it didn't work out this time.`);
+        }
+        return null; // Request handled
+      }
 
       // Keywords for image-based article search
       const imageArticleSearchKeywords = [
