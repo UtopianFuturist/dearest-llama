@@ -1275,7 +1275,7 @@ class LlamaBot extends BaseBot {
               { role: "system", content: standardFilterSystemPrompt },
               { role: "user", content: nemotronResponseText } // textToFilter is nemotronResponseText
             ],
-            temperature: 0.1, max_tokens: 100, stream: false
+            temperature: 0.0, max_tokens: 100, stream: false // Temperature changed to 0.0
           }),
           customTimeout: 60000 // 60s timeout
         });
@@ -1731,7 +1731,7 @@ Do not make up information not present in the search results. Keep the response 
                   { role: "system", content: standardFilterSystemPromptForWeb },
                   { role: "user", content: synthesizedResponse }
                 ],
-                temperature: 0.1, max_tokens: 100, stream: false
+                temperature: 0.0, max_tokens: 100, stream: false // Temperature changed to 0.0
               }),
               customTimeout: 60000 // 60s
             });
@@ -1856,7 +1856,7 @@ Do not make up information not present in the search results. Keep the response 
                     { role: "system", content: standardFilterSystemPromptForWebPage },
                     { role: "user", content: synthesizedResponse }
                   ],
-                  temperature: 0.1, max_tokens: 100, stream: false
+                temperature: 0.0, max_tokens: 100, stream: false // Temperature changed to 0.0
                 }),
                 customTimeout: 60000 // 60s
               });
@@ -2037,7 +2037,7 @@ Do not make up information not present in the search results. Keep the response 
                     { role: "system", content: standardFilterSystemPromptForSearchHistory },
                     { role: "user", content: baseResponseText }
                   ],
-                  temperature: 0.1, max_tokens: 100, stream: false
+                temperature: 0.0, max_tokens: 100, stream: false // Temperature changed to 0.0
                 }),
                 customTimeout: 60000 // 60s
             });
@@ -2347,7 +2347,7 @@ Do not make up information not present in the search results. Keep the response 
                 { role: "system", content: universalMinimalFilterPrompt },
                 { role: "user", content: responseText }
               ],
-              temperature: 0.1, max_tokens: 150, // Increased max_tokens slightly for this specific response
+              temperature: 0.0, max_tokens: 150, // Temperature changed to 0.0
               stream: false
             }),
             customTimeout: 30000 // 30s
@@ -2385,7 +2385,7 @@ Do not make up information not present in the search results. Keep the response 
                 { role: "system", content: standardFilterSystemPromptForUnsafeWeb },
                 { role: "user", content: unsafeQueryResponse }
               ],
-              temperature: 0.1, max_tokens: 100, stream: false
+              temperature: 0.0, max_tokens: 100, stream: false // Temperature changed to 0.0
             }),
             customTimeout: 30000 // 30s
           });
@@ -2723,7 +2723,7 @@ ${baseInstruction}`;
             { role: "system", content: universalMinimalFilterPrompt }, // Using the Llama 3.2 Vision style prompt
             { role: "user", content: initialResponse }
           ],
-          temperature: 0.1,
+          temperature: 0.0, // Temperature changed to 0.0
           max_tokens: 450,
           stream: false
         }),
