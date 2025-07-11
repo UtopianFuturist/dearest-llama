@@ -4173,7 +4173,7 @@ Ensure your entire response is ONLY the JSON object.`;
 
   async monitorBotFollowingFeed() {
     console.log('[MonitorFollowingFeed] Starting to monitor feeds of followed users.');
-    const MAX_POSTS_PER_USER_FEED = 10; // As per commit
+    const MAX_POSTS_PER_USER_FEED = 5; // Changed from 10 to 5
 
     try {
       if (!this.agent.session) {
@@ -4328,38 +4328,31 @@ Ensure your entire response is ONLY the JSON object.`;
     const postText = post.record.text ? post.record.text.toLowerCase() : "";
     const postUri = post.uri;
 
-    // Rule: Do not reply to replies unless the bot is specifically mentioned.
+    // Rule: Prioritize replies that directly mention the bot.
     if (post.record.reply) {
       const mentionsBot = postText.includes(`@${botHandle.toLowerCase()}`);
       if (mentionsBot) {
-        console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is a reply that MENTIONS the bot. Eligible for proactive consideration.`);
-        // Further checks (content, sentiment, etc.) would go here.
-        // For now, let's say it's eligible based on this rule.
+        console.log(`[shouldAttemptProactiveReply] Post ${postUri} (reply) from @${userHandle} MENTIONS the bot. HIGHEST priority for proactive consideration.`);
+        // This is a high-priority candidate. Further checks (content, sentiment) could still apply here
+        // but the fact it's a direct mention in a reply makes it very eligible.
+        return true; // Eligible for reply
       } else {
-        // console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is a reply to someone else and does NOT mention the bot. Skipping.`);
-        return false; // Do not reply to replies not mentioning the bot
+        // console.log(`[shouldAttemptProactiveReply] Post ${postUri} (reply) from @${userHandle} does NOT mention the bot. Skipping.`);
+        return false; // Do not proactively reply to replies not mentioning the bot.
       }
     } else {
       // It's an original post by the user we follow (not a reply to anyone).
-      // These are generally candidates for proactive engagement.
-      console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is an ORIGINAL post. Eligible for proactive consideration.`);
+      // These are standard candidates for proactive engagement.
+      console.log(`[shouldAttemptProactiveReply] Post ${postUri} (original) from @${userHandle} is an ORIGINAL post. Standard priority for proactive consideration.`);
       // Further checks (content, keywords, sentiment, age) would go here.
+      // For now, original posts from followed users are considered eligible.
+      return true; // Eligible for reply
     }
 
-    // TODO: Implement more sophisticated checks:
-    // - Analyze post content for keywords, topics of interest, questions, sentiment.
-    // - Check post age (e.g., avoid replying to very old posts unless specifically relevant).
-    // - Avoid replying if post text is too short or seems trivial.
-    // - Check for "no bots" or similar phrases.
-
-    // For now, if it passes the reply/mention check, let's consider it (but sendProactiveReply will still return false)
-    // This allows us to see this part of the logic flow in logs.
-    // console.log(`[shouldAttemptProactiveReply] Post ${postUri} from @${userHandle} is deemed provisionally ELIGIBLE for proactive reply by current rules.`);
-
-    // Final decision point for this function (still overridden by sendProactiveReply returning false globally for now)
-    // For testing the flow of this function, let's return true if it reaches here.
-    // The actual reply sending is still globally disabled in sendProactiveReply.
-    return true;
+    // Note: The actual sending of a reply is still controlled by sendProactiveReply and global limits.
+    // This function just determines eligibility.
+    // More sophisticated checks (content, sentiment, keywords, post age, "no bots" phrases)
+    // would be implemented here if needed, before returning true.
   }
 
   async sendProactiveReply(post, userHandle) {
