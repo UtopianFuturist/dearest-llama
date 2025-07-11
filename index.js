@@ -239,10 +239,14 @@ class BaseBot {
         depth: 1,
         parentHeight: 1
       });
-      if (thread.thread.replies && thread.thread.replies.length > 0) {
-        const hasReply = thread.thread.replies.some(reply => 
-          reply.post.author.handle === this.config.BLUESKY_IDENTIFIER
-        );
+      if (thread?.thread?.replies && thread.thread.replies.length > 0) {
+        const hasReply = thread.thread.replies.some(reply => {
+          if (reply && reply.post && reply.post.author && reply.post.author.handle) {
+            return reply.post.author.handle === this.config.BLUESKY_IDENTIFIER;
+          }
+          console.warn(`[hasAlreadyReplied] Encountered reply with missing post, author, or handle for post.uri: ${post.uri}. Reply object:`, reply);
+          return false; // Treat as not a reply from the bot if data is incomplete
+        });
         if (hasReply) this.repliedPosts.add(post.uri);
         console.log(`Has existing reply: ${hasReply}`);
         return hasReply;
@@ -2645,82 +2649,49 @@ ${baseInstruction}`;
       }
       let initialResponse = data.choices[0].message.content;
       console.log(`[LlamaBot.generateResponse] Initial response from nvidia/llama-3.3-nemotron-super-49b-v1: "${initialResponse}"`);
+      console.log(`[LlamaBot.generateResponse] Length of initialResponse (from Nemotron) before sending to Gemma filter: ${initialResponse.length} characters.`);
 
-      console.log(`NIM CALL START: filterResponse for model meta/llama-4-scout-17b-16e-instruct`);
-      const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-        body: JSON.stringify({
-          model: 'meta/llama-4-scout-17b-16e-instruct',
-          messages: [
-            { role: "system", content: "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens)." },
-            { role: "user", content: initialResponse }
-          ],
-          temperature: 0.1,
-          max_tokens: 450,
-          stream: false
-        }),
-        customTimeout: 60000 // 60s for filtering
-      });
-      console.log(`NIM CALL END: filterResponse for model meta/llama-4-scout-17b-16e-instruct - Status: ${filterResponse.status}`);
-      if (!filterResponse.ok) {
-        const errorText = await filterResponse.text();
-        console.error(`Nvidia NIM API error (filter model) (${filterResponse.status}) - Text: ${errorText}. Falling back to basic formatter.`);
-        initialResponse = this.basicFormatFallback(initialResponse); // Apply basic formatting on fallback
-        // Continue with initialResponse now that it's basic formatted
-      } else {
-        const filterData = await filterResponse.json();
-        if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
-          initialResponse = filterData.choices[0].message.content; // Use Scout's formatted response
-        } else {
-          console.error('Unexpected response format from Nvidia NIM (filter model):', JSON.stringify(filterData), '. Falling back to basic formatter.');
-          initialResponse = this.basicFormatFallback(initialResponse); // Apply basic formatting on fallback
-        }
-      }
-      // At this point, initialResponse holds Nemotron's direct output.
-      // Filter it with Gemma.
-      const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+      // Using Gemma for filtering instead of Scout
+      const filterModelId = 'google/gemma-3n-e4b-it';
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
       const filterSystemPromptForGenerateResponse = "ATTENTION: The input text from another AI may be structured with special bracketed labels like \"[SUMMARY FINDING WITH INVITATION]\" and \"[DETAILED ANALYSIS POINT N]\". PRESERVE THESE BRACKETED LABELS EXACTLY AS THEY APPEAR.\n\nYour task is to perform MINIMAL formatting on the text *within each section defined by these labels*, as if each section were a separate piece of text. For each section:\n1. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY.\n2. Ensure any text content is clean and suitable for a Bluesky post (e.g., under 290 characters per logical section if possible, though final splitting is handled later).\n3. Remove any surrounding quotation marks that make an entire section appear as a direct quote.\n4. Remove any sender attributions like 'Bot:' or 'Nemotron says:'.\n5. Remove any double asterisks (`**`) used for emphasis.\n6. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear.\n7. Ensure any internal numbered or bulleted lists within a \"[DETAILED ANALYSIS POINT N]\" section are well-formatted and would not be awkwardly split if that section became a single post.\n\nDO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change the overall structure or the bracketed labels. Output the entire processed text, including the preserved labels. This is an internal formatting step; do not mention it. The input text you receive might be long (up to ~870 characters or ~350 tokens).";
 
-      let gemmaFormattedText; // Changed variable name
-      try {
-        console.log(`NIM CALL START: filterResponse (using ${filterModelId}) in generateResponse`);
-        const filterResponse = await fetchWithRetries(endpointUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-          body: JSON.stringify({
-            model: filterModelId,
-            messages: [
-              { role: "system", content: filterSystemPromptForGenerateResponse },
-              { role: "user", content: initialResponse } // initialResponse is Nemotron's output
-            ],
-            temperature: 0.1, max_tokens: 450, stream: false
-          }),
-          customTimeout: 60000 // 60s
-        });
-        console.log(`NIM CALL END: filterResponse (using ${filterModelId}) in generateResponse - Status: ${filterResponse.status}`);
-        if (!filterResponse.ok) {
-          const errorText = await filterResponse.text();
-          console.error(`NIM CALL ERROR: API error ${filterResponse.status} for filter model ${filterModelId} in generateResponse: ${errorText}. Applying basic formatting.`);
-          gemmaFormattedText = this.basicFormatFallback(initialResponse, 870);
+      let gemmaFormattedText;
+      console.log(`NIM CALL START: filterResponse (using ${filterModelId}) in generateResponse`);
+      const gemmaFilterResponse = await fetchWithRetries(endpointUrl, { // Renamed variable for clarity
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: filterModelId, // Switched to Gemma
+          messages: [
+            { role: "system", content: filterSystemPromptForGenerateResponse }, // Re-using the detailed prompt
+            { role: "user", content: initialResponse }
+          ],
+          temperature: 0.1,
+          max_tokens: 450, // Kept max_tokens, Gemma should handle this.
+          stream: false
+        }),
+        customTimeout: 60000 // Kept 60s timeout, assuming Gemma is robust.
+      });
+      console.log(`NIM CALL END: filterResponse (using ${filterModelId}) in generateResponse - Status: ${gemmaFilterResponse.status}`);
+
+      if (!gemmaFilterResponse.ok) {
+        const errorText = await gemmaFilterResponse.text();
+        console.error(`Nvidia NIM API error (filter model ${filterModelId}) (${gemmaFilterResponse.status}) - Text: ${errorText}. Falling back to basic formatter.`);
+        gemmaFormattedText = this.basicFormatFallback(initialResponse, 870); // Basic format on Nemotron's output
+      } else {
+        const gemmaFilterData = await gemmaFilterResponse.json();
+        if (gemmaFilterData.choices && gemmaFilterData.choices.length > 0 && gemmaFilterData.choices[0].message && gemmaFilterData.choices[0].message.content) {
+          gemmaFormattedText = gemmaFilterData.choices[0].message.content;
+          console.log(`[LlamaBot.generateResponse] Filtered response from ${filterModelId}: "${gemmaFormattedText.substring(0,200)}..."`);
         } else {
-          const filterData = await filterResponse.json();
-          if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
-            gemmaFormattedText = filterData.choices[0].message.content;
-            console.log(`[LlamaBot.generateResponse] Filtered response from ${filterModelId}: "${gemmaFormattedText.substring(0,200)}..."`);
-          } else {
-            console.error(`NIM CALL ERROR: Unexpected response format from filter model ${filterModelId} in generateResponse: ${JSON.stringify(filterData)}. Applying basic formatting.`);
-            gemmaFormattedText = this.basicFormatFallback(initialResponse, 870);
-          }
+          console.error(`Unexpected response format from Nvidia NIM (filter model ${filterModelId}):`, JSON.stringify(gemmaFilterData), '. Falling back to basic formatter.');
+          gemmaFormattedText = this.basicFormatFallback(initialResponse, 870); // Basic format on Nemotron's output
         }
-      } catch (error) {
-        console.error(`NIM CALL EXCEPTION: Error in filtering step of generateResponse with model ${filterModelId}: ${error.message}. Applying basic formatting.`);
-        gemmaFormattedText = this.basicFormatFallback(initialResponse, 870); // Allow longer for multi-part
       }
-      // Now gemmaFormattedText holds the result of filtering by Gemma, or basicFormatFallback.
-      const scoutFormattedText = gemmaFormattedText; // Keep variable name for subsequent logic for minimal diff
-      console.log(`[LlamaBot.generateResponse] Final formatted text for processing: "${scoutFormattedText.substring(0,200)}..."`);
+
+      const scoutFormattedText = gemmaFormattedText; // Using existing variable name for minimal diff in subsequent logic
+      console.log(`[LlamaBot.generateResponse] Final formatted text for processing (after ${filterModelId} filter): "${scoutFormattedText.substring(0,200)}..."`);
 
       // Attempt to parse structured response if profile analysis was done
       // Note: an image generated for the *initial* query that leads to a summary/details flow.
