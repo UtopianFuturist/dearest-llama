@@ -3730,7 +3730,7 @@ Output a JSON object. Choose ONE of the following intent structures:
   "intent": "giphy_search",
   "search_query": "keywords for GIPHY search"
 }
-7. If the query is asking about the bot's own features, capabilities, how it works, or what it can do:
+7. If the query is asking about the bot's own features, capabilities, how it works, what it can do, its purpose, motivations, 'secret agenda', or general identity:
 {
   "intent": "bot_feature_inquiry"
 }
@@ -3846,7 +3846,24 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
 
     const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
-    const systemPromptContent = "Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about themselves, their posts, their online personality, their Bluesky account, or their life, in a way that their recent Bluesky activity could provide relevant context. Respond with only the word YES or the word NO.";
+    const systemPromptContent = `Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about THE USER THEMSELVES (their own posts, their online personality, their Bluesky account, or their life) where THEIR RECENT BLUESKY ACTIVITY could provide relevant context.
+
+If the query is about the USER'S activity, personality, or how they interact, respond YES.
+Examples of queries that should result in YES:
+- "What do you think of my posts?"
+- "How do I come across online?"
+- "Analyze my recent interactions."
+- "Tell me about my posting habits."
+
+If the query is about the BOT'S identity, features, capabilities, purpose, "secret agenda", or how the BOT works, respond NO.
+Examples of queries that should result in NO:
+- "What's your secret agenda?"
+- "What are you trying to do?"
+- "Tell me about yourself."
+- "What are your capabilities?"
+- "How do you work?"
+
+Respond with only the single word YES or the single word NO.`;
     const userPromptContent = `User query: '${userQueryText}'`;
 
     try {
