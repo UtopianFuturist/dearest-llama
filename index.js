@@ -3947,7 +3947,7 @@ IMPORTANT RULES for "web_search":
 IMPORTANT RULES for "process_url":
 - This intent is for when a user posts a URL and might expect the bot to fetch, summarize, or display its content.
 - Extract the first valid http/https URL found in the query.
-- Do NOT trigger this if the URL is clearly an argument to another command (e.g. `!post+video https://youtube.com/...` should be `admin_command`, not `process_url`. `youtube search for https://youtu.be/...` should be `youtube_search`).
+- Do NOT trigger this if the URL is clearly an argument to another command (e.g. \`!post+video https://youtube.com/...\` should be \`admin_command\`, not \`process_url\`. \`youtube search for https://youtu.be/...\` should be \`youtube_search\`).
 PRIORITIZATION: Admin commands > Specific commands (meme, apod, youtube, giphy) > Past interactions ("you sent me", "we discussed") -> "search_history" (conversation). Bot created/generated image (not direct chat) -> "search_history" (bot_gallery). Generic URL -> "process_url". Factual world question -> "web_search". Bot feature inquiry.
 If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.`;
     // System prompt shortened for diff display
