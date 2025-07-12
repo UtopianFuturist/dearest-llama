@@ -2484,7 +2484,7 @@ Do not make up information not present in the search results. Keep the response 
             try {
                 // Get the last 3 post URIs the bot replied to
                 const recentPostUris = Array.from(this.repliedPosts).slice(-3);
-                const { data: threadViews } = await this.agent.getPostThreads({ uris: recentPostUris });
+                const { data: threadViews } = await this.agent.api.app.bsky.feed.getPostThreads({ uris: recentPostUris });
 
                 if (threadViews && threadViews.threads.length > 0) {
                     const topics = threadViews.threads.map(thread => {
