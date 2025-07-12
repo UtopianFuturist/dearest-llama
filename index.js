@@ -1289,7 +1289,7 @@ class LlamaBot extends BaseBot {
         if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
           const finalResponse = filterData.choices[0].message.content.trim();
           console.log(`[LlamaBot.generateStandalonePostFromContext] Filtered response from ${filterModelId}: "${finalResponse}"`);
-          return finalResponse;
+          return this.basicFormatFallback(finalResponse); // Apply fallback for guaranteed cleanup
         }
         console.error(`NIM CALL ERROR: Unexpected response format from filter model ${filterModelId} in generateStandalonePostFromContext: ${JSON.stringify(filterData)}. Returning Nemotron's direct response (basic formatted).`);
         return this.basicFormatFallback(nemotronResponseText);
@@ -2901,8 +2901,9 @@ ${baseInstruction}`;
         }
       }
 
-      const scoutFormattedText = gemmaFormattedText;
-      console.log(`[LlamaBot.generateResponse] Final formatted text for processing (after ${filterModelIdForGenerateResponse} filter): "${scoutFormattedText.substring(0,200)}..."`);
+      // Ensure final cleanup, especially for asterisks, is always applied.
+      const scoutFormattedText = this.basicFormatFallback(gemmaFormattedText, 870); // Use a higher length limit for multipart posts
+      console.log(`[LlamaBot.generateResponse] Final formatted text for processing (after ${filterModelIdForGenerateResponse} filter and basicFormatFallback): "${scoutFormattedText.substring(0,200)}..."`);
 
       // Attempt to parse structured response if profile analysis was done
       // Note: an image generated for the *initial* query that leads to a summary/details flow.
@@ -3169,13 +3170,16 @@ ${baseInstruction}`;
             if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
                 finalSummaryText = filterData.choices[0].message.content.trim();
             } else {
-                 console.warn(`[handleUserProvidedUrl] Gemma filter for summary was OK but no content. Using Nemotron's direct output (basic formatted).`);
-                 finalSummaryText = this.basicFormatFallback(summaryResponseText);
+                 console.warn(`[handleUserProvidedUrl] Gemma filter for summary was OK but no content. Using Nemotron's direct output.`);
+                 finalSummaryText = summaryResponseText; // Keep unfiltered Nemotron response
             }
         } else {
-            console.error(`[handleUserProvidedUrl] Gemma filter API error for summary. Using Nemotron's direct output (basic formatted).`);
-            finalSummaryText = this.basicFormatFallback(summaryResponseText);
+            console.error(`[handleUserProvidedUrl] Gemma filter API error for summary. Using Nemotron's direct output.`);
+            finalSummaryText = summaryResponseText; // Keep unfiltered Nemotron response
         }
+
+        // Always apply basicFormatFallback to the final text, regardless of which model it came from.
+        const cleanedFinalText = this.basicFormatFallback(finalSummaryText);
 
         // Create a link card for the original URL
         const externalEmbed = {
@@ -3195,7 +3199,7 @@ ${baseInstruction}`;
             }
         }
 
-        await this.postReply(post, finalSummaryText, null, null, null, externalEmbed);
+        await this.postReply(post, cleanedFinalText, null, null, null, externalEmbed);
 
       }
       // 4. Other Content Types / Fallback
