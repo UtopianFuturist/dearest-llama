@@ -1920,7 +1920,7 @@ Do not make up information not present in the search results. Keep the response 
               if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
                 if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
-                  await this.postReply(post, filterData.choices[0].message.content.trim());
+                  await this.postReply(post, this.basicFormatFallback(filterData.choices[0].message.content.trim()));
                 } else {
                   await this.postReply(post, this.basicFormatFallback(synthesizedResponse));
                 }
@@ -2116,12 +2116,13 @@ Do not make up information not present in the search results. Keep the response 
             }
 
             // Now, decide whether to embed based on `topMatch` having URI and CID
+            const cleanedFinalText = this.basicFormatFallback(finalResponseText, 870);
             if (matches.length > 0 && matches[0].uri && matches[0].cid) {
                 const foundPostToEmbed = { uri: matches[0].uri, cid: matches[0].cid };
-                await this.postReply(post, finalResponseText, null, null, foundPostToEmbed);
+                await this.postReply(post, cleanedFinalText, null, null, foundPostToEmbed);
             } else {
                 // This branch is for when no match was found, or match was missing uri/cid (fallback to text URL)
-                await this.postReply(post, finalResponseText);
+                await this.postReply(post, cleanedFinalText);
             }
 
           } else {
@@ -2463,16 +2464,16 @@ Do not make up information not present in the search results. Keep the response 
         if (filterResponse.ok) {
             const filterData = await filterResponse.json();
             if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
-                await this.postReply(post, filterData.choices[0].message.content.trim());
+                responseTextToPost = filterData.choices[0].message.content.trim();
             } else {
-                console.warn('[BotFeatureInquiry] Gemma filter response was ok, but no content. Posting Nemotron basic formatted.');
-                await this.postReply(post, this.basicFormatFallback(responseTextToPost, 290));
+                console.warn('[BotFeatureInquiry] Gemma filter response was ok, but no content. Using Nemotron direct output.');
             }
         } else {
             const filterErrorText = await filterResponse.text();
-            console.error(`[BotFeatureInquiry] Gemma filter API error (${filterResponse.status}) - Text: ${filterErrorText}. Posting Nemotron basic formatted.`);
-            await this.postReply(post, this.basicFormatFallback(responseTextToPost, 290));
+            console.error(`[BotFeatureInquiry] Gemma filter API error (${filterResponse.status}) - Text: ${filterErrorText}. Using Nemotron direct output.`);
         }
+        // Always apply the final cleanup before posting.
+        await this.postReply(post, this.basicFormatFallback(responseTextToPost, 870));
         return null; // Bot feature inquiry handled
       }
       // If not a search history or other specific intent, proceed with web search or original logic
@@ -2547,7 +2548,7 @@ Do not make up information not present in the search results. Keep the response 
                     record: { reply: { root: replyToForNextPost.root } }
                   };
 
-                  const postReplyResult = await this.postReply(parentPostForReply, responseText, imageBase64, altText);
+                  const postReplyResult = await this.postReply(parentPostForReply, this.basicFormatFallback(responseText), imageBase64, altText);
                   if (postReplyResult && postReplyResult.uris.length > 0 && postReplyResult.lastCid) {
                     replyToForNextPost.parent = { uri: postReplyResult.uris[postReplyResult.uris.length - 1], cid: postReplyResult.lastCid };
                     postedImageCount++;
@@ -2690,7 +2691,7 @@ Do not make up information not present in the search results. Keep the response 
               if (filterResponse.ok) {
                 const filterData = await filterResponse.json();
                 if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message) {
-                  await this.postReply(post, filterData.choices[0].message.content.trim());
+                  await this.postReply(post, this.basicFormatFallback(filterData.choices[0].message.content.trim()));
                 } else {
                   await this.postReply(post, this.basicFormatFallback(synthesizedResponse));
                 }
