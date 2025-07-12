@@ -2232,6 +2232,11 @@ Do not make up information not present in the search results. Keep the response 
         }
         return null; // APOD handling complete
       }
+      else if (searchIntent.intent === "process_url" && searchIntent.url) {
+        console.log(`[ProcessUrlFlow] Detected 'process_url' intent for URL: ${searchIntent.url}`);
+        await this.handleUserProvidedUrl(post, searchIntent.url);
+        return null; // URL processing handled, no further response needed from this function
+      }
       else if (searchIntent.intent === "create_meme") {
         console.log(`[MemeFlow] Create Meme intent detected:`, searchIntent);
 
@@ -3018,6 +3023,194 @@ ${baseInstruction}`;
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
   }
 
+  async handleUserProvidedUrl(post, url) {
+    console.log(`[handleUserProvidedUrl] Processing URL: ${url} for post ${post.uri}`);
+    try {
+      // Basic check for local/internal IPs
+      try {
+        const parsedUrl = new URL(url);
+        const hostname = parsedUrl.hostname;
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('10.') || hostname.startsWith('192.168.') || (hostname.startsWith('172.') && parseInt(hostname.split('.')[1], 10) >= 16 && parseInt(hostname.split('.')[1], 10) <= 31)) {
+          console.warn(`[handleUserProvidedUrl] Attempt to access internal/local URL blocked: ${url}`);
+          await this.postReply(post, "Sorry, I can't access that URL as it appears to be an internal or local address.");
+          return;
+        }
+      } catch (e) {
+        console.warn(`[handleUserProvidedUrl] Invalid URL provided: ${url}. Error: ${e.message}`);
+        await this.postReply(post, "That doesn't look like a valid URL I can process. Please check it and try again.");
+        return;
+      }
+
+      // 1. Perform a HEAD request to get Content-Type
+      const headResponse = await fetchWithRetries(url, { method: 'HEAD', customTimeout: 15000 }); // 15s timeout for HEAD
+
+      if (!headResponse.ok) {
+        await this.postReply(post, `I couldn't access that URL (status: ${headResponse.status}). Please check if it's correct and publicly accessible.`);
+        return;
+      }
+
+      const contentType = headResponse.headers.get('content-type');
+      console.log(`[handleUserProvidedUrl] URL: ${url}, Content-Type: ${contentType}`);
+
+      // 2. Image URL Handling
+      if (contentType && (contentType.startsWith('image/jpeg') || contentType.startsWith('image/png') || contentType.startsWith('image/gif') || contentType.startsWith('image/webp'))) {
+        await this.postReply(post, `I see you've shared an image link. Let me try to fetch and describe it for you...`);
+        const imageBase64 = await utils.imageUrlToBase64(url);
+        if (imageBase64) {
+          const isSafe = await this.isImageSafeScout(imageBase64);
+          if (!isSafe) {
+            await this.postReply(post, "I fetched the image, but it doesn't seem safe to display according to our guidelines.");
+            return;
+          }
+          const description = await this.describeImageWithScout(imageBase64) || "Here's the image you shared:";
+          await this.postReply(post, description, imageBase64, description.substring(0, 280));
+        } else {
+          await this.postReply(post, "I tried to fetch the image, but something went wrong. Maybe the link is broken or private?");
+        }
+      }
+      // 3. Webpage (HTML/Text) URL Handling
+      else if (contentType && (contentType.startsWith('text/html') || contentType.startsWith('text/plain'))) {
+        await this.postReply(post, `You've shared a web page. Let me try to fetch its content and give you a summary...`);
+        const pageResponse = await fetchWithRetries(url, { method: 'GET', customTimeout: 20000 }); // 20s for GET
+        if (!pageResponse.ok) {
+          await this.postReply(post, `I couldn't fetch the content from that web page (status: ${pageResponse.status}).`);
+          return;
+        }
+        let pageText = await pageResponse.text();
+
+        if (contentType.startsWith('text/html')) {
+          // Basic HTML stripping: remove tags, scripts, styles.
+          // Replace <br>, <p>, </div>, </h1>-</h6> with newlines for better readability before full stripping.
+          pageText = pageText.replace(/<\/(p|div|h[1-6])>/gi, '\n');
+          pageText = pageText.replace(/<br\s*\/?>/gi, '\n');
+          // Strip all other tags
+          pageText = pageText.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ''); // Remove style blocks
+          pageText = pageText.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ''); // Remove script blocks
+          pageText = pageText.replace(/<[^>]+>/g, ''); // Strip all remaining HTML tags
+          pageText = pageText.replace(/\s+/g, ' ').trim(); // Normalize whitespace
+        }
+
+        if (pageText.length > 50000) { // Limit input text to LLM
+            console.warn(`[handleUserProvidedUrl] Page text too long (${pageText.length}), truncating to 50000 chars.`);
+            pageText = pageText.substring(0, 50000);
+        }
+
+        if (!pageText.trim()) {
+            await this.postReply(post, "I fetched the page, but it seems to have no readable text content.");
+            return;
+        }
+
+        const isSafeText = await this.isTextSafeScout(pageText.substring(0, 2000)); // Check a snippet for safety
+        if (!isSafeText) {
+          await this.postReply(post, "The content of the webpage doesn't seem safe to process according to our guidelines.");
+          return;
+        }
+
+        const summarySystemPrompt = `You are an AI assistant. The user provided a URL to a webpage. You have been given the extracted text content from that page. Your task is to provide a concise summary or highlight key points from the text. The response should be engaging and suitable for a social media post. If the text is very short, you can quote a relevant part. Keep your response under 280 characters.`;
+        const summaryUserPrompt = `Here is the text extracted from the webpage at ${url}:\n\n"${pageText.substring(0, 4000)}..."\n\nPlease summarize this or highlight its key points.`;
+
+        console.log(`NIM CALL START: handleUserProvidedUrl (Summarize Webpage) for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+        const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${summarySystemPrompt}` },
+              { role: "user", content: summaryUserPrompt }
+            ],
+            temperature: 0.5, max_tokens: 150, stream: false
+          }),
+          customTimeout: 60000 // 60s
+        });
+        console.log(`NIM CALL END: handleUserProvidedUrl (Summarize Webpage) - Status: ${nimResponse.status}`);
+
+        let summaryResponseText;
+        if (nimResponse.ok) {
+          const nimData = await nimResponse.json();
+          if (nimData.choices && nimData.choices.length > 0 && nimData.choices[0].message && nimData.choices[0].message.content) {
+            summaryResponseText = nimData.choices[0].message.content.trim();
+          } else {
+            summaryResponseText = "I fetched the page content, but I'm having a bit of trouble summarizing it right now.";
+          }
+        } else {
+          summaryResponseText = "Sorry, I couldn't process the webpage content with my summarizer at the moment.";
+        }
+
+        // Filter the summary using Gemma
+        const filterModelIdForSummary = 'google/gemma-3n-e4b-it';
+        const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text.";
+
+        const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+            body: JSON.stringify({
+              model: filterModelIdForSummary,
+              messages: [
+                { role: "system", content: universalMinimalFilterPrompt },
+                { role: "user", content: summaryResponseText }
+              ],
+              temperature: 0.0, max_tokens: 100, stream: false
+            }),
+            customTimeout: 30000 // 30s
+        });
+
+        let finalSummaryText = summaryResponseText; // Fallback to Nemotron's direct output
+        if (filterResponse.ok) {
+            const filterData = await filterResponse.json();
+            if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
+                finalSummaryText = filterData.choices[0].message.content.trim();
+            } else {
+                 console.warn(`[handleUserProvidedUrl] Gemma filter for summary was OK but no content. Using Nemotron's direct output (basic formatted).`);
+                 finalSummaryText = this.basicFormatFallback(summaryResponseText);
+            }
+        } else {
+            console.error(`[handleUserProvidedUrl] Gemma filter API error for summary. Using Nemotron's direct output (basic formatted).`);
+            finalSummaryText = this.basicFormatFallback(summaryResponseText);
+        }
+
+        // Create a link card for the original URL
+        const externalEmbed = {
+          uri: url,
+          title: `Content from: ${new URL(url).hostname}`, // Basic title
+          description: `Summary of content from the shared link. (Original URL: ${url})` // Basic description
+        };
+        // Attempt to get a better title/description for the card from the page itself (if HTML)
+        if (contentType.startsWith('text/html')) {
+            const titleMatch = pageText.match(/<title>([^<]+)<\/title>/i);
+            if (titleMatch && titleMatch[1]) {
+                externalEmbed.title = titleMatch[1].trim().substring(0,100); // Limit title length
+            }
+            const metaDescriptionMatch = pageText.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
+            if (metaDescriptionMatch && metaDescriptionMatch[1]) {
+                externalEmbed.description = metaDescriptionMatch[1].trim().substring(0,200); // Limit description length
+            }
+        }
+
+        await this.postReply(post, finalSummaryText, null, null, null, externalEmbed);
+
+      }
+      // 4. Other Content Types / Fallback
+      else {
+        console.log(`[handleUserProvidedUrl] Unsupported content type: ${contentType} for URL: ${url}`);
+        // Create a simple link card as a fallback for unsupported types
+        const externalEmbed = {
+          uri: url,
+          title: `Link: ${new URL(url).hostname}`,
+          description: `Shared link. Content type: ${contentType || 'unknown'}.`
+        };
+        await this.postReply(post, `I'm not sure how to process this type of link directly (${contentType || 'unknown'}), but here's a card for it:`, null, null, null, externalEmbed);
+      }
+    } catch (error) {
+      console.error(`[handleUserProvidedUrl] Error processing URL ${url}:`, error);
+      if (error.name === 'AbortError') {
+           await this.postReply(post, `Sorry, I took too long trying to fetch that URL and had to give up. It might be slow or temporarily unavailable.`);
+      } else {
+           await this.postReply(post, `I ran into an unexpected problem trying to process that URL. Please try again later or with a different link.`);
+      }
+    }
+  }
+
   async getImgflipTemplates() {
     console.log('[Imgflip] Fetching meme templates from Imgflip...');
     try {
@@ -3734,7 +3927,13 @@ Output a JSON object. Choose ONE of the following intent structures:
 {
   "intent": "bot_feature_inquiry"
 }
-8. If NEITHER of the above: { "intent": "none" }
+8. If the query contains a generic URL (http/https) that is not part of another specific command (like !post+video <url> or youtube search <url>):
+{
+  "intent": "process_url",
+  "url": "the_extracted_url"
+}
+9. If NEITHER of the above: { "intent": "none" }
+
 IMPORTANT RULES for "search_history":
 - "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
 - "author_filter": "user" (they sent/posted), "bot" (you sent/generated), or "any".
@@ -3745,7 +3944,11 @@ IMPORTANT RULES for "web_search":
 - Use "web_search" for general knowledge, current info/news, explanations not tied to prior interactions.
 - "search_query": Essence of user's question. For news from a source (e.g., "recent news from NBC"), simplify to "[Source] news".
 - "freshness_suggestion": For "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", "oneMonth". Smallest sensible period. Null if no strong cue.
-PRIORITIZATION: Past interactions ("you sent me", "we discussed") -> "search_history" (conversation). Bot created/generated image (not direct chat) -> "search_history" (bot_gallery). Factual world question -> "web_search".
+IMPORTANT RULES for "process_url":
+- This intent is for when a user posts a URL and might expect the bot to fetch, summarize, or display its content.
+- Extract the first valid http/https URL found in the query.
+- Do NOT trigger this if the URL is clearly an argument to another command (e.g. `!post+video https://youtube.com/...` should be `admin_command`, not `process_url`. `youtube search for https://youtu.be/...` should be `youtube_search`).
+PRIORITIZATION: Admin commands > Specific commands (meme, apod, youtube, giphy) > Past interactions ("you sent me", "we discussed") -> "search_history" (conversation). Bot created/generated image (not direct chat) -> "search_history" (bot_gallery). Generic URL -> "process_url". Factual world question -> "web_search". Bot feature inquiry.
 If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.`;
     // System prompt shortened for diff display
 
@@ -3820,9 +4023,46 @@ If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY t
                  parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").trim();
             } else if (parsedJson.intent === "giphy_search" && (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim())) {
                  parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").replace(/giphy|gif/gi, "").trim();
+            } else if (parsedJson.intent === "process_url") {
+                if (typeof parsedJson.url !== 'string' || !parsedJson.url.startsWith('http')) {
+                    // LLM might hallucinate a URL or get the field wrong. Fallback to regex if so.
+                    const urlRegex = /(https?:\/\/[^\s]+)/g;
+                    const urlsFound = userQueryText.match(urlRegex);
+                    if (urlsFound && urlsFound.length > 0) {
+                        parsedJson.url = urlsFound[0]; // Take the first one
+                        console.log(`[IntentClassifier] Corrected/extracted URL for process_url intent via regex: ${parsedJson.url}`);
+                    } else {
+                        console.warn(`[IntentClassifier] ${modelId} returned 'process_url' but no valid URL found in response or query. Returning 'none'. Query: ${userQueryText}`);
+                        return { intent: "none", comment: "LLM suggested process_url but no URL found." };
+                    }
+                }
             }
 
+
             console.log(`[IntentClassifier] ${modelId} parsed intent (getIntent):`, parsedJson);
+            // Client-side fallback URL detection if LLM returns "none" or a non-URL intent but a URL is present.
+            // This is a lower priority than LLM's specific intent if that intent is NOT "none".
+            if (parsedJson.intent === "none" || (parsedJson.intent !== "process_url" && parsedJson.intent !== "youtube_search" && parsedJson.intent !== "giphy_search" /* and not admin command */)) {
+                const urlRegex = /(https?:\/\/[^\s]+)/g;
+                const urlsFound = userQueryText.match(urlRegex);
+                if (urlsFound && urlsFound.length > 0) {
+                    // Check if this URL is part of an admin command (which is handled elsewhere, not by intent)
+                    const isAdminCommandWithUrl = (userQueryText.includes("!post+video") || userQueryText.includes("!post+image")) && userQueryText.includes(urlsFound[0]);
+
+                    if (!isAdminCommandWithUrl) {
+                         // If current intent is "none", or it's something generic that might miss a URL context,
+                         // and we found a URL, we can override to "process_url".
+                         // This is especially for the case where the LLM returns "none" but a URL is clearly present.
+                        if (parsedJson.intent === "none") {
+                            console.log(`[IntentClassifier] Fallback Regex: Found URL ${urlsFound[0]} and current LLM intent is 'none'. Switching to 'process_url'.`);
+                            return { intent: "process_url", url: urlsFound[0], source: "regex_fallback_from_none" };
+                        }
+                        // If LLM returned something like 'web_search' but the query was *just* a URL, 'process_url' might be better.
+                        // This needs careful consideration to not override valid LLM decisions.
+                        // For now, only overriding "none".
+                    }
+                }
+            }
             return parsedJson;
           } catch (e) {
             console.error(`[IntentClassifier] NIM CALL ERROR: Error parsing JSON from ${modelId} in getIntent: ${e.message}. JSON string: "${jsonString}"`);
