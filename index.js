@@ -794,37 +794,8 @@ class BaseBot {
               const context = await this.getReplyContext(currentPostObject); // Pass the full post object
               const responseText = await this.generateResponse(currentPostObject, context); // Pass the full post object
 
-              if (responseText) { // generateResponse now handles search history internally and might return null
-                // Image generation request detection (simplified for brevity, actual logic is more complex)
-                const imageRequestKeywords = ["generate image", "create a picture of"]; // Simplified
-                let isImageRequest = false;
-                let imagePrompt = "";
-                const lowercasedText = (currentPostObject.record.text || "").toLowerCase();
-                for (const keyword of imageRequestKeywords) {
-                    if (lowercasedText.includes(keyword)) {
-                        isImageRequest = true;
-                        imagePrompt = lowercasedText.replace(keyword, "").trim().replace(/^of /,"").trim();
-                        break;
-                    }
-                }
-
-                if (isImageRequest && imagePrompt) {
-                    console.log(`[Monitor] Image request detected in ${currentPostObject.uri}. Prompt: "${imagePrompt}"`);
-                    const scoutResult = await this.processImagePromptWithScout(imagePrompt);
-                    if (!scoutResult.safe) {
-                        await this.postReply(currentPostObject, `${responseText}\n\nRegarding your image request: ${scoutResult.reply_text}`);
-                    } else {
-                        const imageBase64 = await this.generateImage(scoutResult.image_prompt);
-                        if (imageBase64) {
-                            const altText = await this.describeImageWithScout(imageBase64) || "Generated image";
-                            await this.postReply(currentPostObject, `${responseText}\n\nHere's the image you requested:`, imageBase64, altText);
-                        } else {
-                            await this.postReply(currentPostObject, `${responseText}\n\nI tried to generate an image for "${scoutResult.image_prompt}", but it didn't work out this time.`);
-                        }
-                    }
-                } else {
-                    await this.postReply(currentPostObject, responseText);
-                }
+              if (responseText) { // generateResponse may return null if it handles the reply itself (e.g., for embeds)
+                await this.postReply(currentPostObject, responseText);
               }
             }
           } // end for...of notifications loop
