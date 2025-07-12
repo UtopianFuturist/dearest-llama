@@ -3565,6 +3565,12 @@ ${baseInstruction}`;
                  // isRelevant = true; // Uncomment with caution
             }
 
+            // Fallback: If not already relevant, and otherActorHandleToMatch is valid, check for text mentions.
+            if (!isRelevant && otherActorHandleToMatch && otherActorHandleToMatch !== "user" && postText.toLowerCase().includes(`@${otherActorHandleToMatch.toLowerCase()}`)) {
+                console.log(`[ConvHistory] Fallback: Relevant text mention found: ${postUri} from ${postAuthorHandle} includes @${otherActorHandleToMatch}`);
+                isRelevant = true;
+            }
+
 
             if (isRelevant) {
               const postToAdd = { // Changed variable name to avoid conflict if currentPost is used elsewhere
@@ -5066,7 +5072,7 @@ async function startBots() {
   };
 
   // Initial call to start the follow feed monitoring loop after a short delay (e.g., to allow initial auth)
-  setTimeout(runFollowFeedMonitor, 10000); // Start after 10 seconds
+  // setTimeout(runFollowFeedMonitor, 10000); // Start after 10 seconds - DISABLED as per user request
 
 }
 
