@@ -2504,7 +2504,7 @@ Do not make up information not present in the search results. Keep the response 
             }
         }
 
-        const statusSystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user has asked what you are up to or how you are doing. Based on the provided summary of your recent activity, give a brief, natural, and conversational response. Do NOT list your skills. Be casual.`;
+        const statusSystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user has asked what you are up to or how you are doing. Based on the provided summary of your recent activity, give a brief, natural, and conversational response. Do NOT list your skills. Be casual. Do not repeat the prompt.`;
         const statusUserPrompt = `My recent activity summary is: "${recentActivity}". How should I respond to @${post.author.handle} asking what I'm up to?`;
 
         const nimStatusResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -2525,7 +2525,34 @@ Do not make up information not present in the search results. Keep the response 
             const nimStatusData = await nimStatusResponse.json();
             if (nimStatusData.choices && nimStatusData.choices.length > 0 && nimStatusData.choices[0].message && nimStatusData.choices[0].message.content) {
                 const responseText = nimStatusData.choices[0].message.content;
-                await this.postReply(post, this.basicFormatFallback(responseText, 870));
+
+                const filterModelIdForBotStatus = 'google/gemma-3n-e4b-it';
+                const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+
+                const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                    body: JSON.stringify({
+                      model: filterModelIdForBotStatus,
+                      messages: [
+                        { role: "system", content: universalMinimalFilterPrompt },
+                        { role: "user", content: responseText }
+                      ],
+                      temperature: 0.0, max_tokens: 150,
+                      stream: false
+                    }),
+                    customTimeout: 30000 // 30s
+                });
+
+                let responseTextToPost = responseText;
+                if (filterResponse.ok) {
+                    const filterData = await filterResponse.json();
+                    if (filterData.choices && filterData.choices.length > 0 && filterData.choices[0].message && filterData.choices[0].message.content) {
+                        responseTextToPost = filterData.choices[0].message.content.trim();
+                    }
+                }
+
+                await this.postReply(post, this.basicFormatFallback(responseTextToPost, 870));
             } else {
                 await this.postReply(post, "Just processing some data and getting ready for our chat! What's on your mind?");
             }
