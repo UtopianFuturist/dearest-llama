@@ -1862,7 +1862,7 @@ Do not make up information not present in the search results. Keep the response 
 
           const searchResults = await this.performGoogleWebSearch(textForSearch, null, 'webpage');
           let nemotronWebServicePrompt = "";
-          let systemPromptContext = `The user asked a question like "${userQueryText}"`;
+          let systemPromptContext = `You are replying to @${post.author.handle}. The user asked a question like "${userQueryText}"`;
           if (ocrAttempted && imageUriForContext) {
             systemPromptContext += ` related to an image (source: ${imageUriForContext}). Text was extracted from this image via OCR: "${textForSearch.substring(0, 200)}...".`;
             if (sourcePostTextForContext) {
@@ -2029,7 +2029,7 @@ Do not make up information not present in the search results. Keep the response 
 
           // const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`; // URL will be part of the embed
 
-          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          let userQueryContextForNemotron = `You are replying to @${post.author.handle}. The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
@@ -2052,7 +2052,7 @@ Do not make up information not present in the search results. Keep the response 
 
 
         } else { // NO MATCHES FOUND
-          let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
+          let userQueryContextForNemotron = `You are replying to @${post.author.handle}. The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
           }
@@ -2406,7 +2406,7 @@ Do not make up information not present in the search results. Keep the response 
         // The bot's persona/identity is in `this.config.TEXT_SYSTEM_PROMPT`
 
         const inquirySystemPrompt = `You are an AI assistant. Your persona is defined as: "${this.config.TEXT_SYSTEM_PROMPT}". The user is asking a question about you or your capabilities. Answer the user's question based on your defined persona and general knowledge of your functions as a helpful AI. Keep the response concise and suitable for a social media post.`;
-        const inquiryUserPrompt = `User's question about me/my features: "${userQueryText}"`;
+        const inquiryUserPrompt = `The user @${post.author.handle} asked this question about me/my features: "${userQueryText}"`;
 
         console.log(`NIM CALL START: BotFeatureInquiry for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimInquiryResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -2641,7 +2641,7 @@ Do not make up information not present in the search results. Keep the response 
           }
         } else { // Standard text/webpage search logic (previously the second web_search block)
           let nemotronWebServicePrompt = "";
-          const webSearchSystemPrompt = `You are an AI assistant. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
+          const webSearchSystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user asked a question: "${userQueryText}". You have performed a web search for "${searchIntent.search_query}" (freshness: ${searchIntent.freshness_suggestion || 'not specified'}).
 Use the provided search results (title, URL, snippet) to formulate a concise and helpful answer to the user's original question.
 Synthesize the information from the results. If appropriate, you can cite the source URL(s) by including them in your answer (e.g., "According to [URL], ...").
 If the search results do not provide a clear answer, state that you couldn't find specific information from the web for their query.
@@ -2744,7 +2744,7 @@ Do not make up information not present in the search results. Keep the response 
 
       if (userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "") {
         // Profile analysis prompt
-        nemotronUserPrompt = `The user's question is: "${post.record.text}"
+        nemotronUserPrompt = `You are replying to @${post.author.handle}. The user's question is: "${post.record.text}"
 
 Activate your "User Profile Analyzer" capability. Based on the "USER'S RECENT BLUESKY ACTIVITY" provided below, generate your response in two parts:
 
@@ -2769,7 +2769,7 @@ Your structured response (Summary with Invitation, then Detailed Points):
 ${baseInstruction}`;
       } else {
         // Standard prompt (no specific profile context fetched)
-        nemotronUserPrompt = `Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
+        nemotronUserPrompt = `You are replying to @${post.author.handle}. Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
       }
 
       console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}`);
@@ -3087,8 +3087,8 @@ ${baseInstruction}`;
           return;
         }
 
-        const summarySystemPrompt = `You are an AI assistant. The user provided a URL to a webpage. You have been given the extracted text content from that page. Your task is to provide a concise summary or highlight key points from the text. The response should be engaging and suitable for a social media post. If the text is very short, you can quote a relevant part. Keep your response under 280 characters.`;
-        const summaryUserPrompt = `Here is the text extracted from the webpage at ${url}:\n\n"${pageText.substring(0, 4000)}..."\n\nPlease summarize this or highlight its key points.`;
+        const summarySystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user provided a URL to a webpage. You have been given the extracted text content from that page. Your task is to provide a concise summary or highlight key points from the text. The response should be engaging and suitable for a social media post. If the text is very short, you can quote a relevant part. Keep your response under 280 characters.`;
+        const summaryUserPrompt = `Here is the text extracted from the webpage at ${url}:\n\n"${pageText.substring(0, 4000)}..."\n\nPlease summarize this or highlight its key points for @${post.author.handle}.`;
 
         console.log(`NIM CALL START: handleUserProvidedUrl (Summarize Webpage) for model nvidia/llama-3.3-nemotron-super-49b-v1`);
         const nimResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
