@@ -2476,6 +2476,64 @@ Do not make up information not present in the search results. Keep the response 
         await this.postReply(post, this.basicFormatFallback(responseTextToPost, 870));
         return null; // Bot feature inquiry handled
       }
+      else if (searchIntent.intent === "get_bot_status") {
+        console.log(`[GetBotStatus] Intent detected for query: "${userQueryText}"`);
+        let recentActivity = "I've been chatting with a few people and exploring some new ideas!"; // Default if no posts.
+
+        if (this.repliedPosts.size > 0) {
+            try {
+                // Get the last 3 post URIs the bot replied to
+                const recentPostUris = Array.from(this.repliedPosts).slice(-3);
+                const { data: threadViews } = await this.agent.getPostThreads({ uris: recentPostUris });
+
+                if (threadViews && threadViews.threads.length > 0) {
+                    const topics = threadViews.threads.map(thread => {
+                        if (thread.post && thread.post.record && typeof thread.post.record.text === 'string') {
+                            return thread.post.record.text.substring(0, 75); // Get a snippet
+                        }
+                        return 'a topic';
+                    }).filter(Boolean);
+
+                    if (topics.length > 0) {
+                        recentActivity = `I've just been chatting about things like "${topics.join('", "')}"...`;
+                    }
+                }
+            } catch (error) {
+                console.error("[GetBotStatus] Error fetching recent replied-to posts:", error);
+                // Fallback to default activity text
+            }
+        }
+
+        const statusSystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user has asked what you are up to or how you are doing. Based on the provided summary of your recent activity, give a brief, natural, and conversational response. Do NOT list your skills. Be casual.`;
+        const statusUserPrompt = `My recent activity summary is: "${recentActivity}". How should I respond to @${post.author.handle} asking what I'm up to?`;
+
+        const nimStatusResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: statusSystemPrompt },
+              { role: "user", content: statusUserPrompt }
+            ],
+            temperature: 0.8, max_tokens: 150, stream: false
+          }),
+          customTimeout: 60000
+        });
+
+        if (nimStatusResponse.ok) {
+            const nimStatusData = await nimStatusResponse.json();
+            if (nimStatusData.choices && nimStatusData.choices.length > 0 && nimStatusData.choices[0].message && nimStatusData.choices[0].message.content) {
+                const responseText = nimStatusData.choices[0].message.content;
+                await this.postReply(post, this.basicFormatFallback(responseText, 870));
+            } else {
+                await this.postReply(post, "Just processing some data and getting ready for our chat! What's on your mind?");
+            }
+        } else {
+            await this.postReply(post, "Just processing some data and getting ready for our chat! What's on your mind?");
+        }
+        return null;
+      }
       // If not a search history or other specific intent, proceed with web search or original logic
       else if (searchIntent.intent === "web_search" && searchIntent.search_query) {
         console.log(`[WebSearchFlow] Consolidated web search intent detected. Query: "${searchIntent.search_query}", Type: "${searchIntent.search_type}"`);
@@ -3917,12 +3975,16 @@ Output a JSON object. Choose ONE of the following intent structures:
 {
   "intent": "bot_feature_inquiry"
 }
-8. If the query contains a generic URL (http/https) that is not part of another specific command (like !post+video <url> or youtube search <url>):
+8. If the user is asking a direct, conversational question about the bot's current state or recent activity (e.g., "how are you?", "what are you doing?", "what are you up to?"):
+{
+  "intent": "get_bot_status"
+}
+9. If the query contains a generic URL (http/https) that is not part of another specific command (like !post+video <url> or youtube search <url>):
 {
   "intent": "process_url",
   "url": "the_extracted_url"
 }
-9. If NEITHER of the above: { "intent": "none" }
+10. If NEITHER of the above: { "intent": "none" }
 
 IMPORTANT RULES for "search_history":
 - "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
