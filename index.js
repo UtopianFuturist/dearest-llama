@@ -2047,7 +2047,15 @@ Do not make up information not present in the search results. Keep the response 
 
         let nemotronSearchPrompt = "";
         if (matches.length > 0) {
-          const topMatch = matches[0]; // Get the single best match
+          let topMatch = matches[0]; // Get the single best match
+
+          // ===>>> Prevent self-quote: If the top match is the current post, treat as no distinct embeddable match found.
+          if (topMatch && topMatch.uri === post.uri) {
+            console.log(`[SearchHistory] Top match URI (${topMatch.uri}) is the same as the current post URI. Preventing self-quote. Will respond as if no distinct historical post was found to embed.`);
+            topMatch = null; // This will trigger the "no embeddable match found" logic path below.
+          }
+          // <<<=== End of self-quote prevention
+
           // const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`; // URL will be part of the embed
 
           let userQueryContextForNemotron = `The user asked: "${userQueryText}".`;
