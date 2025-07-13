@@ -2088,31 +2088,33 @@ Do not make up information not present in the search results. Keep the response 
           }
           // <<<=== End of self-quote prevention
 
-          // const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`; // URL will be part of the embed
+          if (topMatch) {
+            let userQueryContextForNemotron = `You are replying to @${post.author.handle}. The user asked: "${userQueryText}".`;
+            if (searchIntent.recency_cue) {
+              userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+            }
+            userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
 
-          let userQueryContextForNemotron = `You are replying to @${post.author.handle}. The user asked: "${userQueryText}".`;
-          if (searchIntent.recency_cue) {
-            userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
+            nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
+
+            // Prepare details for embedding the found post
+            const foundPostToEmbed = {
+              uri: topMatch.uri,
+              cid: topMatch.cid
+            };
+
+            if (!foundPostToEmbed.uri || !foundPostToEmbed.cid) {
+              console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
+              // Fallback to old behavior if critical embed info is missing
+              const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
+              nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
+            }
           }
-          userQueryContextForNemotron += ` I searched ${searchPerformed} and found a relevant post.`;
-
-          nemotronSearchPrompt = `${userQueryContextForNemotron}\n\nPlease formulate a brief confirmation message to the user, like "I found this post from ${searchIntent.recency_cue || 'our history'} ${searchPerformed}:" or "This might be what you're looking for:". The actual post will be embedded in the reply.`;
-
-          // Prepare details for embedding the found post
-          const foundPostToEmbed = {
-            uri: topMatch.uri,
-            cid: topMatch.cid
-          };
-
-          if (!foundPostToEmbed.uri || !foundPostToEmbed.cid) {
-            console.error('[SearchHistory] Found post is missing URI or CID, cannot embed. Match details:', topMatch);
-            // Fallback to old behavior if critical embed info is missing
-            const postUrl = `https://bsky.app/profile/${topMatch.authorHandle}/post/${topMatch.uri.split('/').pop()}`;
-            nemotronSearchPrompt = `The user asked: "${userQueryText}". (Recency: ${searchIntent.recency_cue}). I searched ${searchPerformed}.\n\nI found this specific post URL: ${postUrl}\n\nPlease formulate a brief response to the user that directly provides this URL. For example: "Regarding your query about something from ${searchIntent.recency_cue || 'our history'}, I found this ${searchPerformed}: ${postUrl}". The response should primarily be the confirmation and the URL itself.`;
-          }
 
 
-        } else { // NO MATCHES FOUND
+        }
+
+        if (!topMatch) { // NO MATCHES FOUND
           let userQueryContextForNemotron = `You are replying to @${post.author.handle}. The user asked: "${userQueryText}".`;
           if (searchIntent.recency_cue) {
             userQueryContextForNemotron += ` (They mentioned it was from "${searchIntent.recency_cue}").`;
@@ -2545,22 +2547,23 @@ Do not make up information not present in the search results. Keep the response 
             try {
                 // Get the last 3 post URIs the bot replied to
                 const recentPostUris = Array.from(this.repliedPosts).slice(-3);
-                const { data: threadViews } = await this.agent.api.app.bsky.feed.getPostThreads({ uris: recentPostUris });
-
-                if (threadViews && threadViews.threads.length > 0) {
-                    const topics = threadViews.threads.map(thread => {
-                        if (thread.post && thread.post.record && typeof thread.post.record.text === 'string') {
-                            return thread.post.record.text.substring(0, 75); // Get a snippet
+                const topics = [];
+                for (const uri of recentPostUris) {
+                    try {
+                        const { data: threadView } = await this.agent.getPostThread({ uri });
+                        if (threadView && threadView.thread && threadView.thread.post && threadView.thread.post.record && typeof threadView.thread.post.record.text === 'string') {
+                            topics.push(threadView.thread.post.record.text.substring(0, 75));
                         }
-                        return 'a topic';
-                    }).filter(Boolean);
-
-                    if (topics.length > 0) {
-                        recentActivity = `I've just been chatting about things like "${topics.join('", "')}"...`;
+                    } catch (threadError) {
+                        console.error(`[GetBotStatus] Error fetching individual thread for URI ${uri}:`, threadError);
                     }
                 }
+
+                if (topics.length > 0) {
+                    recentActivity = `I've just been chatting about things like "${topics.join('", "')}"...`;
+                }
             } catch (error) {
-                console.error("[GetBotStatus] Error fetching recent replied-to posts:", error);
+                console.error("[GetBotStatus] Error processing recent replied-to posts:", error);
                 // Fallback to default activity text
             }
         }
