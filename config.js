@@ -9,16 +9,9 @@ if (process.env.NODE_ENV !== 'production') {
 const validateConfig = (config) => {
   const required = [
     'NVIDIA_NIM_API_KEY',
-    'TOGETHER_AI_API_KEY', // Added Together AI API key
     'BLUESKY_IDENTIFIER',
     'BLUESKY_APP_PASSWORD',
     'ADMIN_BLUESKY_HANDLE',
-    'GOOGLE_CUSTOM_SEARCH_API_KEY',
-    'GOOGLE_CUSTOM_SEARCH_CX_ID',
-    'IMGFLIP_USERNAME',
-    'IMGFLIP_PASSWORD',
-    'YOUTUBE_API_KEY',
-    'GIPHY_API_KEY',
   ];
 
   const missing = required.filter(key => !config[key]);
@@ -30,16 +23,9 @@ const validateConfig = (config) => {
 // Configuration object
 const config = {
   NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY,
-  TOGETHER_AI_API_KEY: process.env.TOGETHER_AI_API_KEY, // Added Together AI API key
   BLUESKY_IDENTIFIER: process.env.BLUESKY_IDENTIFIER,
   BLUESKY_APP_PASSWORD: process.env.BLUESKY_APP_PASSWORD,
   ADMIN_BLUESKY_HANDLE: process.env.ADMIN_BLUESKY_HANDLE,
-  GOOGLE_CUSTOM_SEARCH_API_KEY: process.env.GOOGLE_CUSTOM_SEARCH_API_KEY,
-  GOOGLE_CUSTOM_SEARCH_CX_ID: process.env.GOOGLE_CUSTOM_SEARCH_CX_ID,
-  IMGFLIP_USERNAME: process.env.IMGFLIP_USERNAME,
-  IMGFLIP_PASSWORD: process.env.IMGFLIP_PASSWORD,
-  YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY,
-  GIPHY_API_KEY: process.env.GIPHY_API_KEY,
 
   // Known bots
   KNOWN_BOTS: process.env.KNOWN_BOTS ? process.env.KNOWN_BOTS.split(',') : [],
@@ -81,14 +67,7 @@ Your primary role is to be an excellent conversationalist. Strive for responses 
 validateConfig(config);
 
 // Log specific critical environment variables for diagnostics
-console.log(`[Config] Loaded TOGETHER_AI_API_KEY: ${config.TOGETHER_AI_API_KEY ? 'Exists' : 'MISSING!'}`);
 console.log(`[Config] Loaded NVIDIA_NIM_API_KEY: ${config.NVIDIA_NIM_API_KEY ? 'Exists' : 'MISSING!'}`);
-console.log(`[Config] Loaded GOOGLE_CUSTOM_SEARCH_API_KEY: ${config.GOOGLE_CUSTOM_SEARCH_API_KEY ? 'Exists' : 'MISSING!'}`);
-console.log(`[Config] Loaded GOOGLE_CUSTOM_SEARCH_CX_ID: ${config.GOOGLE_CUSTOM_SEARCH_CX_ID ? 'Exists' : 'MISSING!'}`);
-console.log(`[Config] Loaded IMGFLIP_USERNAME: ${config.IMGFLIP_USERNAME ? 'Exists' : 'MISSING!'}`);
-console.log(`[Config] Loaded IMGFLIP_PASSWORD: ${config.IMGFLIP_PASSWORD ? 'Exists (presence will be checked)' : 'MISSING!'}`);
-console.log(`[Config] Loaded YOUTUBE_API_KEY: ${config.YOUTUBE_API_KEY ? 'Exists' : 'MISSING!'}`);
-console.log(`[Config] Loaded GIPHY_API_KEY: ${config.GIPHY_API_KEY ? 'Exists' : 'MISSING!'}`);
 
 
 export default config;
