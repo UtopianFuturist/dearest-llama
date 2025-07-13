@@ -2822,7 +2822,6 @@ Based on all available context (especially the user's immediate message), genera
       return null; // Ensure null is returned on error so monitor doesn't try to post it.
     } // Closes the catch block of generateResponse
   } // Closes the generateResponse method async generateResponse(post, context) {
-
   getModelName() {
     return 'nvidia/llama-3.3-nemotron-super-49b-v1 (filtered by meta/llama-4-scout-17b-16e-instruct)'.split('/').pop();
   }
