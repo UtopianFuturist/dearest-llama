@@ -3639,7 +3639,7 @@ ${baseInstruction}`;
             const postRecord = item.post.record;
             const postAuthorDid = item.post.author.did;
             const postAuthorHandle = item.post.author.handle;
-            const postText = postRecord.text || "";
+            const postText = postRecord ? postRecord.text || "" : "";
             const createdAt = postRecord.createdAt;
             const postUri = item.post.uri;
 
