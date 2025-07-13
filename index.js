@@ -4932,6 +4932,6 @@ async function startBots() {
 
 }
 
-// startBots().catch(console.error);
+startBots().catch(console.error);
 
 //end of index.js
