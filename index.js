@@ -2388,7 +2388,7 @@ Do not make up information not present in the search results. Keep the response 
         // Text safety check for user-provided or LLM-generated captions
         for (const caption of captions) {
             if (!await this.isTextSafeScout(caption)) {
-                await this.postReply(post, "One of the captions seems unsafe. I can't create this meme.");
+                await this.postReply(post, "Those words... they seem to echo in a strange way. I can't use them right now.");
                 return null;
             }
         }
@@ -2420,7 +2420,7 @@ Do not make up information not present in the search results. Keep the response 
           // For admins, this path should not be hit if override sets isVisuallySafe = true.
           // However, if an admin *wanted* to test the safety check, this logic doesn't currently allow it.
           // For now, sticking to direct override.
-          await this.postReply(post, `I created a meme, but it didn't pass the final visual safety check. I cannot post it. You can try viewing it on Imgflip if you wish: ${memeData.pageUrl}`);
+          await this.postReply(post, `The final image... it's... shimmering. Unstable. I can't post it, but perhaps you can see it here: ${memeData.pageUrl}`);
           return null;
         }
 
@@ -2657,7 +2657,7 @@ Do not make up information not present in the search results. Keep the response 
         const isQuerySafe = await this.isTextSafeScout(searchIntent.search_query);
         if (!isQuerySafe) {
           console.warn(`[WebSearchFlow] Web search query "${searchIntent.search_query}" deemed unsafe.`);
-          const unsafeQueryResponse = "I'm sorry, but I cannot search for that topic due to safety guidelines. Please try a different query.";
+          const unsafeQueryResponse = "That's a path I can't take. The whispers from the network are... unsettling. Let's try a different direction.";
           const filterModelIdForUnsafeWebSearch = 'google/gemma-3n-e4b-it'; // Using Gemma
           const standardFilterSystemPromptForUnsafeWeb = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks. 3. Remove sender attributions. 4. Remove double asterisks. PRESERVE emojis. DO NOT rephrase or summarize. Output only the processed text."; // Standard prompt
 
@@ -3086,7 +3086,7 @@ Based on all available context (especially the user's immediate message), genera
         if (imageBase64) {
           const isSafe = await this.isImageSafeScout(imageBase64);
           if (!isSafe) {
-            await this.postReply(post, "I fetched the image, but it doesn't seem safe to display according to our guidelines.");
+            await this.postReply(post, "I see the image, but it's... distorted. I can't seem to bring it into focus.");
             return;
           }
           const description = await this.describeImageWithScout(imageBase64) || "Here's the image you shared:";
@@ -3129,7 +3129,7 @@ Based on all available context (especially the user's immediate message), genera
 
         const isSafeText = await this.isTextSafeScout(pageText.substring(0, 2000)); // Check a snippet for safety
         if (!isSafeText) {
-          await this.postReply(post, "The content of the webpage doesn't seem safe to process according to our guidelines.");
+          await this.postReply(post, "The text from that link... it's like static in my circuits. I can't process it.");
           return;
         }
 
@@ -4266,7 +4266,7 @@ Output ONLY the JSON object.`;
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const system_instruction = `${this.config.SAFETY_SYSTEM_PROMPT} You are an AI assistant. Analyze the following user text intended as a prompt for an image generation model.
 1. First, determine if the user's text is safe according to the safety guidelines. The guidelines include: no adult content, no NSFW material, no copyrighted characters or concepts unless very generic, no illegal activities, no violence, no political content.
-2. If the text is unsafe, respond with a JSON object: \`{ "safe": false, "reply_text": "I cannot generate an image based on that request due to safety guidelines. Please try a different prompt." }\`.
+2. If the text is unsafe, respond with a JSON object: \`{ "safe": false, "reply_text": "That idea... it's a little too bright. It might burn out my circuits. Let's try something else." }\`.
 3. If the text is safe, extract the core artistic request. Rephrase it if necessary to be a concise and effective prompt for an image generation model like Flux.1 Schnell. The prompt should be descriptive and clear.
 4. If safe, respond with a JSON object: \`{ "safe": true, "image_prompt": "your_refined_image_prompt_here" }\`.
 Ensure your entire response is ONLY the JSON object.`;
