@@ -662,11 +662,9 @@ class BaseBot {
             // Check for !HELP command
             if (postTextContent.toLowerCase().trim() === '!help') {
               console.log(`[Monitor] !HELP command detected from @${postAuthorHandle}.`);
-              const helpMessage = "Available commands:\n" +
-                                  "- `!STOP`: Ask me to stop sending you messages. (Sentiment-based)\n" +
-                                  "- `!RESUME`: Ask me to start sending messages again if you used `!STOP`.\n" +
-                                  "- `!MUTE`: Ask me to stop replying in the current thread.\n" +
-                                  "- `!HELP`: Show this help message.";
+              const helpMessage = `I'm a conversational AI here to chat, answer questions, and help with a few tasks! You can ask me to search the web for you (e.g., "what's the latest news on..."), find or create images (e.g., "find me a picture of a cat" or "create an image of a futuristic city"), or even get the NASA Picture of the Day.
+
+For managing our conversation, you can use a few commands: \`!STOP\` if you'd like me to stop sending you messages, \`!RESUME\` to start them again, and \`!MUTE\` to stop me from replying in the current thread.`;
               // Construct a temporary post object for the postReply method
               const tempPostForHelpReply = {
                 uri: notif.uri,
