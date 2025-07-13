@@ -927,12 +927,9 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
   async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png') {
     try {
       RateLimit.check();
-      const CHAR_LIMIT_PER_POST = 290; // Bluesky's actual limit
-
-      let text = utils.truncateResponse(response, CHAR_LIMIT_PER_POST);
 
       const replyObject = {
-        text: text,
+        text: response,
         reply: {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
           parent: { uri: post.uri, cid: post.cid }
@@ -2317,6 +2314,54 @@ Do not make up information not present in the search results. Keep the response 
         await this.postReply(post, this.basicFormatFallback(responseTextToPost, 870));
         return null; // Bot feature inquiry handled
       }
+
+    async shortenResponseWithGemma(textToShorten) {
+        if (!textToShorten || textToShorten.length <= 290) {
+            return textToShorten;
+        }
+
+        console.log(`[shortenResponseWithGemma] Text needs shortening. Length: ${textToShorten.length}`);
+        const modelId = 'google/gemma-3-4b-it';
+        const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
+        const systemPrompt = "Re-write the following message to fit within 290 characters, keeping as much of the original content as possible.";
+
+        try {
+            console.log(`[shortenResponseWithGemma] Calling ${modelId} to shorten text.`);
+            const response = await fetchWithRetries(endpointUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+                body: JSON.stringify({
+                    model: modelId,
+                    messages: [
+                        { role: "system", content: systemPrompt },
+                        { role: "user", content: textToShorten }
+                    ],
+                    temperature: 0.2,
+                    max_tokens: 100, // Max tokens for a short response
+                    stream: false,
+                }),
+                customTimeout: 30000, // 30s timeout
+            });
+
+            if (!response.ok) {
+                console.error(`[shortenResponseWithGemma] API error ${response.status}. Falling back to truncation.`);
+                return utils.truncateResponse(textToShorten);
+            }
+
+            const data = await response.json();
+            if (data.choices && data.choices[0].message && data.choices[0].message.content) {
+                const shortenedText = data.choices[0].message.content.trim();
+                console.log(`[shortenResponseWithGemma] Shortened response: "${shortenedText}" (Length: ${shortenedText.length})`);
+                return shortenedText;
+            }
+
+            console.error('[shortenResponseWithGemma] Unexpected response format. Falling back to truncation.');
+            return utils.truncateResponse(textToShorten);
+        } catch (error) {
+            console.error(`[shortenResponseWithGemma] Exception during shortening: ${error.message}. Falling back to truncation.`);
+            return utils.truncateResponse(textToShorten);
+        }
+    }
       else if (searchIntent.intent === "get_bot_status") {
         console.log(`[GetBotStatus] Intent detected for query: "${userQueryText}". Providing generic status response.`);
         // This intent now provides a generic, static response to the user,
@@ -2769,7 +2814,8 @@ Based on all available context (especially the user's immediate message), genera
       // Let's assume `post.generatedImageForThisInteraction = { imageBase64, altText }` if available.
       // This is a placeholder; actual passing of this data needs to be handled from the monitor call.
 
-      return scoutFormattedText;
+      const finalText = await this.shortenResponseWithGemma(scoutFormattedText);
+      return finalText;
     } // Closes the main 'else' block starting at L1390
     } catch (error) { // This is line 1520 in Render's logs
       console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
