@@ -927,7 +927,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
   async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png') {
     try {
       RateLimit.check();
-      const CHAR_LIMIT_PER_POST = 300; // Bluesky's actual limit
+      const CHAR_LIMIT_PER_POST = 290; // Bluesky's actual limit
 
       let text = utils.truncateResponse(response, CHAR_LIMIT_PER_POST);
 
@@ -1071,7 +1071,7 @@ class LlamaBot extends BaseBot {
             console.warn('LlamaBot.generateStandalonePostFromContext: Context is empty and no admin instructions to act on.');
             return null;
         }
-        userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 300 characters.`;
+        userPrompt = `Based on the following conversation:\n\n${conversationHistory}\n\nGenerate a new, standalone Bluesky post. This post should reflect the persona described as: "${this.config.TEXT_SYSTEM_PROMPT}". The post must be suitable for the bot's own feed, inspired by the conversation but NOT a direct reply to it. Keep the post concise and under 290 characters.`;
         if (trimmedAdminInstructions) {
           userPrompt += `\n\nImportant specific instructions from the admin for this post: "${trimmedAdminInstructions}". Please ensure the generated post carefully follows these instructions while also drawing from the conversation themes where appropriate.`;
         }
@@ -1085,7 +1085,7 @@ class LlamaBot extends BaseBot {
         body: JSON.stringify({
           model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
           messages: [ { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` }, { role: "user", content: userPrompt } ],
-          temperature: 0.90, max_tokens: 100, stream: false
+          temperature: 0.90, max_tokens: 80, stream: false
         }),
         customTimeout: 120000 // 120s timeout
       });
@@ -1110,7 +1110,7 @@ class LlamaBot extends BaseBot {
       // Now, filter this response using Gemma
       const filterModelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
       const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
-      const standardFilterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. REMOVE ALL EMOJIS. This is a critical rule. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
+      const standardFilterSystemPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 290 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (`**`) used for emphasis, as they do not render correctly. 5. REMOVE ALL EMOJIS. This is a critical rule. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
 
       try {
         console.log(`NIM CALL START: filterResponse (using ${filterModelId}) in generateStandalonePostFromContext`);
@@ -1123,7 +1123,7 @@ class LlamaBot extends BaseBot {
               { role: "system", content: standardFilterSystemPrompt },
               { role: "user", content: nemotronResponseText } // textToFilter is nemotronResponseText
             ],
-            temperature: 0.0, max_tokens: 100, stream: false // Temperature changed to 0.0
+            temperature: 0.0, max_tokens: 80, stream: false // Temperature changed to 0.0
           }),
           customTimeout: 60000 // 60s timeout
         });
@@ -2984,7 +2984,7 @@ Based on all available context (especially the user's immediate message), genera
           return;
         }
 
-        const summarySystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user provided a URL to a webpage. You have been given the extracted text content from that page. Your task is to provide a concise summary or highlight key points from the text. The response should be engaging and suitable for a social media post. If the text is very short, you can quote a relevant part. Keep your response under 280 characters.`;
+        const summarySystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user provided a URL to a webpage. You have been given the extracted text content from that page. Your task is to provide a concise summary or highlight key points from the text. The response should be engaging and suitable for a social media post. If the text is very short, you can quote a relevant part. Keep your response under 290 characters.`;
         const summaryUserPrompt = `Here is the text extracted from the webpage at ${url}:\n\n"${pageText.substring(0, 4000)}..."\n\nPlease summarize this or highlight its key points for @${post.author.handle}.`;
 
         console.log(`NIM CALL START: handleUserProvidedUrl (Summarize Webpage) for model nvidia/llama-3.3-nemotron-super-49b-v1`);
@@ -2997,7 +2997,7 @@ Based on all available context (especially the user's immediate message), genera
               { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${summarySystemPrompt}` },
               { role: "user", content: summaryUserPrompt }
             ],
-            temperature: 0.5, max_tokens: 150, stream: false
+            temperature: 0.5, max_tokens: 80, stream: false
           }),
           customTimeout: 60000 // 60s
         });
@@ -3017,7 +3017,7 @@ Based on all available context (especially the user's immediate message), genera
 
         // Filter the summary using Gemma
         const filterModelIdForSummary = 'google/gemma-3n-e4b-it';
-        const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove sender attributions. 4. Remove double asterisks. 5. REMOVE ALL EMOJIS. DO NOT rephrase or summarize. Output only the processed text.";
+        const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 290 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove sender attributions. 4. Remove double asterisks. 5. REMOVE ALL EMOJIS. DO NOT rephrase or summarize. Output only the processed text.";
 
         const filterResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
             method: 'POST',
@@ -3028,7 +3028,7 @@ Based on all available context (especially the user's immediate message), genera
                 { role: "system", content: universalMinimalFilterPrompt },
                 { role: "user", content: summaryResponseText }
               ],
-              temperature: 0.0, max_tokens: 100, stream: false
+              temperature: 0.0, max_tokens: 80, stream: false
             }),
             customTimeout: 30000 // 30s
         });
