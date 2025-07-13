@@ -956,7 +956,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
     }
   }
 
-  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png') {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png', followUp = null) {
     try {
       RateLimit.check();
       RateLimit.check();
@@ -1054,7 +1054,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
           let partText = textParts[i] || ""; // Use empty string if only image on last part and textParts is empty
 
           if (totalParts > 1) {
-              partText = `${partText.trim()} ... [${i + 1}/${totalParts}]`;
+              // partText = `${partText.trim()} ... [${i + 1}/${totalParts}]`;
           }
 
           // Final safeguard, though previous logic should prevent exceeding this.
@@ -1135,6 +1135,9 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
           }
       }
       this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
+      if (followUp) {
+        await this.postReply(post, followUp);
+      }
       return { uris: postedPartUris, lastCid: lastSuccessfulCid }; // Return object with URIs and lastCid
     } catch (error) {
       console.error('Error posting multi-part reply:', error);
