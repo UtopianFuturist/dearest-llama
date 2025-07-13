@@ -2313,7 +2313,7 @@ Do not make up information not present in the search results. Keep the response 
         // Always apply the final cleanup before posting.
         await this.postReply(post, this.basicFormatFallback(responseTextToPost, 870));
         return null; // Bot feature inquiry handled
-      }
+    },
 
     async shortenResponseWithGemma(textToShorten) {
         if (!textToShorten || textToShorten.length <= 290) {
