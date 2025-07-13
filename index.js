@@ -4073,14 +4073,15 @@ Based on all available context (especially the user's immediate message), genera
     { "intent": "giphy_search", "search_query": "keywords" }
 9.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
     { "intent": "bot_feature_inquiry" }
-10. **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?").
+10. **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?", "what are you up to?"). Do NOT use for simple greetings.
     { "intent": "get_bot_status" }
 11. **"process_url"**: If the query contains a generic URL for processing.
     { "intent": "process_url", "url": "the_extracted_url" }
-12. **"none"**: If no other intent fits. This is the default for general conversation.
+12. **"none"**: If no other intent fits. This is the default for general conversation, including simple greetings like "hello", "good morning", or "thanks".
     { "intent": "none" }
 
 **PRIORITIZATION AND RULES:**
+- **"none" for Greetings**: Simple greetings or conversational pleasantries ("hello", "good morning", "thank you") should ALWAYS be classified as "none".
 - **Explicit over Implicit**: "web_search" (user says "search for X") takes priority over "autonomous_web_search" (user asks "what is X?"). "user_profile_analysis" is for explicit requests like "analyze my profile".
 - **Commands First**: Admin commands and specific tool commands (!meme, !apod) are highest priority.
 - **Internal Context**: If the internal search rating already suggested a search, you can use that to inform your decision, but the final intent choice is yours based on the full query.
