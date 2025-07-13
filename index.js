@@ -924,197 +924,62 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
     }
   }
 
-  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png', followUp = null) {
+  async postReply(post, response, imageBase64 = null, altText = "Generated image", embedRecordDetails = null, externalEmbedDetails = null, imageMimeType = 'image/png') {
     try {
       RateLimit.check();
-      RateLimit.check();
-      RateLimit.check();
       const CHAR_LIMIT_PER_POST = 300; // Bluesky's actual limit
-      const PAGE_SUFFIX_MAX_LENGTH = " ... [X/Y]".length; // Approx length of " ... [1/3]"
-      const MAX_PARTS = 3;
-      let textParts = [];
-      let postedPartUris = []; // Initialize array to store URIs of posted parts
-      let lastSuccessfulCid = null; // Added to store the CID of the last successfully posted part
 
-      let currentReplyTo = {
+      let text = utils.truncateResponse(response, CHAR_LIMIT_PER_POST);
+
+      const replyObject = {
+        text: text,
+        reply: {
           root: post.record?.reply?.root || { uri: post.uri, cid: post.cid },
           parent: { uri: post.uri, cid: post.cid }
+        }
       };
 
-      // Helper function for smart splitting
-      const splitTextIntoParts = (text, limitPerPartWithoutSuffix) => {
-          const parts = [];
-          let remainingText = text.trim();
-
-          while (remainingText.length > 0 && parts.length < MAX_PARTS) {
-              if (remainingText.length <= limitPerPartWithoutSuffix) {
-                  parts.push(remainingText);
-                  break;
-              }
-
-              let splitAt = limitPerPartWithoutSuffix;
-              let foundSplit = false;
-              // Try to find a sentence boundary or space to split at, looking backwards
-              for (let i = Math.min(limitPerPartWithoutSuffix, remainingText.length -1) ; i > limitPerPartWithoutSuffix / 2 && i > 0; i--) {
-                  if (['.', '!', '?'].includes(remainingText[i])) {
-                      splitAt = i + 1;
-                      foundSplit = true;
-                      break;
-                  }
-              }
-              if (!foundSplit) {
-                for (let i = Math.min(limitPerPartWithoutSuffix, remainingText.length -1); i > limitPerPartWithoutSuffix / 2 && i > 0; i--) {
-                    if (remainingText[i] === ' ') {
-                        splitAt = i;
-                        foundSplit = true;
-                        break;
-                    }
-                }
-              }
-
-              parts.push(remainingText.substring(0, splitAt).trim());
-              remainingText = remainingText.substring(splitAt).trim();
+      // Embed logic
+      if (embedRecordDetails && embedRecordDetails.uri && embedRecordDetails.cid) {
+        replyObject.embed = {
+          $type: 'app.bsky.embed.record',
+          record: {
+            uri: embedRecordDetails.uri,
+            cid: embedRecordDetails.cid
           }
-
-          // If text still remains after MAX_PARTS, the last part needs truncation with "..."
-          if (remainingText.length > 0 && parts.length >= MAX_PARTS) {
-            let lastPart = parts[MAX_PARTS - 1];
-            // Ensure "..." fits even after page suffix is added later
-            const availableSpaceForTextInLastPart = limitPerPartWithoutSuffix - "...".length;
-            if (lastPart.length > availableSpaceForTextInLastPart) {
-                 lastPart = lastPart.substring(0, availableSpaceForTextInLastPart);
-            }
-            parts[MAX_PARTS - 1] = lastPart + "...";
+        };
+      } else if (externalEmbedDetails && externalEmbedDetails.uri && externalEmbedDetails.title && externalEmbedDetails.description) {
+        replyObject.embed = {
+          $type: 'app.bsky.embed.external',
+          external: {
+            uri: externalEmbedDetails.uri,
+            title: externalEmbedDetails.title,
+            description: externalEmbedDetails.description
           }
-          return parts;
-      };
-
-      // Determine if splitting is needed and prepare text parts
-      if (response && response.trim().length > 0) {
-          // Tentatively assume single part, check length with potential suffix
-          const singlePartSuffix = " ... [1/1]".length; // Longest possible suffix for single part
-          if (response.length + (response.length > CHAR_LIMIT_PER_POST - singlePartSuffix ? PAGE_SUFFIX_MAX_LENGTH : 0) > CHAR_LIMIT_PER_POST) {
-              // If it's too long even for one part with suffix, or just too long in general, then split.
-              const effectiveLimitPerPost = CHAR_LIMIT_PER_POST - PAGE_SUFFIX_MAX_LENGTH;
-              textParts = splitTextIntoParts(response, effectiveLimitPerPost);
-          } else {
-              textParts.push(response.trim());
+        };
+      } else if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
+        const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
+        if (imageBytes.length > 0) {
+          const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: imageMimeType });
+          if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
+            replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
           }
-      } else if (!imageBase64) {
-          // No text and no image
-          console.warn("[postReply] No text and no image to post. Aborting.");
-          return;
-      }
-      // If only an image, textParts will be empty initially, handled below.
-
-      const totalParts = textParts.length > 0 ? textParts.length : (imageBase64 ? 1 : 0);
-      if (totalParts === 0) {
-          console.warn("[postReply] Calculated 0 parts (no text, no image). Nothing to post.");
-          return;
-      }
-      if (textParts.length > MAX_PARTS) { // Should be handled by splitTextIntoParts, but as safeguard
-          textParts = textParts.slice(0, MAX_PARTS);
+        }
       }
 
-
-      for (let i = 0; i < totalParts; i++) {
-          const isLastPart = (i === totalParts - 1);
-          let partText = textParts[i] || ""; // Use empty string if only image on last part and textParts is empty
-
-          if (totalParts > 1) {
-              // partText = `${partText.trim()} ... [${i + 1}/${totalParts}]`;
-          }
-
-          // Final safeguard, though previous logic should prevent exceeding this.
-          // utils.truncateResponse might not be ideal here if it adds its own "..."
-          if (partText.length > CHAR_LIMIT_PER_POST) {
-             console.warn(`[postReply] Part ${i+1}/${totalParts} text still too long (${partText.length}) after suffix. Truncating hard.`);
-             partText = partText.substring(0, CHAR_LIMIT_PER_POST - 3) + "...";
-          }
-
-          const replyObject = {
-              text: partText.trim(), // Trim whitespace that might have been added
-              reply: currentReplyTo
-          };
-
-          // Embed logic: Precedence: Record > External Link Card > Image
-          // Embeds are typically only on the last part of a multi-part reply.
-          if (isLastPart) {
-            if (embedRecordDetails && embedRecordDetails.uri && embedRecordDetails.cid) {
-              replyObject.embed = {
-                $type: 'app.bsky.embed.record',
-                record: {
-                  uri: embedRecordDetails.uri,
-                  cid: embedRecordDetails.cid
-                }
-              };
-              console.log(`[postReply] Record embed for part ${i+1}/${totalParts} created for URI: ${embedRecordDetails.uri}`);
-            } else if (externalEmbedDetails && externalEmbedDetails.uri && externalEmbedDetails.title && externalEmbedDetails.description) {
-              replyObject.embed = {
-                $type: 'app.bsky.embed.external',
-                external: {
-                  uri: externalEmbedDetails.uri,
-                  title: externalEmbedDetails.title,
-                  description: externalEmbedDetails.description
-                  // Bluesky proxy will attempt to fetch a thumbnail from the URI
-                }
-              };
-              console.log(`[postReply] External link card embed for part ${i+1}/${totalParts} created for URI: ${externalEmbedDetails.uri}`);
-            } else if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 0) {
-                try {
-                    const imageBytes = Uint8Array.from(Buffer.from(imageBase64, 'base64'));
-                    if (imageBytes.length === 0) {
-                        console.error('[postReply] Image byte array is empty for last part. Skipping image upload.');
-                    } else {
-                        const uploadedImage = await this.agent.uploadBlob(imageBytes, { encoding: imageMimeType });
-                        if (uploadedImage && uploadedImage.data && uploadedImage.data.blob) {
-                            replyObject.embed = { $type: 'app.bsky.embed.images', images: [{ image: uploadedImage.data.blob, alt: altText }] };
-                            console.log(`[postReply] Image embed for part ${i+1}/${totalParts} created with alt text: "${altText}" and mimeType: ${imageMimeType}`);
-                        } else {
-                            console.error('[postReply] Uploaded image data or blob is missing. Cannot embed image for last part.');
-                        }
-                    }
-                } catch (uploadError) { console.error(`[postReply] Error during image upload for part ${i+1}/${totalParts}:`, uploadError); }
-            } else if (imageBase64) { // imageBase64 present but invalid
-                console.warn(`[postReply] imageBase64 was present for last part but invalid. Skipping image embed.`);
-            }
-          }
-
-          // If only an embed is being posted (no text parts initially, e.g. just an image or card)
-          if (totalParts === 1 && textParts.length === 0 && (imageBase64 || embedRecordDetails || externalEmbedDetails)) {
-            replyObject.text = replyObject.text || ""; // Ensure text is at least an empty string if there's an embed and no other text.
-          }
-
-          // If there's an embed (any type), and the text is completely empty, Bluesky might require text to be explicitly null or not present.
-          // However, the current logic sets text to "" if it was going to be empty with an embed.
-          // For now, an empty string `text: ""` with an embed is generally acceptable.
-
-          console.log(`[postReply] Attempting to post part ${i + 1}/${totalParts}. Text: "${replyObject.text.substring(0,50)}..." Embed type: ${replyObject.embed ? replyObject.embed.$type : 'none'}`);
-          const result = await this.agent.post(replyObject);
-          console.log(`Successfully posted part ${i + 1}/${totalParts}: ${result.uri}, CID: ${result.cid}`);
-          postedPartUris.push(result.uri); // Add successfully posted URI
-          lastSuccessfulCid = result.cid; // Store the CID of the successfully posted part
-
-          if (!isLastPart) { // For the next part, reply to the part just posted
-              currentReplyTo = {
-                  root: currentReplyTo.root, // Root stays the same
-                  parent: { uri: result.uri, cid: result.cid }
-              };
-          }
-      }
-      this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
+      console.log(`[postReply] Attempting to post single reply. Text: "${replyObject.text.substring(0,50)}..." Embed type: ${replyObject.embed ? replyObject.embed.$type : 'none'}`);
+      const result = await this.agent.post(replyObject);
+      console.log(`Successfully posted reply: ${result.uri}`);
+      this.repliedPosts.add(post.uri);
       const threadRootUri = post.record?.reply?.root?.uri || post.uri;
       const conversationLength = (this.conversationLengths.get(threadRootUri) || 0) + 1;
       this.conversationLengths.set(threadRootUri, conversationLength);
-      if (followUp) {
-        await this.postReply(post, followUp);
-      }
-      return { uris: postedPartUris, lastCid: lastSuccessfulCid }; // Return object with URIs and lastCid
+
+      return { uris: [result.uri], lastCid: result.cid };
     } catch (error) {
-      console.error('Error posting multi-part reply:', error);
-      this.repliedPosts.add(post.uri); // Still mark as replied to avoid loops on error
-      // Return any URIs that were successfully posted before the error, and the lastCid obtained
-      return { uris: postedPartUris, lastCid: lastSuccessfulCid };
+      console.error('Error posting reply:', error);
+      this.repliedPosts.add(post.uri);
+      return { uris: [], lastCid: null };
     }
   }
 
