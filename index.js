@@ -130,20 +130,6 @@ const utils = {
   truncateResponse(text, maxLength = 290) {
     if (!text || text.length <= maxLength) return text;
     
-    const searchEnd = Math.min(maxLength, text.length);
-    const searchStart = Math.max(0, searchEnd - 50);
-    const segment = text.substring(searchStart, searchEnd);
-    
-    const lastSentenceEnd = Math.max(
-      segment.lastIndexOf('.'),
-      segment.lastIndexOf('?'),
-      segment.lastIndexOf('!')
-    );
-    
-    if (lastSentenceEnd !== -1) {
-      return text.substring(0, searchStart + lastSentenceEnd + 1).trim();
-    }
-    
     const lastSpace = text.lastIndexOf(' ', maxLength - 3);
     return lastSpace !== -1 
       ? text.substring(0, lastSpace) + '...'
