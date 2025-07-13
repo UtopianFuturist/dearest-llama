@@ -2318,36 +2318,14 @@ Do not make up information not present in the search results. Keep the response 
         return null; // Bot feature inquiry handled
       }
       else if (searchIntent.intent === "get_bot_status") {
-        console.log(`[GetBotStatus] Intent detected for query: "${userQueryText}"`);
-        let recentActivity = "I've been chatting with a few people and exploring some new ideas!"; // Default if no posts.
+        console.log(`[GetBotStatus] Intent detected for query: "${userQueryText}". Providing generic status response.`);
+        // This intent now provides a generic, static response to the user,
+        // and does not expose the bot's recent reply history.
+        // The logic for fetching internal context for other intents remains unaffected.
+        const recentActivity = "I'm currently processing information and engaging in conversations. Thanks for asking!"; // Generic, non-specific activity
 
-        if (this.repliedPosts.size > 0) {
-            try {
-                // Get the last 3 post URIs the bot replied to
-                const recentPostUris = Array.from(this.repliedPosts).slice(-3);
-                const topics = [];
-                for (const uri of recentPostUris) {
-                    try {
-                        const { data: threadView } = await this.agent.getPostThread({ uri });
-                        if (threadView && threadView.thread && threadView.thread.post && threadView.thread.post.record && typeof threadView.thread.post.record.text === 'string') {
-                            topics.push(threadView.thread.post.record.text.substring(0, 75));
-                        }
-                    } catch (threadError) {
-                        console.error(`[GetBotStatus] Error fetching individual thread for URI ${uri}:`, threadError);
-                    }
-                }
-
-                if (topics.length > 0) {
-                    recentActivity = `I've just been chatting about things like "${topics.join('", "')}"...`;
-                }
-            } catch (error) {
-                console.error("[GetBotStatus] Error processing recent replied-to posts:", error);
-                // Fallback to default activity text
-            }
-        }
-
-        const statusSystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user has asked what you are up to or how you are doing. Based on the provided summary of your recent activity, give a brief, natural, and conversational response. Do NOT list your skills. Be casual. Do not repeat the prompt.`;
-        const statusUserPrompt = `My recent activity summary is: "${recentActivity}". How should I respond to @${post.author.handle} asking what I'm up to?`;
+        const statusSystemPrompt = `You are an AI assistant replying to @${post.author.handle}. The user has asked what you are up to or how you are doing. Your current status is that you are actively processing information and engaging in conversations. Give a brief, natural, and friendly response reflecting this. Do NOT list your skills or talk about specific chats. Be casual and inviting.`;
+        const statusUserPrompt = `Based on my current status (actively processing and chatting), how should I respond to @${post.author.handle} asking what I'm up to?`;
 
         const nimStatusResponse = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
           method: 'POST',
