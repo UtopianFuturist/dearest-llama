@@ -1945,9 +1945,69 @@ Do not make up information not present in the search results. Keep the response 
 
 
       // 1. Check for search history intent first (original logic continues if not image article search)
-      const searchIntent = await this.getSearchHistoryIntent(userQueryText);
+      const searchIntent = await this.determineUserIntent(userQueryText);
 
-      if (searchIntent.intent === "search_history") {
+      if (searchIntent.intent === "autonomous_web_search" && searchIntent.search_query) {
+        console.log(`[AutonomousWebSearch] Intent detected. Query: "${searchIntent.search_query}"`);
+        const searchResults = await this.performGoogleWebSearch(searchIntent.search_query, null, 'webpage');
+        let webContext = "";
+        if (searchResults && searchResults.length > 0) {
+          const resultsText = searchResults.map((res, idx) =>
+            `Result ${idx + 1}: Title: ${res.title}, Snippet: ${res.snippet}`
+          ).join("\n");
+          webContext = `Based on a quick web search, here's some information that might be relevant:\n${resultsText}\n\n`;
+        } else {
+          console.log(`[AutonomousWebSearch] No results found for query: "${searchIntent.search_query}". Proceeding without web context.`);
+        }
+
+        // Now, re-generate the response with the added web context.
+        // We will pass this context to the standard conversational response generator.
+        // This avoids duplicating the response generation logic.
+        // The conversationHistory already exists, we prepend our new context.
+        let conversationHistoryWithWebContext = webContext;
+        if (context && context.length > 0) {
+          for (const msg of context) {
+            conversationHistoryWithWebContext += `${msg.author}: ${msg.text}\n`;
+            if (msg.images && msg.images.length > 0) {
+              msg.images.forEach(image => { if (image.alt) conversationHistoryWithWebContext += `[Image description: ${image.alt}]\n`; });
+            }
+          }
+        }
+
+        const nemotronUserPrompt = `You are replying to @${post.author.handle}. Here's the conversation context, which includes internal web search results:\n\n${conversationHistoryWithWebContext}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message, using the provided web search context to inform your answer. Your response will be posted to BlueSky as a reply. For detailed topics, you can generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
+
+        console.log(`NIM CALL START: Autonomous Web Search Response for model nvidia/llama-3.3-nemotron-super-49b-v1`);
+        const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            messages: [
+              { role: "system", content: `${this.config.SAFETY_SYSTEM_PROMPT} ${this.config.TEXT_SYSTEM_PROMPT}` },
+              { role: "user", content: nemotronUserPrompt }
+            ],
+            temperature: 0.7, max_tokens: 350,
+            stream: false
+          }),
+            customTimeout: 120000
+        });
+        console.log(`NIM CALL END: Autonomous Web Search Response - Status: ${response.status}`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.choices && data.choices.length > 0 && data.choices[0].message.content) {
+                const finalResponse = this.basicFormatFallback(data.choices[0].message.content, 870);
+                await this.postReply(post, finalResponse);
+            } else {
+                // Fallback to a simple response if generation fails
+                await this.postReply(post, "I've processed your request.");
+            }
+        } else {
+            console.error(`[AutonomousWebSearch] NIM API error after search: ${response.status}`);
+            await this.postReply(post, "I looked into that for you, but I'm having trouble formulating a response right now.");
+        }
+        return null; // End of autonomous web search flow
+      }
+      else if (searchIntent.intent === "search_history") {
         console.log(`[SearchHistory] Intent detected. Criteria:`, searchIntent);
         let matches = [];
         let searchPerformed = ""; // To describe which search was done
@@ -3958,80 +4018,63 @@ ${baseInstruction}`;
     }
   }
 
-  async getSearchHistoryIntent(userQueryText) { // Renaming from getSearchHistoryIntent
+  async determineUserIntent(userQueryText, conversationContext) {
     if (!userQueryText || userQueryText.trim() === "") {
       return { intent: "none" };
     }
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
+
+    // First, perform the "search necessity" rating.
+    const searchRating = await this.rateWebSearchNecessity(userQueryText, conversationContext);
+
+    // If the rating indicates a high-confidence need for a web search,
+    // we can bypass the more complex intent model and go straight to the autonomous search.
+    if (searchRating.search_needed && searchRating.confidence === 'high' && searchRating.suggested_query) {
+      console.log(`[determineUserIntent] High-confidence autonomous web search triggered by internal rating. Query: "${searchRating.suggested_query}"`);
+      return {
+        intent: "autonomous_web_search",
+        search_query: searchRating.suggested_query,
+        search_type: "webpage", // Default to webpage for autonomous searches
+        freshness_suggestion: null // Can be refined later if needed
+      };
+    }
+
+    // If not a high-confidence autonomous search, proceed with the full intent classification model.
+    const modelId = 'google/gemma-3n-e4b-it';
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
-    const systemPromptContent = `Your task is to analyze the user's query to determine if it's a request to find a specific item from past interactions OR a general question that could be answered by a web search.
-You will also be used to determine if an image-based query should trigger OCR and search.
-Output a JSON object. Choose ONE of the following intent structures:
-1. If searching PAST INTERACTIONS (conversation history, bot's gallery):
-{
-  "intent": "search_history",
-  "target_type": "image" | "link" | "post" | "message" | "unknown", "author_filter": "user" | "bot" | "any", "keywords": ["keyword1", ...], "recency_cue": "textual cue for recency" | null, "search_scope": "bot_gallery" | "conversation" | null
-}
-2. If it's a GENERAL QUESTION for a WEB SEARCH (text or image):
-{
-  "intent": "web_search",
-  "search_query": "optimized query for web search engine", "search_type": "webpage" | "image", "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null
-}
-3. If asking for NASA's Astronomy Picture of the Day (APOD):
-{
-  "intent": "nasa_apod",
-  "date": "YYYY-MM-DD" | "today" | null
-}
-4. If asking to create a meme using Imgflip templates:
-{
-  "intent": "create_meme",
-  "template_query": "drake" | "181913649" | "list" | null, "captions": ["top text", ...], "generate_captions": true | false
-}
-5. If the user explicitly asks you to SEARCH or FIND a YouTube video on a topic:
-{
-  "intent": "youtube_search",
-  "search_query": "optimized query for YouTube video search"
-}
-6. If the user explicitly asks you to SEARCH or FIND a GIF from GIPHY on a topic (e.g., using terms like "gif of", "giphy", "find a gif"):
-{
-  "intent": "giphy_search",
-  "search_query": "keywords for GIPHY search"
-}
-7. If the query is asking about the bot's own features, capabilities, how it works, what it can do, its purpose, motivations, 'secret agenda', or general identity:
-{
-  "intent": "bot_feature_inquiry"
-}
-8. If the user is asking a direct, conversational question about the bot's current state or recent activity (e.g., "how are you?", "what are you doing?", "what are you up to?"):
-{
-  "intent": "get_bot_status"
-}
-9. If the query contains a generic URL (http/https) that is not part of another specific command (like !post+video <url> or youtube search <url>):
-{
-  "intent": "process_url",
-  "url": "the_extracted_url"
-}
-10. If NEITHER of the above: { "intent": "none" }
+    const systemPromptContent = `Your task is to analyze the user's query to determine their primary intent. Output a JSON object. Choose ONE of the following intent structures:
+1.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
+    { "intent": "search_history", "target_type": "image" | "link" | "post", "author_filter": "user" | "bot" | "any", "keywords": ["keyword1", ...], "recency_cue": "textual cue" | null, "search_scope": "bot_gallery" | "conversation" | null }
+2.  **"web_search"**: For when the user EXPLICITLY asks for a web or image search (e.g., "search for...", "find me pictures of...").
+    { "intent": "web_search", "search_query": "optimized query", "search_type": "webpage" | "image", "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null }
+3.  **"autonomous_web_search"**: For when the user asks a factual question that IMPLIES a web search is needed for a good answer, but they DON'T explicitly ask to search. The bot will perform this search internally to gather context.
+    { "intent": "autonomous_web_search", "search_query": "optimized query for internal search" }
+4.  **"nasa_apod"**: For "NASA Picture of the Day" requests.
+    { "intent": "nasa_apod", "date": "YYYY-MM-DD" | "today" | "yesterday" | null }
+5.  **"create_meme"**: For creating a meme.
+    { "intent": "create_meme", "template_query": "template name or id" | "list", "captions": ["text1", ...], "generate_captions": true | false }
+6.  **"youtube_search"**: For EXPLICIT requests to find a YouTube video.
+    { "intent": "youtube_search", "search_query": "optimized query" }
+7.  **"giphy_search"**: For EXPLICIT requests to find a GIF.
+    { "intent": "giphy_search", "search_query": "keywords" }
+8.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
+    { "intent": "bot_feature_inquiry" }
+9.  **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?").
+    { "intent": "get_bot_status" }
+10. **"process_url"**: If the query contains a generic URL for processing.
+    { "intent": "process_url", "url": "the_extracted_url" }
+11. **"none"**: If no other intent fits. This is the default for general conversation.
+    { "intent": "none" }
 
-IMPORTANT RULES for "search_history":
-- "target_type": "image" if "image", "picture", "photo", "generated image", "drew", "pic of" mentioned. This takes precedence. "link" if "link", "URL", "site" mentioned. Else, "message" or "post".
-- "author_filter": "user" (they sent/posted), "bot" (you sent/generated), or "any".
-- "keywords": Core content terms. EXCLUDE recency cues (e.g., "yesterday") AND type words (e.g., "image", "link"). Max 5.
-- "recency_cue": Time phrases (e.g., "yesterday", "last week"). Null if none.
-- "search_scope": For "target_type": "image" AND "author_filter": "bot": If user asks for an image bot *created/generated* and not explicitly tied to a direct reply/chat, prefer "bot_gallery". If 'sent me' or part of shared chat, "conversation". Default "conversation" if ambiguous. Null otherwise.
-IMPORTANT RULES for "web_search":
-- Use "web_search" for general knowledge, current info/news, explanations not tied to prior interactions.
-- "search_query": Essence of user's question. For news from a source (e.g., "recent news from NBC"), simplify to "[Source] news".
-- "freshness_suggestion": For "recent", "latest", "today", "this week", "this month", suggest "oneDay", "oneWeek", "oneMonth". Smallest sensible period. Null if no strong cue.
-IMPORTANT RULES for "process_url":
-- This intent is for when a user posts a URL and might expect the bot to fetch, summarize, or display its content.
-- Extract the first valid http/https URL found in the query.
-- Do NOT trigger this if the URL is clearly an argument to another command (e.g. \`!post+video https://youtube.com/...\` should be \`admin_command\`, not \`process_url\`. \`youtube search for https://youtu.be/...\` should be \`youtube_search\`).
-PRIORITIZATION: Admin commands > Specific commands (meme, apod, youtube, giphy) > Past interactions ("you sent me", "we discussed") -> "search_history" (conversation). Bot created/generated image (not direct chat) -> "search_history" (bot_gallery). Generic URL -> "process_url". Factual world question -> "web_search". Bot feature inquiry.
-If NEITHER intent fits, or if very unsure, use {"intent": "none"}. Output ONLY the JSON object.`;
-    // System prompt shortened for diff display
+**PRIORITIZATION AND RULES:**
+- **Explicit over Implicit**: "web_search" (user says "search for X") takes priority over "autonomous_web_search" (user asks "what is X?").
+- **Commands First**: Admin commands and specific tool commands (!meme, !apod) are highest priority.
+- **Internal Context**: If the internal search rating already suggested a search, you can use that to inform your decision, but the final intent choice is yours based on the full query.
+- **"autonomous_web_search" Criteria**: Use this for factual questions (who, what, when, where, why, explain) that cannot be answered from conversation history alone. Do NOT use it for opinions, personal questions, or simple greetings.
+- **Safety**: If a query for any search type seems unsafe, you may classify it as "none".
+- **Output ONLY the JSON object.**`;
 
-    const userPromptContent = `User query: '${userQueryText}'`;
+    const userPromptContent = `User query: '${userQueryText}'\n\nConversation Context:\n${conversationContext || "No context provided."}`;
     const defaultErrorResponse = { intent: "none", error: "Intent classification failed." };
 
     try {
@@ -4220,6 +4263,7 @@ Respond with only the single word YES or the single word NO.`;
   async isRequestingDetails(userFollowUpText) {
     if (!userFollowUpText || userFollowUpText.trim() === "") return false;
 
+
     const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
     const systemPromptContent = "The user was previously asked if they wanted a detailed breakdown of a profile analysis. Does their current reply indicate they affirmatively want to see these details? Respond with only YES or NO.";
@@ -4254,6 +4298,99 @@ Respond with only the single word YES or the single word NO.`;
     } catch (error) {
       console.error(`[IntentClassifier] NIM CALL EXCEPTION: Error in isRequestingDetails with model ${modelId}: ${error.message}. Defaulting to false.`);
       return false;
+    }
+  }
+
+  async rateWebSearchNecessity(userQueryText, conversationContext) {
+    const modelId = 'google/gemma-3-9b-it'; // Using Gemma 3 for this rating task.
+    const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
+
+    const systemPrompt = `You are an expert search query analyst. Your task is to determine if a user's query requires an internal, autonomous web search to provide a high-quality answer.
+Analyze the user's query in the context of the conversation.
+Output a JSON object with the following structure:
+{
+  "search_needed": boolean,
+  "confidence": "high" | "medium" | "low" | null,
+  "suggested_query": "a concise, effective search query" | null,
+  "reasoning": "a brief explanation for your decision"
+}
+
+**Criteria for "search_needed": true**:
+- The query asks for specific, factual information (e.g., "who is...", "what is the capital of...", "explain X").
+- The query asks for current events, news, or information that is likely outside the bot's pre-existing knowledge.
+- The query cannot be answered sufficiently with the provided conversation context.
+
+**Criteria for "search_needed": false**:
+- The query is a simple greeting, conversational filler, or social interaction ("hello", "how are you?", "lol").
+- The query is a direct command to the bot that doesn't require external data (e.g., "!mute", "!help", "create a meme").
+- The query is an opinion-based question directed at the bot ("what do you think of...?").
+- The query is too vague or ambiguous to form a meaningful search query ("tell me something interesting").
+
+**Confidence Score**:
+- **high**: You are very certain a search is necessary and a good query can be formed.
+- **medium**: A search might be helpful, but the query is a bit ambiguous or could potentially be answered conversationally.
+- **low**: A search is probably not needed, but there's a slight chance it could add value.
+
+**Suggested Query**:
+- If "search_needed" is true, provide a clean, concise search query that captures the essence of the user's question.
+- If "search_needed" is false, this should be null.
+
+**Example 1**:
+Query: "Hey, can you explain the concept of quantum entanglement for me?"
+Context: "User just said hello."
+Output: { "search_needed": true, "confidence": "high", "suggested_query": "explain quantum entanglement", "reasoning": "The user is asking for a factual explanation of a complex scientific topic." }
+
+**Example 2**:
+Query: "lol that's funny"
+Context: "Bot just told a joke."
+Output: { "search_needed": false, "confidence": null, "suggested_query": null, "reasoning": "The user's query is a conversational reaction and does not require a web search." }
+
+**Example 3**:
+Query: "what about that new movie?"
+Context: "No prior mention of any movie."
+Output: { "search_needed": false, "confidence": null, "suggested_query": null, "reasoning": "The query is too vague and lacks specific details to form a useful search query." }
+
+Output ONLY the JSON object.`;
+
+    const userPrompt = `User Query: "${userQueryText}"\n\nRecent Conversation Context:\n${conversationContext || "No context provided."}`;
+
+    try {
+      console.log(`[rateWebSearchNecessity] Calling ${modelId} for query: "${userQueryText.substring(0, 100)}..."`);
+      const response = await fetchWithRetries(endpointUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
+          temperature: 0.1,
+          max_tokens: 250,
+          stream: false,
+        }),
+        customTimeout: 45000,
+      });
+
+      if (!response.ok) {
+        console.error(`[rateWebSearchNecessity] API error ${response.status}. Defaulting to no search.`);
+        return { search_needed: false, confidence: null, suggested_query: null, reasoning: `API error ${response.status}` };
+      }
+
+      const data = await response.json();
+      if (data.choices && data.choices[0].message && data.choices[0].message.content) {
+        let rawContent = data.choices[0].message.content.trim();
+        // Extract JSON from markdown code block if present
+        const jsonMatch = rawContent.match(/```json\n([\s\S]*?)\n```/);
+        if (jsonMatch && jsonMatch[1]) {
+          rawContent = jsonMatch[1];
+        }
+        const result = JSON.parse(rawContent);
+        console.log('[rateWebSearchNecessity] Search necessity rating:', result);
+        return result;
+      }
+      console.error('[rateWebSearchNecessity] Unexpected response format. Defaulting to no search.');
+      return { search_needed: false, confidence: null, suggested_query: null, reasoning: 'Unexpected API response format' };
+    } catch (error) {
+      console.error(`[rateWebSearchNecessity] Exception during rating: ${error.message}. Defaulting to no search.`);
+      return { search_needed: false, confidence: null, suggested_query: null, reasoning: `Exception: ${error.message}` };
     }
   }
 
