@@ -4680,7 +4680,7 @@ async function startBots() {
   const llamaBot = new LlamaBot({
     ...config,
     BLUESKY_IDENTIFIER: config.BLUESKY_IDENTIFIER,
-    BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD,
+    BLUESKY_APP_PASSWORD: config.BLUESKY_APP_PASSWORD
   }, agent);
 
   // Run inline tests
