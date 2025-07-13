@@ -2895,11 +2895,10 @@ Do not make up information not present in the search results. Keep the response 
 
         let userBlueskyPostsContext = "";
         // If the intent is an explicit request for profile analysis, OR if the bot decides autonomously.
-        const isExplicitProfileAnalysis = searchIntent.intent === 'user_profile_analysis';
         const isAutonomousProfileAnalysis = await this.shouldFetchProfileContext(userQueryText);
 
-        if (isExplicitProfileAnalysis || isAutonomousProfileAnalysis) {
-          console.log(`[Context] Fetching profile context. Explicit request: ${isExplicitProfileAnalysis}, Autonomous decision: ${isAutonomousProfileAnalysis}. Query: "${userQueryText}"`);
+        if (isAutonomousProfileAnalysis) {
+          console.log(`[Context] Fetching profile context. Autonomous decision: ${isAutonomousProfileAnalysis}. Query: "${userQueryText}"`);
           try {
             const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
             if (conversationHistoryItems.length > 0) {
@@ -2916,29 +2915,7 @@ Do not make up information not present in the search results. Keep the response 
         let nemotronUserPrompt = "";
         const baseInstruction = `Your response will be posted to BlueSky as a reply. For detailed topics, generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
 
-        if (isExplicitProfileAnalysis && userBlueskyPostsContext) {
-          // Explicit Profile Analysis Prompt (generates summary and details for the user)
-          nemotronUserPrompt = `You are replying to @${post.author.handle}. The user's question is: "${post.record.text}"
-
-Activate your "User Profile Analyzer" capability. Based on the "USER'S RECENT BLUESKY ACTIVITY" provided below, generate your response in two parts:
-
-PART 1: SUMMARY AND INVITATION
-Format this part starting with the exact marker "[SUMMARY FINDING WITH INVITATION]".
-Provide a concise summary (approx. 250-280 characters, in your persona) of your analysis of the user's activity.
-This summary **must end with a clear question inviting the user to ask for more details** (e.g., "I found some interesting patterns. Would you like a more detailed breakdown of these points?").
-
-PART 2: DETAILED ANALYSIS POINTS
-Immediately following Part 1, and on new lines, provide 1 to 3 detailed analysis points.
-Each point MUST start with the exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc.
-Each point should be a short paragraph (under 290 characters).
-
-USER'S RECENT BLUESKY ACTIVITY (or CONVERSATION HISTORY):
-${userBlueskyPostsContext}
----
-${conversationHistory ? `\nBrief current thread context:\n${conversationHistory}\n---` : ''}
-Your structured response (Summary with Invitation, then Detailed Points):
-${baseInstruction}`;
-        } else if (isAutonomousProfileAnalysis && userBlueskyPostsContext) {
+        if (isAutonomousProfileAnalysis && userBlueskyPostsContext) {
           // Autonomous Profile Analysis (Internal Context Prompt)
           nemotronUserPrompt = `You are replying to @${post.author.handle}.
 The user's immediate message is: "${post.record.text}"
@@ -2954,7 +2931,7 @@ Based on all available context (especially the user's immediate message), genera
           nemotronUserPrompt = `You are replying to @${post.author.handle}. Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
         }
 
-        console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${isExplicitProfileAnalysis ? "Explicit Profile Analysis" : (isAutonomousProfileAnalysis ? "Autonomous Internal Context" : "Standard")}`);
+        console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${isAutonomousProfileAnalysis ? "Autonomous Internal Context" : "Standard"}`);
       const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
@@ -3012,13 +2989,8 @@ Based on all available context (especially the user's immediate message), genera
       // Determine which filter prompt to use
       const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (\`**\`) used for bold emphasis. Single asterisks used for roleplay actions (e.g., \`*smiles*\`, \`*nods*\`) should be PRESERVED. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
       let filterSystemPromptToUse = universalMinimalFilterPrompt;
-      if (isExplicitProfileAnalysis) { // This is the condition for when Nemotron generates a structured response
-        filterSystemPromptToUse = structuredResponseFilterPrompt;
-        console.log("[LlamaBot.generateResponse] Using STRUCTURED response filter prompt for Gemma.");
-      } else {
-        // universalMinimalFilterPrompt is already defined above and assigned to filterSystemPromptToUse by default
-        console.log("[LlamaBot.generateResponse] Using UNIVERSAL MINIMAL response filter prompt for Gemma.");
-      }
+      // universalMinimalFilterPrompt is already defined above and assigned to filterSystemPromptToUse by default
+      console.log("[LlamaBot.generateResponse] Using UNIVERSAL MINIMAL response filter prompt for Gemma.");
 
 
       let gemmaFormattedText;
@@ -3066,115 +3038,7 @@ Based on all available context (especially the user's immediate message), genera
       // Let's assume `post.generatedImageForThisInteraction = { imageBase64, altText }` if available.
       // This is a placeholder; actual passing of this data needs to be handled from the monitor call.
 
-      if (isExplicitProfileAnalysis) { // Only parse for summary/details if it was an explicit request
-        const summaryMarker = "[SUMMARY FINDING WITH INVITATION]";
-        const detailMarkerBase = "[DETAILED ANALYSIS POINT "; // e.g., "[DETAILED ANALYSIS POINT 1]"
-
-        let summaryText = "";
-        const detailedPoints = [];
-
-        const summaryStartIndex = scoutFormattedText.indexOf(summaryMarker);
-
-        if (summaryStartIndex !== -1) {
-          let textAfterSummaryMarker = scoutFormattedText.substring(summaryStartIndex + summaryMarker.length);
-
-          let nextDetailPointIndex = textAfterSummaryMarker.indexOf(detailMarkerBase + "1]");
-          if (nextDetailPointIndex === -1) {
-            summaryText = textAfterSummaryMarker.trim();
-          } else {
-            summaryText = textAfterSummaryMarker.substring(0, nextDetailPointIndex).trim();
-            textAfterSummaryMarker = textAfterSummaryMarker.substring(nextDetailPointIndex);
-          }
-
-          // Extract detailed points
-          let currentPointNum = 1;
-          while (detailedPoints.length < 3) { // Max 3 detailed points
-            const currentDetailMarker = `${detailMarkerBase}${currentPointNum}]`;
-            const nextDetailMarker = `${detailMarkerBase}${currentPointNum + 1}]`;
-
-            const startOfCurrentPoint = textAfterSummaryMarker.indexOf(currentDetailMarker);
-            if (startOfCurrentPoint === -1) break;
-
-            let endOfCurrentPoint = textAfterSummaryMarker.indexOf(nextDetailMarker, startOfCurrentPoint + currentDetailMarker.length);
-            let pointTextContent;
-
-            if (endOfCurrentPoint === -1) {
-              pointTextContent = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length).trim();
-            } else {
-              pointTextContent = textAfterSummaryMarker.substring(startOfCurrentPoint + currentDetailMarker.length, endOfCurrentPoint).trim();
-            }
-
-            // Clean any leading list-like markers from Nemotron/Scout
-    // Clean known tags from pointTextContent
-    let cleanPointText = pointTextContent
-        .replace(/\[SUMMARY FINDING WITH INVITATION\]/g, "")
-        .replace(/\[DETAILED ANALYSIS POINT \d+\]/g, "")
-        .trim();
-    // Also keep existing list marker cleaning
-    cleanPointText = cleanPointText.replace(/^(\s*(\d+\.|\d+\)|\*|-)\s*)+/, '').trim();
-
-    if (cleanPointText) {
-        detailedPoints.push(cleanPointText);
-            }
-
-            if (endOfCurrentPoint === -1) break; // Last point processed
-            textAfterSummaryMarker = textAfterSummaryMarker.substring(endOfCurrentPoint); // Move to the start of the next potential marker
-            currentPointNum++;
-          }
-
-          console.log(`[LlamaBot.generateResponse] Parsed Summary: "${summaryText}"`);
-          detailedPoints.forEach((p, idx) => console.log(`[LlamaBot.generateResponse] Parsed Detail Point ${idx + 1} (already cleaned of tags): "${p.substring(0,100)}..."`));
-
-          // Defensively clean summaryText again, though initial parsing should handle it.
-          const cleanSummaryText = summaryText
-            .replace(/\[SUMMARY FINDING WITH INVITATION\]/g, "")
-            .replace(/\[DETAILED ANALYSIS POINT \d+\]/g, "") // Should not be in summary, but defensive
-            .trim();
-
-          if (cleanSummaryText) {
-            // Store detailed points if any, then return only summary for initial post
-            // Post the summary first. No image on summary.
-            // detailedPoints array already contains cleaned points.
-            const summaryPostReplyResult = await this.postReply(post, cleanSummaryText, null, null);
-
-            if (summaryPostReplyResult && summaryPostReplyResult.uris.length > 0 && summaryPostReplyResult.lastCid) {
-              const summaryPostUri = summaryPostReplyResult.uris[summaryPostReplyResult.uris.length - 1]; // Get the last part's URI
-              const summaryPostCid = summaryPostReplyResult.lastCid; // Get the last part's CID
-              console.log(`[LlamaBot.generateResponse] Summary posted successfully. Last part URI: ${summaryPostUri}, CID: ${summaryPostCid}. Total parts: ${summaryPostReplyResult.uris.length}`);
-              if (detailedPoints.length > 0) {
-                this.pendingDetailedAnalyses.set(post.uri, { // Keyed by original user post URI
-                  points: detailedPoints,
-                  timestamp: Date.now(),
-                  summaryPostUri: summaryPostUri, // URI of the bot's summary post
-                  summaryPostCid: summaryPostCid, // CID of the bot's summary post
-                  replyToRootUri: post.record?.reply?.root?.uri || post.uri, // Root for threading details
-                  // imageBase64 and altText from the initial query, if any.
-                  // These need to be passed into generateResponse if they existed.
-                  // For now, assuming they might be on `post.generatedImageForThisInteraction`
-                  imageBase64: post.generatedImageForThisInteraction?.imageBase64 || null,
-                  altText: post.generatedImageForThisInteraction?.altText || "Generated image for detail",
-                });
-                console.log(`[LlamaBot.generateResponse] Stored ${detailedPoints.length} detailed points, pending for original post URI: ${post.uri}, summary URI: ${summaryPostUri}`);
-              }
-              return null; // Signal that response (summary) has been handled, and details are pending.
-            } else { // else for if (summaryPostUrisArray && summaryPostUrisArray.length > 0)
-              console.error("[LlamaBot.generateResponse] Failed to post summary. Falling back to sending full text.");
-              return scoutFormattedText; // Fallback
-            }
-          } else { // else for if (summaryText)
-            console.warn("[LlamaBot.generateResponse] Profile analysis: Summary text was empty after parsing. Returning full Scout output.");
-            return scoutFormattedText; // Fallback
-          } // Closes else for if (summaryText)
-        } else { // else for if (summaryStartIndex !== -1)
-          console.warn("[LlamaBot.generateResponse] Profile analysis: [SUMMARY FINDING WITH INVITATION] marker not found. Returning full Scout output.");
-          return scoutFormattedText; // Fallback
-        } // Closes else for if (summaryStartIndex !== -1)
-      } else { // else for if (fetchContextDecision)
-        // This path is taken if fetchContextDecision is false.
-        // nemotronUserPrompt was set, shared API calls produced scoutFormattedText.
-        // Return scoutFormattedText directly without parsing for summary/details.
-        return scoutFormattedText;
-      } // Closes else for if (fetchContextDecision)
+      return scoutFormattedText;
     } // Closes the main 'else' block starting at L1390
     } catch (error) { // This is line 1520 in Render's logs
       console.error(`[LlamaBot.generateResponse] Caught error for post URI: ${post.uri}. Error:`, error);
@@ -4080,22 +3944,19 @@ Based on all available context (especially the user's immediate message), genera
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     const systemPromptContent = `Your task is to analyze the user's query to determine their primary intent. Output a JSON object. Choose ONE of the following intent structures:
-1.  **"user_profile_analysis"**: For EXPLICIT requests to analyze the user's own profile, posts, or online persona.
-    { "intent": "user_profile_analysis" }
-2.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
+1.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
     { "intent": "search_history", "target_type": "image" | "link" | "post", "author_filter": "user" | "bot" | "any", "keywords": ["keyword1", ...], "recency_cue": "textual cue" | null, "search_scope": "bot_gallery" | "conversation" | null }
-3.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
+2.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
     { "intent": "bot_feature_inquiry" }
-4.  **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?", "what are you up to?"). Do NOT use for simple greetings.
+3.  **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?", "what are you up to?"). Do NOT use for simple greetings.
     { "intent": "get_bot_status" }
-5.  **"process_url"**: If the query contains a generic URL for processing.
+4.  **"process_url"**: If the query contains a generic URL for processing.
     { "intent": "process_url", "url": "the_extracted_url" }
-6.  **"none"**: If no other intent fits. This is the default for general conversation, including simple greetings like "hello", "good morning", or "thanks".
+5.  **"none"**: If no other intent fits. This is the default for general conversation, including simple greetings like "hello", "good morning", or "thanks".
     { "intent": "none" }
 
 **PRIORITIZATION AND RULES:**
 - **Greetings vs. Status**: A simple greeting like "Good morning" is "none". A greeting combined with a question like "Good morning, what are you up to?" is "get_bot_status".
-- **"user_profile_analysis" is for explicit requests like "analyze my profile".
 - **Internal Context**: If the internal search rating already suggested a search, you can use that to inform your decision, but the final intent choice is yours based on the full query.
 - **Safety**: If a query for any search type seems unsafe, you may classify it as "none".
 - **Output ONLY the JSON object.**`;
@@ -4220,60 +4081,9 @@ Based on all available context (especially the user's immediate message), genera
   }
 
   async shouldFetchProfileContext(userQueryText) {
-    if (!userQueryText || userQueryText.trim() === "") return false;
-
-    const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
-    const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
-    const systemPromptContent = `Your task is to determine if the user's query is primarily asking for an analysis, reflection, or information about THE USER THEMSELVES (their own posts, their online personality, their Bluesky account, or their life) where THEIR RECENT BLUESKY ACTIVITY could provide relevant context.
-
-If the query is about the USER'S activity, personality, or how they interact, respond YES.
-Examples of queries that should result in YES:
-- "What do you think of my posts?"
-- "How do I come across online?"
-- "Analyze my recent interactions."
-- "Tell me about my posting habits."
-
-If the query is about the BOT'S identity, features, capabilities, purpose, "secret agenda", or how the BOT works, respond NO.
-Examples of queries that should result in NO:
-- "What's your secret agenda?"
-- "What are you trying to do?"
-- "Tell me about yourself."
-- "What are your capabilities?"
-- "How do you work?"
-
-Respond with only the single word YES or the single word NO.`;
-    const userPromptContent = `User query: '${userQueryText}'`;
-
-    try {
-      console.log(`[IntentClassifier] Calling ${modelId} (shouldFetchProfileContext) for query: "${userQueryText.substring(0,100)}..."`);
-      const response = await fetchWithRetries(endpointUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
-        body: JSON.stringify({
-          model: modelId,
-          messages: [ { role: "system", content: systemPromptContent }, { role: "user", content: userPromptContent } ],
-          temperature: 0.1, max_tokens: 5, stream: false
-        }),
-        customTimeout: 30000 // 30s
-      });
-      console.log(`[IntentClassifier] ${modelId} (shouldFetchProfileContext) response status: ${response.status}`);
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[IntentClassifier] NIM CALL ERROR: API error ${response.status} for model ${modelId} in shouldFetchProfileContext: ${errorText}. Defaulting to false.`);
-        return false;
-      }
-      const data = await response.json();
-      if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
-        const decision = data.choices[0].message.content.trim().toUpperCase();
-        console.log(`[IntentClassifier] ${modelId} decision (shouldFetchProfileContext): "${decision}"`);
-        return decision === 'YES';
-      }
-      console.error(`[IntentClassifier] NIM CALL ERROR: Unexpected response format from ${modelId} in shouldFetchProfileContext. Data: ${JSON.stringify(data)}. Defaulting to false.`);
-      return false;
-    } catch (error) {
-      console.error(`[IntentClassifier] NIM CALL EXCEPTION: Error in shouldFetchProfileContext with model ${modelId}: ${error.message}. Defaulting to false.`);
-      return false;
-    }
+    // This function is now internal-only and should not be triggered by user input.
+    // It will always return false.
+    return false;
   }
 
   async isRequestingDetails(userFollowUpText) {
