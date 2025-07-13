@@ -194,6 +194,7 @@ class BaseBot {
     this.sentimentAnalyzer = new Sentiment();
     this.userBlocklist = new Set(); // Users who have issued !STOP
     this.mutedThreads = new Set(); // Root URIs of threads the bot should not reply to
+    this.conversationLengths = new Map(); // Track conversation lengths with other bots
   }
 
   // Helper to cleanup expired pending analyses
@@ -603,7 +604,7 @@ class BaseBot {
             const postTextContent = notif.record.text || "";
 
             // Check for !STOP command from user
-            if (postTextContent.toLowerCase().includes('!stop')) {
+            if (await this.isStopRequest(postTextContent)) {
               const sentimentResult = this.sentimentAnalyzer.analyze(postTextContent);
               console.log(`[Monitor] !STOP command detected from @${postAuthorHandle}. Sentiment score: ${sentimentResult.score}`);
               // Block if sentiment is negative or neutral (score <= 0)
@@ -683,7 +684,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
             }
 
             // Check for !RESUME command
-            if (postTextContent.toLowerCase().trim() === '!resume') {
+            if (await this.isResumeRequest(postTextContent)) {
               console.log(`[Monitor] !RESUME command detected from @${postAuthorHandle}.`);
               let resumeMessage = "";
               if (this.userBlocklist.has(postAuthorHandle)) {
@@ -711,7 +712,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
             }
 
             // Check for !MUTE command
-            if (postTextContent.toLowerCase().trim() === '!mute') {
+            if (await this.isMuteRequest(postTextContent)) {
               console.log(`[Monitor] !MUTE command detected from @${postAuthorHandle} in thread starting with ${threadRootUri}.`);
               this.mutedThreads.add(threadRootUri);
               const muteMessage = "Okay, I will not reply further in this thread. If you want me to speak here again, you'll need to mention me in a new thread or use a command in a different context.";
@@ -730,6 +731,29 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
               await this.postReply(tempPostForMuteReply, muteMessage);
               this.repliedPosts.add(notif.uri); // Mark as replied
               continue;
+            }
+
+            // Check if the author is a bot and if the conversation is too long
+            const profile = await this.agent.getProfile({ actor: postAuthorHandle });
+            if (await this.isBot(postAuthorHandle, profile.data)) {
+              const conversationLength = this.conversationLengths.get(threadRootUri) || 0;
+              if (conversationLength > 10) {
+                console.log(`[Monitor] Conversation with bot @${postAuthorHandle} in thread ${threadRootUri} is too long (${conversationLength} messages). Concluding conversation.`);
+                await this.postReply({
+                  uri: notif.uri,
+                  cid: notif.cid,
+                  author: notif.author,
+                  record: {
+                    reply: {
+                      root: { uri: threadRootUri, cid: notif.record?.reply?.root?.cid || notif.cid },
+                      parent: { uri: notif.uri, cid: notif.cid }
+                    }
+                  }
+                }, "This conversation has become very long. I'm going to step away now, but feel free to start a new one!");
+                this.mutedThreads.add(threadRootUri);
+                this.repliedPosts.add(notif.uri);
+                continue;
+              }
             }
 
             const currentPostObject = {
@@ -1135,6 +1159,9 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
           }
       }
       this.repliedPosts.add(post.uri); // Add original post URI to replied set after all parts are sent
+      const threadRootUri = post.record?.reply?.root?.uri || post.uri;
+      const conversationLength = (this.conversationLengths.get(threadRootUri) || 0) + 1;
+      this.conversationLengths.set(threadRootUri, conversationLength);
       if (followUp) {
         await this.postReply(post, followUp);
       }
@@ -1166,6 +1193,46 @@ class LlamaBot extends BaseBot {
     this.processedBotFeedPosts = new Set(); // Initialize Set for processed feed posts
     this.MAX_DAILY_PROACTIVE_REPLIES_PER_USER = 5; // Configurable: Max proactive replies to a single user per day
     this.MAX_REPLIES_PER_USER_PER_SCAN = 2; // As per commit: Max 2 proactive replies per user per scan
+  }
+
+  async isBot(handle, profile) {
+    if (this.config.KNOWN_BOTS.includes(handle)) {
+      return true;
+    }
+    if (handle.includes('bot')) {
+      return true;
+    }
+    if (profile && profile.description && profile.description.toLowerCase().includes('bot')) {
+      return true;
+    }
+    return false;
+  }
+
+  async isStopRequest(text) {
+    const lowerText = text.toLowerCase();
+    if (lowerText.includes('!stop')) {
+      return true;
+    }
+    const stopWords = ['stop replying', 'don\'t reply', 'stop sending', 'no more messages', 'go away'];
+    return stopWords.some(word => lowerText.includes(word));
+  }
+
+  async isResumeRequest(text) {
+    const lowerText = text.toLowerCase();
+    if (lowerText.includes('!resume')) {
+      return true;
+    }
+    const resumeWords = ['start replying', 'start sending', 'resume messages', 'come back'];
+    return resumeWords.some(word => lowerText.includes(word));
+  }
+
+  async isMuteRequest(text) {
+    const lowerText = text.toLowerCase();
+    if (lowerText.includes('!mute')) {
+      return true;
+    }
+    const muteWords = ['mute this thread', 'stop replying here', 'don\'t reply in this thread'];
+    return muteWords.some(word => lowerText.includes(word));
   }
 
   async generateStandalonePostFromContext(context, adminInstructions) {
@@ -5259,6 +5326,18 @@ async function runStopCommandTests(botInstance) {
   console.log(`Test 11: mutedThreads still contains ${thread1RootUri}: ${testBot.mutedThreads.has(thread1RootUri)} (Expected: true)`);
   console.log(`Test 11: mutedThreads does not contain ${thread2RootUri}: ${!testBot.mutedThreads.has(thread2RootUri)} (Expected: true)`);
 
+  // Test Case 12: isBot function
+  console.log("\n--- Testing isBot function ---");
+  const botUser = { handle: 'testbot.bsky.social', profile: { description: 'I am a bot' } };
+  const normalUser = { handle: 'testuser.bsky.social', profile: { description: 'I am a human' } };
+  const isBotResult = await testBot.isBot(botUser.handle, botUser.profile);
+  const isNotBotResult = await testBot.isBot(normalUser.handle, normalUser.profile);
+  console.log(`isBot('testbot.bsky.social', botUser.profile): ${isBotResult} (Expected: true)`);
+  console.log(`isBot('testuser.bsky.social', normalUser.profile): ${isNotBotResult} (Expected: false)`);
+  testBot.config.KNOWN_BOTS = ['knownbot.bsky.social'];
+  const isKnownBotResult = await testBot.isBot('knownbot.bsky.social', normalUser.profile);
+  console.log(`isBot('knownbot.bsky.social', normalUser.profile): ${isKnownBotResult} (Expected: true)`);
+
   console.log("\n--- Command Tests Complete ---");
   // Clear blocklist and mutedThreads after tests
   testBot.userBlocklist.clear();
@@ -5301,6 +5380,6 @@ async function startBots() {
 
 }
 
-startBots().catch(console.error);
+// startBots().catch(console.error);
 
 //end of index.js

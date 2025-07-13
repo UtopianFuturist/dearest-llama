@@ -40,6 +40,9 @@ const config = {
   IMGFLIP_PASSWORD: process.env.IMGFLIP_PASSWORD,
   YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY,
   GIPHY_API_KEY: process.env.GIPHY_API_KEY,
+
+  // Known bots
+  KNOWN_BOTS: process.env.KNOWN_BOTS ? process.env.KNOWN_BOTS.split(',') : [],
   
   // System prompts
   TEXT_SYSTEM_PROMPT: process.env.TEXT_SYSTEM_PROMPT ||
