@@ -737,7 +737,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
             const profile = await this.agent.getProfile({ actor: postAuthorHandle });
             if (await this.isBot(postAuthorHandle, profile.data)) {
               const conversationLength = this.conversationLengths.get(threadRootUri) || 0;
-              if (conversationLength > 10) {
+              if (conversationLength > 3) {
                 console.log(`[Monitor] Conversation with bot @${postAuthorHandle} in thread ${threadRootUri} is too long (${conversationLength} messages). Concluding conversation.`);
                 await this.postReply({
                   uri: notif.uri,
