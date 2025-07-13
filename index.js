@@ -2866,31 +2866,31 @@ Do not make up information not present in the search results. Keep the response 
         }
 
         let userBlueskyPostsContext = "";
-        const fetchContextDecision = await this.shouldFetchProfileContext(userQueryText);
+        // If the intent is an explicit request for profile analysis, OR if the bot decides autonomously.
+        const isExplicitProfileAnalysis = searchIntent.intent === 'user_profile_analysis';
+        const isAutonomousProfileAnalysis = await this.shouldFetchProfileContext(userQueryText);
 
-        if (fetchContextDecision) {
-          console.log(`[Context] Scout determined conversation history should be fetched for user DID: ${post.author.did} and bot DID: ${this.agent.did}. Query: "${userQueryText}"`);
-        try {
-          const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
-          if (conversationHistoryItems.length > 0) {
-            userBlueskyPostsContext = "\n\nRecent conversation history between you and the user (" + post.author.handle + "):\n" + conversationHistoryItems.map(item => `${item.authorHandle}: ${item.text}`).join("\n---\n") + "\n\n";
-            console.log(`[Context] Added ${conversationHistoryItems.length} conversation messages to Nemotron context.`);
-          } else {
-            console.log(`[Context] No direct conversation history found between user ${post.author.did} and bot ${this.agent.did}.`);
-            // Optionally, you could fall back to the old general user feed fetching here, or decide that no context is better.
-            // For now, we'll proceed without this specific context if it's empty.
+        if (isExplicitProfileAnalysis || isAutonomousProfileAnalysis) {
+          console.log(`[Context] Fetching profile context. Explicit request: ${isExplicitProfileAnalysis}, Autonomous decision: ${isAutonomousProfileAnalysis}. Query: "${userQueryText}"`);
+          try {
+            const conversationHistoryItems = await this.getBotUserConversationHistory(post.author.did, this.agent.did, 50);
+            if (conversationHistoryItems.length > 0) {
+              userBlueskyPostsContext = "\n\nRecent conversation history between you and the user (" + post.author.handle + "):\n" + conversationHistoryItems.map(item => `${item.authorHandle}: ${item.text}`).join("\n---\n") + "\n\n";
+              console.log(`[Context] Added ${conversationHistoryItems.length} conversation messages to context.`);
+            } else {
+              console.log(`[Context] No direct conversation history found.`);
+            }
+          } catch (error) {
+            console.error(`[Context] Error fetching conversation history:`, error);
           }
-        } catch (error) {
-          console.error(`[Context] Error fetching conversation history between user ${post.author.did} and bot ${this.agent.did}:`, error);
         }
-      }
 
-      let nemotronUserPrompt = "";
-      const baseInstruction = `Your response will be posted to BlueSky as a reply to the most recent message mentioning you by a bot. For detailed topics, you can generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
+        let nemotronUserPrompt = "";
+        const baseInstruction = `Your response will be posted to BlueSky as a reply. For detailed topics, generate a response up to about 870 characters; it will be split into multiple posts if needed.`;
 
-      if (userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "") {
-        // Profile analysis prompt
-        nemotronUserPrompt = `You are replying to @${post.author.handle}. The user's question is: "${post.record.text}"
+        if (isExplicitProfileAnalysis && userBlueskyPostsContext) {
+          // Explicit Profile Analysis Prompt (generates summary and details for the user)
+          nemotronUserPrompt = `You are replying to @${post.author.handle}. The user's question is: "${post.record.text}"
 
 Activate your "User Profile Analyzer" capability. Based on the "USER'S RECENT BLUESKY ACTIVITY" provided below, generate your response in two parts:
 
@@ -2901,24 +2901,32 @@ This summary **must end with a clear question inviting the user to ask for more 
 
 PART 2: DETAILED ANALYSIS POINTS
 Immediately following Part 1, and on new lines, provide 1 to 3 detailed analysis points.
-Each point MUST start with the exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc. NO OTHER TEXT BEFORE THE MARKER ON THAT LINE.
-For each point, write a short paragraph (around 2-4 sentences, keeping total under 290 characters for a Bluesky post) that flows naturally as if you are explaining your insights one by one.
-Your tone should be insightful, friendly, and engaging, reflecting your persona: "${this.config.TEXT_SYSTEM_PROMPT}".
-Avoid starting the *content* of a point with "1.", "a)", or other list markers unless it's a very natural way to present a list *within* your flowing explanation. Focus on conversational delivery of each distinct insight.
-Analyze themes, common topics, or aspects of their interaction as reflected in the provided context (conversation history or user's general activity).
+Each point MUST start with the exact marker: "[DETAILED ANALYSIS POINT 1]", then "[DETAILED ANALYSIS POINT 2]", etc.
+Each point should be a short paragraph (under 290 characters).
 
 USER'S RECENT BLUESKY ACTIVITY (or CONVERSATION HISTORY):
 ${userBlueskyPostsContext}
 ---
-${conversationHistory ? `\nBrief current thread context (less critical than the main context above for this specific analysis):\n${conversationHistory}\n---` : ''}
+${conversationHistory ? `\nBrief current thread context:\n${conversationHistory}\n---` : ''}
 Your structured response (Summary with Invitation, then Detailed Points):
 ${baseInstruction}`;
-      } else {
-        // Standard prompt (no specific profile context fetched)
-        nemotronUserPrompt = `You are replying to @${post.author.handle}. Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
-      }
+        } else if (isAutonomousProfileAnalysis && userBlueskyPostsContext) {
+          // Autonomous Profile Analysis (Internal Context Prompt)
+          nemotronUserPrompt = `You are replying to @${post.author.handle}.
+The user's immediate message is: "${post.record.text}"
+The preceding conversation thread is:\n${conversationHistory}
+**INTERNAL CONTEXT ONLY - DO NOT MENTION THIS ANALYSIS TO THE USER**: To provide a more insightful response, you have autonomously analyzed the user's recent activity. Use these themes and topics from their history to inform the tone, content, and direction of your reply to their immediate message.
+<INTERNAL_ANALYSIS_CONTEXT>
+${userBlueskyPostsContext}
+</INTERNAL_ANALYSIS_CONTEXT>
 
-      console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${userBlueskyPostsContext && userBlueskyPostsContext.trim() !== "" ? "Profile Analysis" : "Standard"}`);
+Based on all available context (especially the user's immediate message), generate a natural, in-character response. ${baseInstruction}`;
+        } else {
+          // Standard prompt (no profile context fetched or used)
+          nemotronUserPrompt = `You are replying to @${post.author.handle}. Here's the conversation context:\n\n${conversationHistory}\nThe most recent message mentioning you is: "${post.record.text}"\nPlease respond to the request in the most recent message. ${baseInstruction}`;
+        }
+
+        console.log(`NIM CALL START: generateResponse for model nvidia/llama-3.3-nemotron-super-49b-v1. Prompt type: ${isExplicitProfileAnalysis ? "Explicit Profile Analysis" : (isAutonomousProfileAnalysis ? "Autonomous Internal Context" : "Standard")}`);
       const response = await fetchWithRetries('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.NVIDIA_NIM_API_KEY}` },
@@ -2976,7 +2984,7 @@ ${baseInstruction}`;
       // Determine which filter prompt to use
       const universalMinimalFilterPrompt = "ATTENTION: Your task is to perform MINIMAL formatting on the provided text. The text is from another AI. PRESERVE THE ORIGINAL WORDING AND MEANING EXACTLY. Your ONLY allowed modifications are: 1. Ensure the final text is UNDER 300 characters for Bluesky by truncating if necessary, prioritizing whole sentences. 2. Remove any surrounding quotation marks that make the entire text appear as a direct quote. 3. Remove any sender attributions like 'Bot:' or 'Nemotron says:'. 4. Remove any double asterisks (\`**\`) used for bold emphasis. Single asterisks used for roleplay actions (e.g., \`*smiles*\`, \`*nods*\`) should be PRESERVED. 5. PRESERVE all emojis (e.g., 😄, 🤔, ❤️) exactly as they appear in the original text. DO NOT rephrase, summarize, add, or remove any other content beyond these specific allowed modifications. DO NOT change sentence structure. Output only the processed text. This is an internal formatting step; do not mention it.";
       let filterSystemPromptToUse = universalMinimalFilterPrompt;
-      if (fetchContextDecision) { // This is the condition for when Nemotron generates a structured response
+      if (isExplicitProfileAnalysis) { // This is the condition for when Nemotron generates a structured response
         filterSystemPromptToUse = structuredResponseFilterPrompt;
         console.log("[LlamaBot.generateResponse] Using STRUCTURED response filter prompt for Gemma.");
       } else {
@@ -3030,7 +3038,7 @@ ${baseInstruction}`;
       // Let's assume `post.generatedImageForThisInteraction = { imageBase64, altText }` if available.
       // This is a placeholder; actual passing of this data needs to be handled from the monitor call.
 
-      if (fetchContextDecision) {
+      if (isExplicitProfileAnalysis) { // Only parse for summary/details if it was an explicit request
         const summaryMarker = "[SUMMARY FINDING WITH INVITATION]";
         const detailMarkerBase = "[DETAILED ANALYSIS POINT "; // e.g., "[DETAILED ANALYSIS POINT 1]"
 
@@ -4044,31 +4052,33 @@ ${baseInstruction}`;
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     const systemPromptContent = `Your task is to analyze the user's query to determine their primary intent. Output a JSON object. Choose ONE of the following intent structures:
-1.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
+1.  **"user_profile_analysis"**: For EXPLICIT requests to analyze the user's own profile, posts, or online persona.
+    { "intent": "user_profile_analysis" }
+2.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
     { "intent": "search_history", "target_type": "image" | "link" | "post", "author_filter": "user" | "bot" | "any", "keywords": ["keyword1", ...], "recency_cue": "textual cue" | null, "search_scope": "bot_gallery" | "conversation" | null }
-2.  **"web_search"**: For when the user EXPLICITLY asks for a web or image search (e.g., "search for...", "find me pictures of...").
+3.  **"web_search"**: For when the user EXPLICITLY asks for a web or image search (e.g., "search for...", "find me pictures of...").
     { "intent": "web_search", "search_query": "optimized query", "search_type": "webpage" | "image", "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null }
-3.  **"autonomous_web_search"**: For when the user asks a factual question that IMPLIES a web search is needed for a good answer, but they DON'T explicitly ask to search. The bot will perform this search internally to gather context.
+4.  **"autonomous_web_search"**: For when the user asks a factual question that IMPLIES a web search is needed for a good answer, but they DON'T explicitly ask to search. The bot will perform this search internally to gather context.
     { "intent": "autonomous_web_search", "search_query": "optimized query for internal search" }
-4.  **"nasa_apod"**: For "NASA Picture of the Day" requests.
+5.  **"nasa_apod"**: For "NASA Picture of the Day" requests.
     { "intent": "nasa_apod", "date": "YYYY-MM-DD" | "today" | "yesterday" | null }
-5.  **"create_meme"**: For creating a meme.
+6.  **"create_meme"**: For creating a meme.
     { "intent": "create_meme", "template_query": "template name or id" | "list", "captions": ["text1", ...], "generate_captions": true | false }
-6.  **"youtube_search"**: For EXPLICIT requests to find a YouTube video.
+7.  **"youtube_search"**: For EXPLICIT requests to find a YouTube video.
     { "intent": "youtube_search", "search_query": "optimized query" }
-7.  **"giphy_search"**: For EXPLICIT requests to find a GIF.
+8.  **"giphy_search"**: For EXPLICIT requests to find a GIF.
     { "intent": "giphy_search", "search_query": "keywords" }
-8.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
+9.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
     { "intent": "bot_feature_inquiry" }
-9.  **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?").
+10. **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?").
     { "intent": "get_bot_status" }
-10. **"process_url"**: If the query contains a generic URL for processing.
+11. **"process_url"**: If the query contains a generic URL for processing.
     { "intent": "process_url", "url": "the_extracted_url" }
-11. **"none"**: If no other intent fits. This is the default for general conversation.
+12. **"none"**: If no other intent fits. This is the default for general conversation.
     { "intent": "none" }
 
 **PRIORITIZATION AND RULES:**
-- **Explicit over Implicit**: "web_search" (user says "search for X") takes priority over "autonomous_web_search" (user asks "what is X?").
+- **Explicit over Implicit**: "web_search" (user says "search for X") takes priority over "autonomous_web_search" (user asks "what is X?"). "user_profile_analysis" is for explicit requests like "analyze my profile".
 - **Commands First**: Admin commands and specific tool commands (!meme, !apod) are highest priority.
 - **Internal Context**: If the internal search rating already suggested a search, you can use that to inform your decision, but the final intent choice is yours based on the full query.
 - **"autonomous_web_search" Criteria**: Use this for factual questions (who, what, when, where, why, explain) that cannot be answered from conversation history alone. Do NOT use it for opinions, personal questions, or simple greetings.
