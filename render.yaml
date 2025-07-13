@@ -16,6 +16,8 @@ services:
         sync: false
       - key: BLUESKY_APP_PASSWORD
         sync: false
+      - key: ADMIN_BLUESKY_HANDLE
+        sync: false
       - key: TEXT_MODEL
         value: meta/llama-4-maverick-17b-128e-instruct
       - key: IMAGE_PROMPT_MODEL
