@@ -345,48 +345,6 @@ class BaseBot {
             break;
           }
           console.log(`Admin command type 'image': Searching web for image with query: "${mediaPrompt}"`);
-          const imageSearchResults = await this.performGoogleWebSearch(mediaPrompt, null, 'image');
-          if (imageSearchResults && imageSearchResults.length > 0) {
-            const imageResult = imageSearchResults[0]; // Take the first image
-            postDetails.imageBase64 = await utils.imageUrlToBase64(imageResult.imageUrl);
-            if (postDetails.imageBase64) {
-              postDetails.altText = imageResult.title || `Image related to: ${mediaPrompt}`;
-              // Attribution: Append to finalPostText later, after it's fully determined
-              postDetails.sourceUrl = imageResult.contextUrl;
-              if (!finalPostText && postDetails.altText) {
-                finalPostText = postDetails.altText; // Use alt text as main text if no other text provided/generated
-              }
-            } else {
-              mediaError = `Failed to download image found for "${mediaPrompt}" from ${imageResult.imageUrl}.`;
-            }
-          } else {
-            mediaError = `No images found via web search for query: "${mediaPrompt}".`;
-          }
-          break;
-
-        case 'video': // New: YouTube video
-          if (!mediaPrompt) {
-            mediaError = "YouTube video requested with !post+video, but no search query or URL was provided.";
-            break;
-          }
-          console.log(`Admin command type 'video': Searching YouTube for: "${mediaPrompt}"`);
-          const videoResults = await this.performYouTubeSearch(mediaPrompt, 1);
-
-          if (videoResults && videoResults.length > 0) {
-            const video = videoResults[0];
-            postDetails.externalEmbed = {
-              uri: video.videoUrl,
-              title: video.title,
-              description: utils.truncateResponse(video.description, 150) // Card description
-            };
-            // If finalPostText is empty, we might use the video title.
-            if (!finalPostText) {
-              finalPostText = video.title;
-            }
-            console.log(`[ADMIN_CMD] Found YouTube video: ${video.title} - ${video.videoUrl}`);
-          } else {
-            mediaError = `No YouTube videos found for query: "${mediaPrompt}".`;
-          }
           break;
 
         case 'text': // Text-only post
@@ -663,7 +621,7 @@ class BaseBot {
             // Check for !HELP command
             if (postTextContent.toLowerCase().trim() === '!help') {
               console.log(`[Monitor] !HELP command detected from @${postAuthorHandle}.`);
-              const helpMessage = `I'm a conversational AI here to chat, answer questions, and help with a few tasks! You can ask me to search the web for you (e.g., "what's the latest news on..."), find or create images (e.g., "find me a picture of a cat" or "create an image of a futuristic city"), or even get the NASA Picture of the Day.
+              const helpMessage = `I'm a conversational AI here to chat and answer questions!
 
 For managing our conversation, you can use a few commands: \`!STOP\` if you'd like me to stop sending you messages, \`!RESUME\` to start them again, and \`!MUTE\` to stop me from replying in the current thread.`;
               // Construct a temporary post object for the postReply method
@@ -4122,37 +4080,21 @@ Based on all available context (especially the user's immediate message), genera
     const endpointUrl = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     const systemPromptContent = `Your task is to analyze the user's query to determine their primary intent. Output a JSON object. Choose ONE of the following intent structures:
-1.  **"user_profile_analysis"**: For EXPLICIT requests to analyze the user's own profile, posts, or online persona.
-    { "intent": "user_profile_analysis" }
-2.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
+1.  **"search_history"**: For finding a specific item from past interactions (conversation history, bot's own posts/gallery).
     { "intent": "search_history", "target_type": "image" | "link" | "post", "author_filter": "user" | "bot" | "any", "keywords": ["keyword1", ...], "recency_cue": "textual cue" | null, "search_scope": "bot_gallery" | "conversation" | null }
-3.  **"web_search"**: For when the user EXPLICITLY asks for a web or image search (e.g., "search for...", "find me pictures of...").
-    { "intent": "web_search", "search_query": "optimized query", "search_type": "webpage" | "image", "freshness_suggestion": "oneDay" | "oneWeek" | "oneMonth" | null }
-4.  **"autonomous_web_search"**: For when the user asks a factual question that IMPLIES a web search is needed for a good answer, but they DON'T explicitly ask to search. The bot will perform this search internally to gather context.
-    { "intent": "autonomous_web_search", "search_query": "optimized query for internal search" }
-5.  **"nasa_apod"**: For "NASA Picture of the Day" requests.
-    { "intent": "nasa_apod", "date": "YYYY-MM-DD" | "today" | "yesterday" | null }
-6.  **"create_meme"**: For creating a meme.
-    { "intent": "create_meme", "template_query": "template name or id" | "list", "captions": ["text1", ...], "generate_captions": true | false }
-7.  **"youtube_search"**: For EXPLICIT requests to find a YouTube video.
-    { "intent": "youtube_search", "search_query": "optimized query" }
-8.  **"giphy_search"**: For EXPLICIT requests to find a GIF.
-    { "intent": "giphy_search", "search_query": "keywords" }
-9.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
+2.  **"bot_feature_inquiry"**: For questions about the bot's own features, identity, or capabilities.
     { "intent": "bot_feature_inquiry" }
-10. **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?", "what are you up to?"). Do NOT use for simple greetings.
+3.  **"get_bot_status"**: For conversational questions about the bot's current state (e.g., "how are you?", "what are you up to?"). Do NOT use for simple greetings.
     { "intent": "get_bot_status" }
-11. **"process_url"**: If the query contains a generic URL for processing.
+4.  **"process_url"**: If the query contains a generic URL for processing.
     { "intent": "process_url", "url": "the_extracted_url" }
-12. **"none"**: If no other intent fits. This is the default for general conversation, including simple greetings like "hello", "good morning", or "thanks".
+5.  **"none"**: If no other intent fits. This is the default for general conversation, including simple greetings like "hello", "good morning", or "thanks".
     { "intent": "none" }
 
 **PRIORITIZATION AND RULES:**
 - **Greetings vs. Status**: A simple greeting like "Good morning" is "none". A greeting combined with a question like "Good morning, what are you up to?" is "get_bot_status".
-- **Explicit over Implicit**: "web_search" (user says "search for X") takes priority over "autonomous_web_search" (user asks "what is X?"). "user_profile_analysis" is for explicit requests like "analyze my profile".
-- **Commands First**: Admin commands and specific tool commands (!meme, !apod) are highest priority.
+- **"user_profile_analysis" is for explicit requests like "analyze my profile".
 - **Internal Context**: If the internal search rating already suggested a search, you can use that to inform your decision, but the final intent choice is yours based on the full query.
-- **"autonomous_web_search" Criteria**: Use this for factual questions (who, what, when, where, why, explain) that cannot be answered from conversation history alone. Do NOT use it for opinions, personal questions, or simple greetings.
 - **Safety**: If a query for any search type seems unsafe, you may classify it as "none".
 - **Output ONLY the JSON object.**`;
 
@@ -4217,16 +4159,6 @@ Based on all available context (especially the user's immediate message), genera
               if (!["image", "link", "post", "message", "unknown"].includes(parsedJson.target_type)) parsedJson.target_type = "unknown";
               if (!["user", "bot", "any"].includes(parsedJson.author_filter)) parsedJson.author_filter = "any";
               if (!Array.isArray(parsedJson.keywords)) parsedJson.keywords = [];
-            } else if (parsedJson.intent === "web_search") {
-              if (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim()) {
-                 console.warn(`[IntentClassifier] ${modelId} 'web_search' missing search_query in getIntent: ${jsonString}`);
-                 return { ...defaultErrorResponse, error: "Malformed web_search: missing search_query."};
-              }
-              if (!["webpage", "image"].includes(parsedJson.search_type)) parsedJson.search_type = "webpage";
-            } else if (parsedJson.intent === "youtube_search" && (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim())) {
-                 parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").trim();
-            } else if (parsedJson.intent === "giphy_search" && (typeof parsedJson.search_query !== 'string' || !parsedJson.search_query.trim())) {
-                 parsedJson.search_query = userQueryText.replace(`@${this.config.BLUESKY_IDENTIFIER}`, "").replace(/giphy|gif/gi, "").trim();
             } else if (parsedJson.intent === "process_url") {
                 if (typeof parsedJson.url !== 'string' || !parsedJson.url.startsWith('http')) {
                     // LLM might hallucinate a URL or get the field wrong. Fallback to regex if so.
@@ -4246,7 +4178,7 @@ Based on all available context (especially the user's immediate message), genera
             console.log(`[IntentClassifier] ${modelId} parsed intent (getIntent):`, parsedJson);
             // Client-side fallback URL detection if LLM returns "none" or a non-URL intent but a URL is present.
             // This is a lower priority than LLM's specific intent if that intent is NOT "none".
-            if (parsedJson.intent === "none" || (parsedJson.intent !== "process_url" && parsedJson.intent !== "youtube_search" && parsedJson.intent !== "giphy_search" /* and not admin command */)) {
+            if (parsedJson.intent === "none" || (parsedJson.intent !== "process_url" /* and not admin command */)) {
                 const urlRegex = /(https?:\/\/[^\s]+)/g;
                 const urlsFound = userQueryText.match(urlRegex);
                 if (urlsFound && urlsFound.length > 0) {
@@ -4476,61 +4408,6 @@ Output ONLY the JSON object.`;
     }
   }
 
-  async generateImage(prompt) {
-    const modelToUse = "black-forest-labs/FLUX.1-schnell-Free";
-    const apiKey = this.config.TOGETHER_AI_API_KEY;
-    if (!apiKey) { console.error('TOGETHER_AI_API_KEY is not configured. Cannot generate image.'); return null; }
-    console.log(`TOGETHER AI CALL START: generateImage for model "${modelToUse}" with prompt "${prompt}"`);
-    const requestBody = { model: modelToUse, prompt: prompt, n: 1, size: "1024x1024" };
-
-    try {
-      // Note: fetchWithRetries is for NIM; Together AI might have different retry/timeout needs.
-      // For now, using direct fetch for Together AI as it wasn't the source of original timeouts.
-      // If Together AI also shows instability, a similar wrapper might be needed for it.
-      const response = await fetch('https://api.together.xyz/v1/images/generations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify(requestBody)
-        // Consider adding a timeout here if direct fetch is kept, e.g., using AbortController
-      });
-      const responseStatus = response.status;
-      // It's important to read response.text() or .json() only once.
-      // Let's try to parse as JSON first, and if it fails, then use text.
-      let responseBody;
-      try {
-        responseBody = await response.json();
-      } catch (e) {
-        // If .json() fails, try to get text (though for errors, text might be more useful)
-        // This path is less likely if response.ok is false and API returns structured JSON error
-        responseBody = await response.text();
-      }
-
-      console.log(`TOGETHER AI CALL END: generateImage - Status: ${responseStatus}`);
-
-      if (!response.ok) {
-        console.error(`Together AI API error (${responseStatus}) for generateImage with prompt "${prompt}". Response:`, responseBody);
-        return null;
-      }
-      // Assuming responseBody is now parsed JSON if response.ok was true
-      const data = responseBody;
-      if (data.data && Array.isArray(data.data) && data.data.length > 0) {
-        const firstImageData = data.data[0];
-        if (firstImageData.b64_json) {
-          console.log(`Successfully received b64_json image data from Together AI for prompt "${prompt}".`);
-          return firstImageData.b64_json;
-        } else if (firstImageData.url) {
-          console.log(`Received image URL from Together AI: ${firstImageData.url}. Attempting to download and convert to base64 for prompt "${prompt}".`);
-          try {
-            const base64Image = await utils.imageUrlToBase64(firstImageData.url);
-            if (base64Image) { console.log(`Successfully downloaded and converted image from URL to base64 for prompt "${prompt}".`); return base64Image; }
-            else { console.error(`Failed to convert image from URL to base64 for prompt "${prompt}". URL: ${firstImageData.url}`); return null; }
-          } catch (urlConversionError) { console.error(`Error downloading or converting image from URL (${firstImageData.url}) for prompt "${prompt}":`, urlConversionError); return null; }
-        }
-      }
-      console.error(`Unexpected response format or missing image data from Together AI for generateImage (prompt: "${prompt}"):`, JSON.stringify(data));
-      return null;
-    } catch (error) { console.error(`Error in LlamaBot.generateImage (prompt: "${prompt}"):`, error); return null; }
-  }
 
   async isTextSafeScout(prompt) {
     const modelId = 'google/gemma-3n-e4b-it'; // Changed to Gemma
@@ -4766,143 +4643,6 @@ Ensure your entire response is ONLY the JSON object.`;
     }
   }
 
-  async performYouTubeSearch(searchQuery, maxResults = 1) {
-    console.log(`[YouTubeSearch] Performing YouTube search for query: "${searchQuery}", maxResults: ${maxResults}`);
-    if (!this.config.YOUTUBE_API_KEY) {
-      console.error("[YouTubeSearch] YOUTUBE_API_KEY is not set. Cannot perform YouTube search.");
-      return [];
-    }
-
-    const apiKey = this.config.YOUTUBE_API_KEY;
-    const safeSearchSetting = 'moderate'; // Options: 'moderate', 'strict', 'none'
-
-    let url = `https://www.googleapis.com/youtube/v3/search?key=${apiKey}&part=snippet&type=video&safeSearch=${safeSearchSetting}&maxResults=${maxResults}&q=${encodeURIComponent(searchQuery)}`;
-
-    try {
-      const response = await fetch(url, { method: 'GET' });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        let detail = errorText;
-        try {
-            const errorJson = JSON.parse(errorText);
-            if (errorJson.error && errorJson.error.message) {
-                detail = errorJson.error.message;
-            }
-        } catch (e) { /* ignore parsing error if not json */ }
-        console.error(`[YouTubeSearch] API error: ${response.status} - ${detail}`);
-        return []; // Return empty array on error
-      }
-
-      const data = await response.json();
-
-      if (data.items && data.items.length > 0) {
-        const results = data.items
-          .filter(item => item.id && item.id.kind === "youtube#video" && item.id.videoId) // Ensure it's a video and has an ID
-          .map(item => ({
-            videoId: item.id.videoId,
-            title: item.snippet?.title || "No title",
-            description: item.snippet?.description || "No description",
-            thumbnailUrl: item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.default?.url || null,
-            channelTitle: item.snippet?.channelTitle || "Unknown channel",
-            videoUrl: `https://www.youtube.com/watch?v=${item.id.videoId}`
-          }));
-
-        console.log(`[YouTubeSearch] Found ${results.length} video results for query "${searchQuery}".`);
-        return results;
-      } else {
-        console.log(`[YouTubeSearch] No YouTube video results found for query "${searchQuery}".`);
-        return [];
-      }
-    } catch (error) {
-      console.error(`[YouTubeSearch] Exception during YouTube search for query "${searchQuery}":`, error);
-      return []; // Return empty array on exception
-    }
-  }
-
-  async searchGiphy(query, limit = 1) {
-    console.log(`[GiphySearch] Searching Giphy for query: "${query}", Limit: ${limit}`);
-    if (!this.config.GIPHY_API_KEY) {
-      console.error("[GiphySearch] GIPHY_API_KEY is not set. Cannot perform Giphy search.");
-      return [];
-    }
-
-    const apiKey = this.config.GIPHY_API_KEY;
-    // Using 'pg-13' as a general-purpose rating. This could be made configurable.
-    const rating = 'pg-13';
-    const lang = 'en'; // Defaulting to English, could also be configurable.
-
-    const params = new URLSearchParams({
-      api_key: apiKey,
-      q: query,
-      limit: limit.toString(),
-      offset: '0', // Starting from the first result
-      rating: rating,
-      lang: lang,
-      bundle: 'messaging_non_clips' // Recommended bundle for most integrations
-    });
-
-    const url = `https://api.giphy.com/v1/gifs/search?${params.toString()}`;
-
-    try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[GiphySearch] Giphy API error: ${response.status} - ${errorText}`);
-        return [];
-      }
-
-      const data = await response.json();
-
-      if (data.data && data.data.length > 0) {
-        const results = data.data.map(gif => {
-          let gifUrlToUse = null;
-          let mimeType = null;
-
-          // Prioritize GIF formats for animation
-          if (gif.images?.downsized?.url) {
-            gifUrlToUse = gif.images.downsized.url;
-            mimeType = 'image/gif';
-          } else if (gif.images?.original?.url) {
-            // Check if original URL ends with .gif, Giphy sometimes returns non-gif in original.url
-            if (gif.images.original.url.endsWith('.gif')) {
-                gifUrlToUse = gif.images.original.url;
-                mimeType = 'image/gif';
-            }
-          }
-
-          // Fallback to WebP if no suitable GIF URL was found (might be static)
-          if (!gifUrlToUse) {
-            if (gif.images?.original?.webp) {
-              gifUrlToUse = gif.images.original.webp;
-              mimeType = 'image/webp';
-            } else if (gif.images?.fixed_height?.webp) {
-              gifUrlToUse = gif.images.fixed_height.webp;
-              mimeType = 'image/webp';
-            }
-          }
-
-          return {
-            id: gif.id,
-            gifUrl: gifUrlToUse,
-            pageUrl: gif.url || gif.bitly_url, // Giphy page URL for the GIF
-            title: gif.title || query, // Use Giphy title or fallback to query
-            altText: gif.title || `GIF for ${query}`, // Alt text for accessibility
-            mimeType: mimeType
-          };
-        }).filter(gif => gif.gifUrl && gif.mimeType); // Ensure we have a URL and mimeType
-
-        console.log(`[GiphySearch] Found ${results.length} GIF(s)/Image(s) for query "${query}".`);
-        return results;
-      } else {
-        console.log(`[GiphySearch] No Giphy results found for query "${query}".`);
-        return [];
-      }
-    } catch (error) {
-      console.error(`[GiphySearch] Exception during Giphy search for query "${query}":`, error);
-      return [];
-    }
-  }
 
   async monitorBotFollowingFeed() {
     console.log('[MonitorFollowingFeed] Starting to monitor feeds of followed users.');
