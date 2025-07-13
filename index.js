@@ -127,7 +127,7 @@ const utils = {
     }
   },
 
-  truncateResponse(text, maxLength = 300) {
+  truncateResponse(text, maxLength = 290) {
     if (!text || text.length <= maxLength) return text;
     
     const searchEnd = Math.min(maxLength, text.length);
