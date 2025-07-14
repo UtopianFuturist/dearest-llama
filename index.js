@@ -794,7 +794,7 @@ For managing our conversation, you can use a few commands: \`!STOP\` if you'd li
     try {
       await this.agent.login({
         identifier: this.config.BLUESKY_IDENTIFIER,
-        password: this.config.BLUESKY_APP_PASSWORD
+        password: this.config.BLUESKY_APP_PASSWORD,
       });
       console.log('Successfully authenticated with Bluesky');
     } catch (error) {
